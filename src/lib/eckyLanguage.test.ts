@@ -41,7 +41,7 @@ test('classifies ecky comment keyword number atom and string tokens', () => {
 });
 
 test('separates geometry ops, helpers, and user calls from plain symbols', () => {
-  assert.deepEqual(tokenize('(difference (cylinder (* 2 pin_d) 10 96) (knuckle :pin_d 6))'), [
+  assert.deepEqual(tokenize('(difference (cylinder (* 2 pin_d) 10) (knuckle :pin_d 6))'), [
     { text: '(', token: 'paren1' },
     { text: 'difference', token: 'op' },
     { text: '(', token: 'paren2' },
@@ -52,7 +52,6 @@ test('separates geometry ops, helpers, and user calls from plain symbols', () =>
     { text: 'pin_d', token: 'symbol' },
     { text: ')', token: 'paren3' },
     { text: '10', token: 'number' },
-    { text: '96', token: 'number' },
     { text: ')', token: 'paren2' },
     { text: '(', token: 'paren2' },
     { text: 'knuckle', token: 'call' },

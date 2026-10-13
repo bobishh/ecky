@@ -12,11 +12,10 @@
 ## Source Inputs
 - Native surface input: `src-tauri/tests/fixtures/cad/surface/canonical_cup.build123d.py`
 - Steel surface input: `src-tauri/tests/fixtures/cad/surface/frame_peg_attach.ecky`
-- Legacy reference input: `src-tauri/tests/fixtures/cad/reference/thomas_modular_ramp_legacy.py`
 
 ## Check
 - Lowering tests read authored `*.ecky` files only.
-- Translation tests read reference source only.
+- Thomas-only Python converter and reference parity harness retired on 2026-10-12; current `.ecky` fixtures remain compiler/backend inputs.
 - Steel front-end landed.
 - External legacy string bridge removed from `derive_controls`, `render_model`, `lower_to_build123d`.
 - Expanded-AST compiler now emits structural simple `define` / `let` / `if` cases.

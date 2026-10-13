@@ -2520,7 +2520,7 @@ const BUILTIN_STDLIB: &[BuiltinStdlibComponent] = &[
         one_liner: "Socket-head cap screw with parametric thread",
         params: &["d", "length", "pitch"],
         tags: &["fastener", "screw", "thread"],
-        source: "(define-component socket-head-cap-screw ((number d 6) (number length 24) (number pitch 1)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (union (difference (cylinder (* d 0.85) d 48) (cylinder (* d 0.32) (* d 0.45) 6)) (thread :radius minor-radius :pitch pitch :length length :depth thread-depth)))))",
+        source: "(define-component socket-head-cap-screw ((number d 6) (number length 24) (number pitch 1)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (union (difference (cylinder (* d 0.85) d) (extrude (regular-polygon 6 (* d 0.32)) (* d 0.45))) (thread :radius minor-radius :pitch pitch :length length :depth thread-depth)))))",
     },
     BuiltinStdlibComponent {
         name: "hex-nut",
@@ -2536,7 +2536,7 @@ const BUILTIN_STDLIB: &[BuiltinStdlibComponent] = &[
         one_liner: "Flat washer with parametric bore and outside diameter",
         params: &["inner-d", "outer-d", "thickness"],
         tags: &["fastener", "washer"],
-        source: "(define-component washer ((number inner-d 8.4) (number outer-d 16) (number thickness 1.6)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (/ outer-d 2) thickness 64) (cylinder (/ inner-d 2) (+ thickness 2) 64)))",
+        source: "(define-component washer ((number inner-d 8.4) (number outer-d 16) (number thickness 1.6)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (/ outer-d 2) thickness) (cylinder (/ inner-d 2) (+ thickness 2))))",
     },
     BuiltinStdlibComponent {
         name: "threaded-rod",
@@ -2552,7 +2552,7 @@ const BUILTIN_STDLIB: &[BuiltinStdlibComponent] = &[
         one_liner: "608/623/624-style radial bearing family",
         params: &["bore", "outer-d", "width"],
         tags: &["bearing", "mechanical", "608", "623", "624"],
-        source: "(define-component ball-bearing ((number bore 8) (number outer-d 22) (number width 7)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (/ outer-d 2) width 96) (cylinder (/ bore 2) (+ width 2) 64)))",
+        source: "(define-component ball-bearing ((number bore 8) (number outer-d 22) (number width 7)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (/ outer-d 2) width) (cylinder (/ bore 2) (+ width 2))))",
     },
     BuiltinStdlibComponent {
         name: "gt2-pulley",
@@ -2560,7 +2560,7 @@ const BUILTIN_STDLIB: &[BuiltinStdlibComponent] = &[
         one_liner: "GT2 timing pulley with teeth and bore controls",
         params: &["teeth", "bore", "width"],
         tags: &["pulley", "gt2", "motion"],
-        source: "(define-component gt2-pulley ((number teeth 20) (number bore 5) (number width 7)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (+ (* teeth 0.3183) 1) width 96) (cylinder (/ bore 2) (+ width 2) 64)))",
+        source: "(define-component gt2-pulley ((number teeth 20) (number bore 5) (number width 7)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (+ (* teeth 0.3183) 1) width) (cylinder (/ bore 2) (+ width 2))))",
     },
     BuiltinStdlibComponent {
         name: "standoff",
@@ -2568,7 +2568,7 @@ const BUILTIN_STDLIB: &[BuiltinStdlibComponent] = &[
         one_liner: "Hexagonal PCB standoff with through-hole",
         params: &["length", "outer-d", "hole-d"],
         tags: &["standoff", "pcb", "mounting"],
-        source: "(define-component standoff ((number length 12) (number outer-d 6) (number hole-d 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (extrude (regular-polygon 6 (/ outer-d 1.732)) length) (cylinder (/ hole-d 2) (+ length 2) 48)))",
+        source: "(define-component standoff ((number length 12) (number outer-d 6) (number hole-d 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (extrude (regular-polygon 6 (/ outer-d 1.732)) length) (cylinder (/ hole-d 2) (+ length 2))))",
     },
     BuiltinStdlibComponent {
         name: "heat-set-insert-pocket",
@@ -2576,7 +2576,7 @@ const BUILTIN_STDLIB: &[BuiltinStdlibComponent] = &[
         one_liner: "FDM heat-set insert cavity cutter with lead-in",
         params: &["bore", "depth", "lead-in"],
         tags: &["fdm", "insert", "pocket"],
-        source: "(define-component heat-set-insert-pocket ((number bore 4.6) (number depth 6) (number lead-in 1)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (union (cylinder (/ bore 2) depth 64) (cone (/ bore 2) (+ (/ bore 2) lead-in) lead-in 64)))",
+        source: "(define-component heat-set-insert-pocket ((number bore 4.6) (number depth 6) (number lead-in 1)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (union (cylinder (/ bore 2) depth) (cone (/ bore 2) (+ (/ bore 2) lead-in) lead-in)))",
     },
     BuiltinStdlibComponent {
         name: "corner-bracket",
@@ -2600,7 +2600,7 @@ const BUILTIN_STDLIB: &[BuiltinStdlibComponent] = &[
         one_liner: "Mounting plate with repeat-union hole grid",
         params: &["cols", "rows", "pitch", "hole-d", "thickness"],
         tags: &["plate", "mounting", "grid"],
-        source: "(define-component hole-plate ((number cols 3) (number rows 2) (number pitch 15) (number hole-d 4) (number thickness 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (box (* (+ cols 1) pitch) (* (+ rows 1) pitch) thickness) (repeat-union col cols (translate (* (+ col 1) pitch) (* (/ (+ rows 1) 2) pitch) -1 (cylinder (/ hole-d 2) (+ thickness 2) 48)))))",
+        source: "(define-component hole-plate ((number cols 3) (number rows 2) (number pitch 15) (number hole-d 4) (number thickness 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (box (* (+ cols 1) pitch) (* (+ rows 1) pitch) thickness) (repeat-union col cols (translate (* (+ col 1) pitch) (* (/ (+ rows 1) 2) pitch) -1 (cylinder (/ hole-d 2) (+ thickness 2))))))",
     },
 ];
 

@@ -5,12 +5,12 @@
   ;; Calibration carrier: visible thread coupon and repeated stop patterns around a focus target.
   (part calibration_helicoid_carrier
     (build
-      (shape carrier (cylinder 18 22 64))
+      (shape carrier (cylinder 18 22))
       (shape female_ridge
         (helical-ridge :radius 14 :pitch pitch :height 18 :base-width 1.4
           :crest-width 0.6 :depth 0.9 :female #t :clearance thread_clearance))
       (shape threaded_body (fuse carrier female_ridge))
-      (shape central_bore (cylinder 8 26 64))
+      (shape central_bore (cylinder 8 26))
       (shape cut_body (cut threaded_body central_bore))
       (shape calibration_window (translate 0 0 11 (box 18 10 8)))
       (shape window_common (common cut_body calibration_window))

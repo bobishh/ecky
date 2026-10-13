@@ -72,7 +72,7 @@ fn published_native_catalogue_examples_compile_and_plan() {
     );
     assert_eq!(
         plan(&format!(
-            "(model (part body (sweep (circle 2 16) {})))",
+            "(model (part body (sweep (circle 2) {})))",
             bezier.example
         )),
         vec![OcctOp::Circle, OcctOp::BezierPath, OcctOp::Sweep]
@@ -98,5 +98,25 @@ fn mcp_guidance_states_native_approximation_and_artifact_limits() {
         "bent round profiles",
     ] {
         assert!(guide.contains(required), "MCP guide missing `{required}`");
+    }
+}
+
+#[test]
+fn published_round_primitive_examples_use_dimensions_only() {
+    // Given the catalogue used by agents, when its round examples are authored,
+    // they compile and plan without a backend-dependent facet argument.
+    let reference = supported_surface_reference(GeometryBackend::EckyRust);
+    for entry in reference
+        .entries
+        .into_iter()
+        .filter(|entry| matches!(entry.name.as_str(), "cylinder" | "cone" | "circle" | "ring"))
+    {
+        let geometry = if matches!(entry.name.as_str(), "circle" | "ring") {
+            format!("(extrude {} 3mm)", entry.example)
+        } else {
+            entry.example
+        };
+        plan(&format!("(model (part body {geometry}))"));
+        assert!(!entry.signature.contains("segments"));
     }
 }

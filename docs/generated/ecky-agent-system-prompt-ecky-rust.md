@@ -87,7 +87,7 @@ instantiating part.
 (define-component vent
   ((number radius 4mm :label "Vent radius")
    (number depth 3mm :label "Cut depth"))
-  (cylinder radius depth 32))
+  (cylinder radius depth))
 
 (model
   (part cutter (vent :radius 5mm :depth 4mm)))
@@ -144,6 +144,7 @@ ranges or `latest`.
 
 ## Geometry rules
 
+- Round primitives accept dimensions only: `(cylinder radius height)`, `(cone bottom-radius top-radius height)`, `(circle radius)`, and `(ring outer-radius inner-radius)`. For hexagonal or other polygonal geometry use `regular-polygon` plus `extrude`; segment counts are not accepted by round primitives.
 - Start with primitives or closed 2D profiles. Use `extrude`, `revolve`, `sweep`, or `loft` to create solids.
 - `(hole :type solid|sketch|path|shape :goal "...")` is a typed planning
   placeholder. It deliberately fails lowering; never ship it as finished geometry.
@@ -223,7 +224,7 @@ a `[...]` note marks a backend restriction.
 ```scheme
 (params (number radius 20 :label "Radius" :min 5 :max 80))  ; Declares user-visible controls and default parameter values for the model.
 (verify (tag mesh-clean) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= 0)))  ; Declares one conditional runtime check with intent, severity, and typed evidence.
-(part body (cylinder radius height 48))  ; Declares a named renderable part from a solid, sketch, path, or compound expression.
+(part body (cylinder radius height))  ; Declares a named renderable part from a solid, sketch, path, or compound expression.
 (feature shell :role enclosure :params (width wall) (box width 40 wall))  ; Declares renderable geometry plus semantic role and primary control metadata.
 (meta :title "Bottle cage")  ; Stores literal model metadata in Core IR; `:title` labels the exported document and `units strict` enables dimensional checks.
 (tag-vertex datum :vertex "top" body)  ; Names a stable vertex selection for downstream operations and analysis.
@@ -327,10 +328,10 @@ a `[...]` note marks a backend restriction.
 (list? '())  ; Boolean predicate or comparator for conditionals and filtering.
 (box 40 20 10 :align '(min center min))  ; Creates an axis-aligned rectangular solid.
 (sphere 12)  ; Creates a sphere.
-(cylinder 8 30 48)  ; Creates a cylinder along local Z.
-(cone 12 6 30 48)  ; Creates a cone or tapered cylinder along local Z.
-(circle 20 64)  ; Creates a circular sketch/profile.
-(ring 20 10 64)  ; Creates an annular sketch aliasing to a profile with one outer and one hole circle.
+(cylinder 8 30)  ; Creates a circular cylinder along local Z. For a polygonal prism, extrude a regular-polygon.
+(cone 12 6 30)  ; Creates a circular cone or tapered cylinder along local Z.
+(circle 20)  ; Creates a circular sketch/profile.
+(ring 20 10)  ; Creates an annular sketch aliasing to a profile with one outer and one hole circle.
 (rectangle 40 20)  ; Creates a rectangular sketch/profile.
 (rounded-rect 40 20 3)  ; Creates a rectangle profile with rounded corners.
 (rounded-polygon points 2)  ; Creates a polygon profile with rounded corners.
@@ -347,7 +348,7 @@ a `[...]` note marks a backend restriction.
 (extrude image-path 3 :width 40 :depth 30 :fit contain :threshold 0.5 :foreground dark)  ; Extrudes a sketch, or traces raster foreground coverage into contours before the same extrusion. One raster dimension preserves source aspect ratio; two contain and center by default. `:fit stretch` explicitly fills a non-matching box.
 (revolve profile 360)  ; Revolves a sketch profile around an axis.
 (loft 30mm (circle 10mm) (rounded-rect 12mm 8mm 2mm))  ; Creates a solid through at least two sketch profiles across the given distance.
-(sweep (circle 2 16) rail)  ; Sweeps a profile along a path.
+(sweep (circle 2) rail)  ; Sweeps a profile along a path.
 (helical-ridge :radius 32 :pitch 5.25 :height 16.8 :base-width 1.45 :crest-width 0.55 :depth 1.5)  ; Creates a printable trapezoid ridge swept along a cylindrical helix.
 (thread :radius 8 :pitch 2 :length 16 :depth 1)  ; Parametric helical thread: a core cylinder plus a `helical-ridge` (male), or a ridge cutter (`:female`). `:iso "M4"` decodes a metric designation into pitch/radius.
 (tapped-hole :iso "M8" :length 14)  ; A tapped (internal female) thread cut as a positive cavity: a named-radius bore cylinder at the ISO minor diameter unioned with a helical relief ridge whose crest reaches the major diameter. `:iso "M8"` decodes a metric designation; an equal-nominal `thread` mates with it.
@@ -367,7 +368,7 @@ a `[...]` note marks a backend restriction.
 (offset-rounded 2 profile)  ; Offsets a sketch with rounded joins where supported.
 (fillet 2 :edges "x-min+z-max" body)  ; Rounds edges of a solid. `:edges` accepts coarse selectors like `top`, `left`, `axis-z`, `x-min`, or `x-min+z-max`; exact backends also accept `target-id:<id>` and `target-ids:<id>|<id>`.
 (chamfer 1 :edges "bottom" body)  ; Bevels edges of a solid. `:edges` accepts coarse selectors like `bottom`, `front`, `axis-z`, `y-max`, or `x-min+z-max`; exact backends also accept `target-id:<id>` and `target-ids:<id>|<id>`.
-(taper 30 0.7 0.7 (circle 12 32))  ; Extrudes a sketch while scaling the top section.
+(taper 30 0.7 0.7 (circle 12))  ; Extrudes a sketch while scaling the top section.
 (draft 2deg body)  ; Applies a draft angle to a solid.
 (twist 40 90 profile)  ; Extrudes a sketch while rotating sections along height.
 (union a b c)  ; Boolean union/fuse of solids.

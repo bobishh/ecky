@@ -107,18 +107,13 @@ const BOX_DIMS: &[Option<UnitDimension>] = &[
 const ONE_LENGTH_DIM: &[Option<UnitDimension>] = &[Some(UnitDimension::Length)];
 const TWO_LENGTH_DIMS: &[Option<UnitDimension>] =
     &[Some(UnitDimension::Length), Some(UnitDimension::Length)];
-const CYLINDER_DIMS: &[Option<UnitDimension>] = &[
-    Some(UnitDimension::Length),
-    Some(UnitDimension::Length),
-    Some(UnitDimension::Scalar),
-];
-const CIRCLE_DIMS: &[Option<UnitDimension>] =
-    &[Some(UnitDimension::Length), Some(UnitDimension::Scalar)];
+const CYLINDER_DIMS: &[Option<UnitDimension>] =
+    &[Some(UnitDimension::Length), Some(UnitDimension::Length)];
+const CIRCLE_DIMS: &[Option<UnitDimension>] = &[Some(UnitDimension::Length)];
 const CONE_DIMS: &[Option<UnitDimension>] = &[
     Some(UnitDimension::Length),
     Some(UnitDimension::Length),
     Some(UnitDimension::Length),
-    Some(UnitDimension::Scalar),
 ];
 const TORUS_DIMS: &[Option<UnitDimension>] =
     &[Some(UnitDimension::Length), Some(UnitDimension::Length)];
@@ -1168,26 +1163,16 @@ fn verify_primitive(
             verify_result(name, ExpectedKind::Solid, node, env)
         }
         CorePrimitive::Cylinder => {
-            verify_between(name, args, 2, 3, "radius, height, and optional segments")?;
-            verify_prefix(name, args, &[num("radius"), num("height")], env)?;
-            verify_optional(name, args, 2, num("segments"), env)?;
+            verify_exact(name, args, &[num("radius"), num("height")], env)?;
             verify_result(name, ExpectedKind::Solid, node, env)
         }
         CorePrimitive::Cone => {
-            verify_between(
-                name,
-                args,
-                3,
-                4,
-                "radius1, radius2, height, and optional segments",
-            )?;
-            verify_prefix(
+            verify_exact(
                 name,
                 args,
                 &[num("radius1"), num("radius2"), num("height")],
                 env,
             )?;
-            verify_optional(name, args, 3, num("segments"), env)?;
             verify_result(name, ExpectedKind::Solid, node, env)
         }
         CorePrimitive::Torus => {
@@ -1234,9 +1219,7 @@ fn verify_primitive(
             verify_result(name, ExpectedKind::Solid, node, env)
         }
         CorePrimitive::Circle => {
-            verify_between(name, args, 1, 2, "radius and optional segments")?;
-            verify_prefix(name, args, &[num("radius")], env)?;
-            verify_optional(name, args, 1, num("segments"), env)?;
+            verify_exact(name, args, &[num("radius")], env)?;
             verify_result(name, ExpectedKind::Sketch, node, env)
         }
         CorePrimitive::Rectangle => {

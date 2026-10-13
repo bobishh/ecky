@@ -245,7 +245,7 @@ fn ecky_backend_guide_text(
     (part washer\n\
     (extrude\n\
       (profile :outer (rounded-rect 70 42 5)\n\
-               :holes (circle 9 64))\n\
+               :holes (circle 9))\n\
       4)))\n\
     ```\n\n\
     4. Parameters, named stages, and cuts:\n\

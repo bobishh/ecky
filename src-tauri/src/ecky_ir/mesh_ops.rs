@@ -40,6 +40,7 @@ use super::sketch::{
     loft_between_sketches, loft_segments, loft_segments_transformed, offset_sketch,
     parse_profile_sketch, rounded_polygon_points, rounded_rectangle_points, sample_bezier_path,
     shell_from_contour_slices, sketch_contours_from_loops, SketchContours,
+    ROUND_PRIMITIVE_SEGMENTS,
 };
 
 #[derive(Clone, Debug)]
@@ -1020,8 +1021,8 @@ pub(super) fn build_wall_pattern_target(
             let shell_args = &shell_items[1..];
             let target = match shell_node {
                 "cylinder" => {
-                    if shell_args.len() < 2 || shell_args.len() > 3 {
-                        return Err(validation("`shell` cylinder expects radius, height, and optional segments."));
+                    if shell_args.len() != 2 {
+                        return Err(validation("`shell` cylinder expects radius and height."));
                     }
                     let outer_radius = eval_number(&shell_args[0], env)?;
                     let height = eval_number(&shell_args[1], env)?;
@@ -1032,9 +1033,9 @@ pub(super) fn build_wall_pattern_target(
                     }
                 }
                 "cone" => {
-                    if shell_args.len() < 3 || shell_args.len() > 4 {
+                    if shell_args.len() != 3 {
                         return Err(validation(
-                            "`shell` cone expects bottom radius, top radius, height, and optional segments.",
+                            "`shell` cone expects bottom radius, top radius, and height.",
                         ));
                     }
                     let outer_bottom_radius = eval_number(&shell_args[0], env)?;
@@ -1374,8 +1375,8 @@ pub(super) fn eval_shell_geometry(
 
     match node {
         "cylinder" => {
-            if args.len() < 2 || args.len() > 3 {
-                return Err(validation("`shell` cylinder expects radius, height, and optional segments."));
+            if args.len() != 2 {
+                return Err(validation("`shell` cylinder expects radius and height."));
             }
             let radius = eval_number(&args[0], env)?;
             let height = eval_number(&args[1], env)?;
@@ -1383,19 +1384,14 @@ pub(super) fn eval_shell_geometry(
             if inner_radius <= 0.0 {
                 return Err(validation("`shell` cylinder needs wall thickness smaller than radius."));
             }
-            let segments = args
-                .get(2)
-                .map(|arg| parse_count(arg, env, "shell cylinder segments", 12))
-                .transpose()?
-                .unwrap_or(48usize);
-            let outer = IrMesh::cylinder(radius, height, segments.max(12), None);
-            let inner = IrMesh::cylinder(inner_radius, height, segments.max(12), None);
+            let outer = IrMesh::cylinder(radius, height, ROUND_PRIMITIVE_SEGMENTS, None);
+            let inner = IrMesh::cylinder(inner_radius, height, ROUND_PRIMITIVE_SEGMENTS, None);
             Ok(outer.difference(&inner))
         }
         "cone" => {
-            if args.len() < 3 || args.len() > 4 {
+            if args.len() != 3 {
                 return Err(validation(
-                    "`shell` cone expects bottom radius, top radius, height, and optional segments.",
+                    "`shell` cone expects bottom radius, top radius, and height.",
                 ));
             }
             let bottom_radius = eval_number(&args[0], env)?;
@@ -1406,13 +1402,8 @@ pub(super) fn eval_shell_geometry(
             if inner_bottom <= 0.0 || inner_top <= 0.0 {
                 return Err(validation("`shell` cone needs wall thickness smaller than both radii."));
             }
-            let segments = args
-                .get(3)
-                .map(|arg| parse_count(arg, env, "shell cone segments", 12))
-                .transpose()?
-                .unwrap_or(48usize);
-            let outer = IrMesh::frustum(bottom_radius, top_radius, height, segments.max(12), None);
-            let inner = IrMesh::frustum(inner_bottom, inner_top, height, segments.max(12), None);
+            let outer = IrMesh::frustum(bottom_radius, top_radius, height, ROUND_PRIMITIVE_SEGMENTS, None);
+            let inner = IrMesh::frustum(inner_bottom, inner_top, height, ROUND_PRIMITIVE_SEGMENTS, None);
             Ok(outer.difference(&inner))
         }
         "sphere" => {
@@ -1723,44 +1714,34 @@ pub(super) fn eval_geometry_with_bindings(
         }
         "cylinder" => {
             let (positional, keywords) = split_call_args("cylinder", args, &["align"])?;
-            if positional.len() < 2 || positional.len() > 3 {
-                return Err(validation("`cylinder` expects radius, height, and optional segments."));
+            if positional.len() != 2 {
+                return Err(validation("`cylinder` expects radius and height."));
             }
             let radius = eval_number(positional[0], env)?;
             let height = eval_number(positional[1], env)?;
-            let segments = positional
-                .get(2)
-                .map(|arg| eval_number(arg, env))
-                .transpose()?
-                .unwrap_or(48.0) as usize;
             let align = parse_align_3d(
                 keywords.get("align").copied(),
                 Align3d::center_center_min(),
                 "cylinder",
             )?;
             Ok(Geometry::Mesh(align_mesh_to_origin(
-                IrMesh::cylinder(radius, height, segments.max(12), None),
+                IrMesh::cylinder(radius, height, ROUND_PRIMITIVE_SEGMENTS, None),
                 align,
             )))
         }
         "cone" => {
             let (positional, keywords) = split_call_args("cone", args, &["align"])?;
-            if positional.len() < 3 || positional.len() > 4 {
+            if positional.len() != 3 {
                 return Err(validation(
-                    "`cone` expects bottom radius, top radius, height, and optional segments.",
+                    "`cone` expects bottom radius, top radius, and height.",
                 ));
             }
             let bottom_radius = eval_number(positional[0], env)?;
             let top_radius = eval_number(positional[1], env)?;
             let height = eval_number(positional[2], env)?;
-            let segments = positional
-                .get(3)
-                .map(|arg| eval_number(arg, env))
-                .transpose()?
-                .unwrap_or(48.0) as usize;
             let align = parse_align_3d(keywords.get("align").copied(), Align3d::center_center_min(), "cone")?;
             Ok(Geometry::Mesh(align_mesh_to_origin(
-                IrMesh::frustum(bottom_radius, top_radius, height, segments.max(12), None),
+                IrMesh::frustum(bottom_radius, top_radius, height, ROUND_PRIMITIVE_SEGMENTS, None),
                 align,
             )))
         }
@@ -1791,17 +1772,12 @@ pub(super) fn eval_geometry_with_bindings(
             )))
         }
         "circle" => {
-            if args.is_empty() || args.len() > 2 {
-                return Err(validation("`circle` expects radius and optional segments."));
+            if args.len() != 1 {
+                return Err(validation("`circle` expects radius."));
             }
             let radius = eval_number(&args[0], env)?;
-            let segments = args
-                .get(1)
-                .map(|arg| eval_number(arg, env))
-                .transpose()?
-                .unwrap_or(48.0) as usize;
             Ok(Geometry::Sketch(IrSketch::polygon(
-                &circle_points(radius, segments.max(3)),
+                &circle_points(radius, ROUND_PRIMITIVE_SEGMENTS),
                 None,
             )))
         }

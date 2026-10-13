@@ -3,6 +3,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn round_primitive_fallbacks_reject_segment_counts() {
+        let env = std::collections::BTreeMap::new();
+        for (operation, geometry) in [
+            ("cylinder", "(cylinder 5 12 6)"),
+            ("cone", "(cone 8 4 12 6)"),
+            ("circle", "(extrude (circle 5 6) 12)"),
+        ] {
+            let expr = super::model::IrExpr::from_value(
+                &lexpr::from_str(geometry).expect("expression"),
+            )
+            .expect("typed expression");
+            let mesh_error = match super::mesh_ops::eval_geometry_expr(&expr, &env) {
+                Err(error) => error,
+                Ok(_) => panic!("mesh fallback must reject a segment count"),
+            };
+            assert!(mesh_error.to_string().contains(operation));
+
+            let source = format!("(model (part body {geometry}))");
+            let freecad_error = super::freecad_lowering::lower_to_freecad(&source)
+                .expect_err("FreeCAD fallback must reject a segment count");
+            assert!(freecad_error.to_string().contains(operation));
+        }
+    }
+
+    #[test]
     fn renders_typed_polyhedron_tetrahedron_as_manifold_stl() {
         let root = std::env::temp_dir().join(format!(
             "ecky-polyhedron-tetrahedron-{}",
@@ -356,7 +381,7 @@ mod tests {
                   (number width 120 :min 20 :max 300 :step 1 :label "Width")
                   (toggle vents #t :label "Vents")
                   (image litho "" :label "Litho"))
-                (part body (cylinder 20 80 32)))"#,
+                (part body (cylinder 20 80)))"#,
         )
         .expect("controls");
         assert_eq!(parsed.fields.len(), 3);
@@ -570,7 +595,7 @@ mod tests {
                       (scale 0.55 0.75 1 (rounded_rect 24 18 4 12)))))
                 (part tapered
                   (taper 32 0.45 0.7
-                    (circle 12 40)))
+                    (circle 12)))
                 (part twisted
                   (translate 50 0 0
                     (twist 36 120 10
@@ -598,7 +623,7 @@ mod tests {
                     (grid-array 2 3 14 10
                       (mirror x 0
                         (xor
-                          (translate 0 0 2 (cylinder 8 16 36))
+                          (translate 0 0 2 (cylinder 8 16))
                           (box 10 10 10)))))))"#,
             &DesignParams::new(),
             &resolver,
@@ -619,13 +644,13 @@ mod tests {
                 (part ring
                   (extrude
                     (difference
-                      (offset-rounded 4 (circle 10 32))
-                      (circle 10 32))
+                      (offset-rounded 4 (circle 10))
+                      (circle 10))
                     8))
                 (part shell-a
                   (translate 32 0 0
                     (shell 2
-                      (cylinder 14 28 48))))
+                      (cylinder 14 28))))
                 (part shell-b
                   (translate -32 0 0
                     (shell 1.5
@@ -651,7 +676,7 @@ mod tests {
                 (part ribs
                   (wall-pattern
                     (:mode ribs :depth 1.2 :uFreq 14 :softness 0.12)
-                    (shell 1.2 (cylinder 18 42 48))))
+                    (shell 1.2 (cylinder 18 42))))
                 (part rings
                   (translate 45 0 0
                     (wall-pattern
@@ -678,17 +703,17 @@ mod tests {
                   (translate 48 48 0
                     (wall-pattern
                       (:mode cellular :depth 0.7 :uFreq 7 :vFreq 7 :seed 12)
-                      (shell 1.2 (cylinder 15 34 40)))))
+                      (shell 1.2 (cylinder 15 34)))))
                 (part fbm
                   (translate -48 -48 0
                     (wall-pattern
                       (:mode fbm :depth 0.6 :uFreq 8 :vFreq 8 :seed 3)
-                      (shell 1.0 (cylinder 14 30 40)))))
+                      (shell 1.0 (cylinder 14 30)))))
                 (part gyroid
                   (translate 48 -48 0
                     (wall-pattern
                       (:mode gyroid :depth 0.6 :uFreq 4 :vFreq 5 :phase 0.2)
-                      (shell 1.0 (cylinder 14 30 40))))))"#,
+                      (shell 1.0 (cylinder 14 30))))))"#,
             &DesignParams::new(),
             &resolver,
         )
@@ -773,8 +798,8 @@ mod tests {
                     (shell 1.5
                       (taper 30 0.5 0.5
                         (profile
-                          (:outer (circle 15 32))
-                          (:holes (circle 8 16))))))))"#,
+                          (:outer (circle 15))
+                          (:holes (circle 8))))))))"#,
             &DesignParams::new(),
             &resolver,
         )
@@ -797,7 +822,7 @@ mod tests {
                       (twist 60 45 12
                         (profile
                           (:outer (rounded_rect 30 30 5 12))
-                          (:holes (circle 10 32))))))))"#,
+                          (:holes (circle 10))))))))"#,
             &DesignParams::new(),
             &resolver,
         )
@@ -817,22 +842,22 @@ mod tests {
                 (part schwarz-p
                   (wall-pattern
                     (:mode schwarz-p :depth 0.5 :uFreq 4 :vFreq 5 :softness 0.12)
-                    (shell 1.0 (cylinder 10 22 32))))
+                    (shell 1.0 (cylinder 10 22))))
                 (part diamond-field
                   (translate 28 0 0
                     (wall-pattern
                       (:mode diamond-field :depth 0.45 :uFreq 4 :vFreq 4 :phase 0.1)
-                      (shell 1.0 (cylinder 10 22 32)))))
+                      (shell 1.0 (cylinder 10 22)))))
                 (part neovius
                   (translate -28 0 0
                     (wall-pattern
                       (:mode neovius :depth 0.45 :uFreq 3 :vFreq 4 :bias 0.05)
-                      (shell 1.0 (cylinder 10 22 32)))))
+                      (shell 1.0 (cylinder 10 22)))))
                 (part attractor-field
                   (translate 0 28 0
                     (wall-pattern
                       (:mode attractor-field :depth 0.5 :uFreq 6 :vFreq 6 :seed 99)
-                      (shell 1.0 (cylinder 10 22 32))))))"#,
+                      (shell 1.0 (cylinder 10 22))))))"#,
             &DesignParams::new(),
             &resolver,
         )

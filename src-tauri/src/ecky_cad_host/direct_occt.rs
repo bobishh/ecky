@@ -6022,7 +6022,7 @@ mod tests {
 
     #[test]
     fn plans_cone_primitive_for_direct_occt() {
-        let program = compile("(model (part body (cone 10 4 30 32)))");
+        let program = compile("(model (part body (cone 10 4 30)))");
 
         let plan = plan_core_program(&program).expect("plan");
 
@@ -7956,7 +7956,7 @@ mod tests {
                             (let* ((col (- cell (* 4 (floor (/ cell 4)))))
                                    (x (* (- col 1.5) 14)))
                               (translate x 0 0
-                                (cylinder 2 8 24))))
+                                (cylinder 2 8))))
                           (range 0 cell-count))))))))
             "#,
         );
@@ -7987,7 +7987,7 @@ mod tests {
                       (map
                         (lambda (cell)
                           (translate cell 0 0
-                            (cylinder 2 8 24)))
+                            (cylinder 2 8)))
                         (range 0 count))))
                   (result
                     (difference panel cutters)))))

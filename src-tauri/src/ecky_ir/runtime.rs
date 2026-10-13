@@ -1939,7 +1939,7 @@ mod tests {
             (part body
               (build
                 (shape base (box 20 20 20))
-                (shape cut (translate 0 0 10 (cylinder 4 12 24)))
+                (shape cut (translate 0 0 10 (cylinder 4 12)))
                 (result (difference base cut)))))"#;
         let model = parse_model(source).expect("model");
 

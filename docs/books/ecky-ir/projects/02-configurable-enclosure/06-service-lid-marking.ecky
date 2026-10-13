@@ -6,7 +6,7 @@
   ;; A field-service lid: label and vent face.
   (part marked_service_lid
     (build
-      (shape vent_ring (ring 4 2.5 32))
+      (shape vent_ring (ring 4 2.5))
       (shape vent_profile (profile :outer (rectangle 24 12)))
       (shape lid
         (extrude

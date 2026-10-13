@@ -48,7 +48,7 @@ Ecky is a Scheme-inspired CAD DSL for describing 3D geometry and manufacturing o
     (number radius 20 :label "Radius" :min 5 :max 80)
     (number height 30 :label "Height" :min 10 :max 100))
 
-  (part body (cylinder radius height 48))
+  (part body (cylinder radius height))
   (part cap (sphere radius)))
 ```
 

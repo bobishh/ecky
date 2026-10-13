@@ -23,7 +23,7 @@ fn native_mesh_render_succeeds_from_worker_thread_with_small_stack() {
         (model
           (part body
             (let*
-              ((p1 (wall-pattern (:mode fbm :depth 0.6 :uFreq 8 :vFreq 8 :seed 3) (shell 1.0 (cylinder 14 30 40))))
+              ((p1 (wall-pattern (:mode fbm :depth 0.6 :uFreq 8 :vFreq 8 :seed 3) (shell 1.0 (cylinder 14 30))))
                (b1 (box 5 5 5))
                (b2 (box 4 4 4))
                (b3 (box 3 3 3))

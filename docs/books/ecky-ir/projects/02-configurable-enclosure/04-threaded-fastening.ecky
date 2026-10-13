@@ -5,7 +5,7 @@
     (number boss_height 12 :label "Boss height" :min 8 :max 20 :step 1))
   (part threaded_body
     (let* ((body (box case_w case_d 16))
-           (boss (translate 0 0 16 (cylinder 8 boss_height 64)))
+           (boss (translate 0 0 16 (cylinder 8 boss_height)))
            (tap (translate 0 0 15 (tapped-hole :iso "M6" :length (+ boss_height 2)))))
       (difference (union body boss) tap)))
   (part threaded_fastener

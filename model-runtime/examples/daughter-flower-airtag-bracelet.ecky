@@ -108,12 +108,11 @@
           (cone
             center-body-r
             (+ thread-outer-r 1mm)
-            body-seat-z
-            128))
+            body-seat-z))
 
         (shape petal-seed
           (scale petal-radial-scale petal-tangent-scale 1
-            (cylinder petal-radius petal-plate-thickness 72)))
+            (cylinder petal-radius petal-plate-thickness)))
 
         (shape petal-bases
           (radial-array 10 36deg petal-center-r petal-seed))
@@ -138,8 +137,7 @@
           (translate 0 0 -0.2mm
             (cylinder
               petal-fit-keepout-r
-              (+ body-seat-z 1.5mm)
-              128)))
+              (+ body-seat-z 1.5mm))))
 
         (shape petal-crowns-clear
           (difference petal-crowns petal-fit-keepout))
@@ -166,7 +164,7 @@
 
         (shape airtag-cavity
           (translate 0 0 bottom-thickness
-            (cylinder airtag-cavity-r airtag-cutter-height 128)))
+            (cylinder airtag-cavity-r airtag-cutter-height)))
 
         (shape female-thread-cutter
           (translate 0 0 thread-cutter-start-z
@@ -180,7 +178,7 @@
 
         (shape thread-bore
           (translate 0 0 thread-cutter-start-z
-            (cylinder thread-bore-r thread-cutter-height 128)))
+            (cylinder thread-bore-r thread-cutter-height)))
 
         (shape strap-slots
           (repeat-union i 2
@@ -240,7 +238,7 @@
 
         (shape lid-seat
           (translate 0 0 body-seat-z
-            (cylinder lid-outer-r lid-seat-height 128)))
+            (cylinder lid-outer-r lid-seat-height)))
 
         (shape dome-ellipsoid
           (translate 0 0 dome-center-z
@@ -249,7 +247,7 @@
 
         (shape dome-upper-clip
           (translate 0 0 dome-center-z
-            (cylinder (+ lid-outer-r 0.2mm) (+ dome-height 0.2mm) 128)))
+            (cylinder (+ lid-outer-r 0.2mm) (+ dome-height 0.2mm))))
 
         (shape flower-center-dome
           (intersection dome-ellipsoid dome-upper-clip))
@@ -302,18 +300,18 @@
               (+ adjustment-hole-start-x (* i adjustment-hole-pitch))
               0
               hole-cutter-start-z
-              (cylinder adjustment-hole-r hole-cutter-height 64))))
+              (cylinder adjustment-hole-r hole-cutter-height))))
 
         (shape strap-with-holes
           (difference strap-blank adjustment-holes))
 
         (shape snap-neck
           (translate snap-x 0 0
-            (cylinder snap-neck-r snap-neck-height 64)))
+            (cylinder snap-neck-r snap-neck-height)))
 
         (shape snap-head
           (translate snap-x 0 (- snap-neck-height 0.2mm)
-            (cone snap-head-r snap-tip-r snap-head-height 64)))
+            (cone snap-head-r snap-tip-r snap-head-height)))
 
         (result
           (union strap-with-holes snap-neck snap-head)))))

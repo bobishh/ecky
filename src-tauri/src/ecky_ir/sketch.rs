@@ -297,13 +297,14 @@ pub(super) fn eval_sketch_primitive_points(
             let args = &items[1..];
             match node {
                 "circle" => {
+                    if args.len() != 1 {
+                        return Err(validation("`circle` expects radius."));
+                    }
                     let radius = eval_number(&args[0], env)?;
-                    let segments = args
-                        .get(1)
-                        .map(|arg| eval_number(arg, env))
-                        .transpose()?
-                        .unwrap_or(48.0) as usize;
-                    return normalize_loop_points(&circle_points(radius, segments.max(3)), context);
+                    return normalize_loop_points(
+                        &circle_points(radius, ROUND_PRIMITIVE_SEGMENTS),
+                        context,
+                    );
                 }
                 "polygon" => {
                     return normalize_loop_points(&eval_points(&args[0], env)?, context);
@@ -493,6 +494,9 @@ pub(super) fn normalize2(point: [f64; 2]) -> [f64; 2] {
         [point[0] / length, point[1] / length]
     }
 }
+
+// Mesh fallback resolution is an implementation detail, not authored geometry.
+pub(super) const ROUND_PRIMITIVE_SEGMENTS: usize = 48;
 
 pub(super) fn circle_points(radius: f64, segments: usize) -> Vec<[f64; 2]> {
     let mut points = Vec::with_capacity(segments);

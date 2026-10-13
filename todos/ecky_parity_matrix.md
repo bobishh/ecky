@@ -7,12 +7,6 @@
 | Compound boolean | `src-tauri/tests/fixtures/cad/surface/compound_boolean.ecky` | `src-tauri/tests/fixtures/cad/surface/compound_boolean.build123d.py` | `python3 server/check_compound_boolean.py` |
 | Segment clip | `src-tauri/tests/fixtures/cad/surface/segment_clip.ecky` | `src-tauri/tests/fixtures/cad/surface/segment_clip.build123d.py` | `python3 server/check_segment_clip.py` |
 | Repeat segments | `src-tauri/tests/fixtures/cad/surface/repeat_segments.ecky` | `src-tauri/tests/fixtures/cad/surface/repeat_segments.build123d.py` | `python3 server/check_repeat_segments.py` |
-| Thomas body phase | `src-tauri/tests/fixtures/cad/surface/thomas_modular_ramp_body.ecky` | `src-tauri/tests/fixtures/cad/reference/thomas_modular_ramp_legacy.py` | `python3 server/check_thomas_body_parity.py` |
-| Thomas grooves phase | `src-tauri/tests/fixtures/cad/surface/thomas_modular_ramp_grooves.ecky` | `src-tauri/tests/fixtures/cad/reference/thomas_modular_ramp_legacy.py` | `python3 server/check_thomas_grooves_parity.py` |
-| Thomas connectors phase | `src-tauri/tests/fixtures/cad/surface/thomas_modular_ramp.ecky` | `src-tauri/tests/fixtures/cad/reference/thomas_modular_ramp_legacy.py` | `python3 server/check_thomas_connectors_parity.py` |
-| Thomas teeth phase | `src-tauri/tests/fixtures/cad/surface/thomas_modular_ramp.ecky` | `src-tauri/tests/fixtures/cad/reference/thomas_modular_ramp_legacy.py` | `python3 server/check_thomas_teeth_parity.py` |
-| Thomas segments phase | `src-tauri/tests/fixtures/cad/surface/thomas_modular_ramp.ecky` | `src-tauri/tests/fixtures/cad/reference/thomas_modular_ramp_legacy.py` | `python3 server/check_thomas_segments_parity.py` |
-| Thomas ramp | `src-tauri/tests/fixtures/cad/surface/thomas_modular_ramp.ecky` | `src-tauri/tests/fixtures/cad/reference/thomas_modular_ramp_legacy.py` | `python3 server/check_thomas_ramp_parity.py` |
 
 ## Authored Corpus Smoke
 
@@ -24,6 +18,7 @@
 | Reduce compound boolean | `src-tauri/tests/fixtures/cad/surface/reduce_compound_boolean.ecky` | lower-only generated build123d | `src-tauri/target/debug/lower_ecky_ir_to_build123d src-tauri/tests/fixtures/cad/surface/reduce_compound_boolean.ecky` |
 
 ## Boundary
+- Thomas Python conversion/parity prototype retired on 2026-10-12. Current Thomas `.ecky` fixtures remain covered by Rust compiler/backend tests.
 - One fixture root. `src-tauri/tests/fixtures/cad`.
 - No direct parity read from `model-runtime/fixtures`.
 - Steel front-end landed.
@@ -34,10 +29,5 @@
   - compound vs boolean
   - segment clip
   - repeat segments
-- Thomas phase 1 green:
-  - body-only curve/profile
-  - exact bounds
-  - exact volume
 - Authored corpus rows stay lower-only until Python oracle fixtures exist. No new `server/check_*.py` rows needed yet.
 - Snapshot `.eckyir` parity inputs removed.
-- Next tranche closes groove exactness before connector/teeth/segments/full.

@@ -44,7 +44,7 @@ fn parameter_reference_in_let_star_rhs_reaches_the_kernel_as_a_number() {
                 (number legHeight 40 :min 1 :max 100))
               (part leg
                 (let* ((resolvedHeight legHeight))
-                  (cylinder 5 resolvedHeight 24))))
+                  (cylinder 5 resolvedHeight))))
             "#,
         )
         .expect("source compiles");

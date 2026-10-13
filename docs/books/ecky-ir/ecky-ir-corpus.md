@@ -86,7 +86,7 @@ Use `profile` when the shape has holes.
     (extrude
       (profile
         :outer (rounded-rect 70 42 5)
-        :holes (circle 9 64))
+        :holes (circle 9))
       4)))
 ```
 
@@ -117,7 +117,7 @@ Use `offset` to grow or shrink a 2D outline by a fixed distance before extruding
 ```scheme
 (model
   (part oval_plate
-    (extrude (scale 1.6 1 1 (circle 10 48)) 5)))
+    (extrude (scale 1.6 1 1 (circle 10)) 5)))
 ```
 
 ![Rendered output for Sketch to Solid: Plate from a Profile, example 4](assets/02-sketch-extrude-04.png)
@@ -305,7 +305,7 @@ When you do write one, the suffix is a **conversion into that base unit** — no
 
 So `(box 12mm 1cm 1in)` is exactly `(box 12 10 25.4)`, and `(rotate 1.5708rad 0 0 ...)` is the same 90-degree turn as `(rotate 90 0 0 ...)`. Suffixes exist so you can author in the unit a spec is written in and let Ecky normalize.
 
-**Some numbers stay unitless on purpose.** Counts (`(repeat 5 ...)`), ratios, segment counts on a cylinder (`(cylinder 6 12 96)` — that `96` is facets, not millimeters), and indices are pure numbers. A suffix on them is meaningless; leave them bare.
+**Some numbers stay unitless on purpose.** Counts (`(repeat 5 ...)`), ratios, segment counts on a cylinder (`(cylinder 6 12)` — that `96` is facets, not millimeters), and indices are pure numbers. A suffix on them is meaningless; leave them bare.
 
 **Unit suffixes convert values; they do not type-check dimensions.** `45deg` in a width slot becomes the number `45`, then the box reads it as 45 mm. Use length suffixes for lengths, angle suffixes for angles, and bare values for counts and ratios.
 
@@ -489,7 +489,7 @@ Use `sweep` when a profile follows a path.
 (model
   (part handle
     (sweep
-      (circle 2.2 32)
+      (circle 2.2)
       (bezier-path
         ((-24 0 0) (-10 18 6) (10 18 6) (24 0 0))))))
 ```
@@ -504,8 +504,8 @@ Use `loft` when one profile needs to become another profile across height or dis
 (model
   (part nozzle
     (loft 24
-      (circle 14 32)
-      (circle 5 32))))
+      (circle 14)
+      (circle 5))))
 ```
 
 ![Rendered output for Paths and Surfaces: Revolve and Sweep, example 3](assets/06-paths-and-surfaces-03.png)
@@ -675,8 +675,8 @@ This component defines a bored mounting standoff and carries its minimum-wall ch
    (number bore 3.2))
   (verify (tag bore_open) (metric min_wall_thickness "body") (expect (>= value 1.2)))
   (difference
-    (cylinder 6 height 96)
-    (cylinder bore (+ height 2) 96)))
+    (cylinder 6 height)
+    (cylinder bore (+ height 2))))
 
 (model
   (part front_left (standoff :height 16))
@@ -828,7 +828,7 @@ The important line is the result expression:
                  (jy (+ y (* 2.4 (hash-signed (+ col 19.19) (+ row 7.73) 54))))
                  (r (+ 2.2 (* 1.1 (voronoi2 (/ jx 14.0) (/ jy 12.0) 23)))))
             (translate jx jy 0
-              (cylinder r 8 24))))
+              (cylinder r 8))))
         (range 0 cell-count)))))
 ```
 
@@ -895,7 +895,7 @@ The entrances are generated from one parametric chamber count:
                (z (+ wall (* (+ row 0.55) floor_gap))))
           (translate x (* -0.5 hotel_d) z
             (rotate 90 0 0
-              (cylinder entrance_r (+ hotel_d 6) 24)))))
+              (cylinder entrance_r (+ hotel_d 6))))))
       (range 0 (* chamber_cols 3)))))
 ```
 
@@ -1467,8 +1467,8 @@ A component is reusable geometry with its own parameters. Declare it before `mod
   ((number pin_d 8 :label "Pin diameter" :min 4 :max 12 :step 0.5)
    (number clearance 0.3))
   (difference
-    (cylinder (* 2 pin_d) 10 96)
-    (cylinder (+ pin_d clearance) 12 96)))
+    (cylinder (* 2 pin_d) 10)
+    (cylinder (+ pin_d clearance) 12)))
 ```
 
 - positional 1: component name symbol
@@ -2116,21 +2116,21 @@ The sphere is centered on all three axes by default. Radius is half the diameter
 
 ### `cylinder`
 
-`(cylinder radius height [segments] [:align '(x y z)])` → Solid.
+`(cylinder radius height [:align '(x y z)])` → Solid.
 
 The axis is Z. X and Y are centered; the base starts at Z = 0. The first argument is radius, not diameter. `(cylinder 3 8)` is 6 mm across and 8 mm tall.
 
-The optional segment count controls polygonal approximations on paths that use them. Native OCCT keeps the cylinder analytic.
+The cross-section is circular on every backend. For a hexagonal prism, use `(extrude (regular-polygon 6 radius) height)`. Round primitives do not accept a segment count; tessellation belongs to rendering.
 
 ### `cone`
 
-`(cone radius1 radius2 height [segments] [:align '(x y z)])` → Solid.
+`(cone radius1 radius2 height [:align '(x y z)])` → Solid.
 
 `radius1` is the bottom radius and `radius2` the top radius. The axis is Z, with its base at 0 by default. Set one radius to zero for a pointed cone; keep both positive for a truncated cone.
 
 ### `circle`
 
-`(circle radius [segments])` → Sketch.
+`(circle radius)` → Sketch.
 
 A circular profile in XY, centered at the origin. It has no height until used by an operation such as `(extrude (circle 8) 4)`.
 
@@ -2208,7 +2208,7 @@ Read triangles from an STL file. Importing a mesh does not recover its original 
 
 ### `ring`
 
-`(ring outer-radius inner-radius [segments])` → Sketch.
+`(ring outer-radius inner-radius)` → Sketch.
 
 A centered circular profile with a circular hole. The inner radius must be smaller than the outer radius. `(extrude (ring 12 4) 2)` makes the same washer cross-section as the `profile` example above.
 
@@ -2833,18 +2833,18 @@ Additional callable forms and helpers. Entries already explained in the precedin
 | `cell-distance2` | numericHelper | `(cell-distance2 x y seed)` | freecad, legacy-build123d, mesh/native | Distance-like deterministic value to nearest jittered cellular site. | `(cell-distance2 x y seed)` |
 | `cellular` | wallPatternMode | `cellular` | mesh/native | Seeded cellular/Voronoi-like displacement field. | `(wall-pattern (:mode cellular :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
 | `chamfer` | cadOp | `(chamfer distance [:edges selector] solid)` | freecad, legacy-build123d, mesh/native | Bevels edges of a solid. \`:edges\` accepts coarse selectors like \`bottom\`, \`front\`, \`axis-z\`, \`y-max\`, or \`x-min+z-max\`; exact backends also accept \`target-id:<id>\` and \`target-ids:<id>\|<id>\`. | `(chamfer 1 :edges "bottom" body)` |
-| `circle` | cadOp | `(circle radius segments)` | freecad, legacy-build123d, mesh/native | Creates a circular sketch/profile. | `(circle 20 64)` |
+| `circle` | cadOp | `(circle radius)` | freecad, legacy-build123d, mesh/native | Creates a circular sketch/profile. | `(circle 20)` |
 | `clamp` | numericHelper | `(clamp value min max)` | freecad, legacy-build123d, mesh/native | Constrains value to a numeric interval. | `(clamp depth 0 3)` |
 | `clip-box` | cadOp | `(clip-box geometry :x '(min max) :y '(min max) :z '(min max))` | freecad, legacy-build123d, mesh/native | Clips geometry by an axis-aligned box; all three ranges are required. | `(clip-box body :x '(0 100) :y '(-30 30) :z '(0 40))` |
 | `clip-plane` | cadOp | `(clip-plane geometry :origin '(x y z) :normal '(x y z) [:keep "positive"\|"negative"])` | freecad, legacy-build123d, mesh/native | Clips geometry against an oriented plane. \`:keep\` is text; quote it to avoid unresolved local symbols. | `(clip-plane body :origin '(0 0 10) :normal '(0 0 1) :keep "positive")` |
 | `common` | cadOp | `(common solid...)` | freecad, legacy-build123d, mesh/native | Keeps shared volume of solids. | `(common a b)` |
 | `compound` | cadOp | `(compound geometry...)` | freecad, legacy-build123d, mesh/native | Groups geometry without fusing into one solid. | `(compound body bolts)` |
 | `concat-map` | expressionForm | `(concat-map fn list)` | freecad, legacy-build123d, mesh/native | Maps each item to a list and concatenates the results. | `(flat-map (lambda (i) (list i (- i))) (range 3))` |
-| `cone` | cadOp | `(cone r1 r2 height segments)` | freecad, legacy-build123d, mesh/native | Creates a cone or tapered cylinder along local Z. | `(cone 12 6 30 48)` |
+| `cone` | cadOp | `(cone r1 r2 height)` | freecad, legacy-build123d, mesh/native | Creates a circular cone or tapered cylinder along local Z. | `(cone 12 6 30)` |
 | `cos` | numericHelper | `(cos radians)` | freecad, legacy-build123d, mesh/native | Trigonometric helper using radians. | `(cos (deg->rad 45))` |
 | `cube` | numericHelper | `(cube value)` | freecad, legacy-build123d, mesh/native | Raises a number to a small fixed power. | `(cube radius)` |
 | `cut` | cadOp | `(cut base cutter...)` | freecad, legacy-build123d, mesh/native | Subtracts cutter solids from a base solid. | `(cut body hole)` |
-| `cylinder` | cadOp | `(cylinder radius height segments)` | freecad, legacy-build123d, mesh/native | Creates a cylinder along local Z. | `(cylinder 8 30 48)` |
+| `cylinder` | cadOp | `(cylinder radius height)` | freecad, legacy-build123d, mesh/native | Creates a circular cylinder along local Z. For a polygonal prism, extrude a regular-polygon. | `(cylinder 8 30)` |
 | `define` | expressionForm | `(define name value)` | freecad, legacy-build123d, mesh/native | Defines a helper value or function in expression scope. | `(define wall 2)` |
 | `define-component` | componentPlacementForm | `(define-component id (signature...) [(ports ...)] [(verify ...)] geometry)` | freecad, legacy-build123d, mesh/native | Declares closed reusable local geometry and optional ports. | `(define-component latch () (ports (port mount :type "mount.v1" :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1)))) (box 20 4 2))` |
 | `deg` | numericHelper | `(deg radians)` | freecad, legacy-build123d, mesh/native | Converts radians to degrees. | `(deg angle-rad)` |
@@ -2919,7 +2919,7 @@ Additional callable forms and helpers. Entries already explained in the precedin
 | `or` | booleanHelper | `(or value...)` | freecad, legacy-build123d, mesh/native | Boolean predicate or comparator for conditionals and filtering. | `(or true false)` |
 | `organic-loop` | pointListHelper | `(organic-loop count radius amount seed)` | freecad, legacy-build123d, mesh/native | Builds a deterministic irregular loop around a radius. | `(organic-loop 32 30 4 seed)` |
 | `params` | modelClause | `(params control...)` | freecad, legacy-build123d, mesh/native | Declares user-visible controls and default parameter values for the model. | `(params (number radius 20 :label "Radius" :min 5 :max 80))` |
-| `part` | modelClause | `(part id geometry)` | freecad, legacy-build123d, mesh/native | Declares a named renderable part from a solid, sketch, path, or compound expression. | `(part body (cylinder radius height 48))` |
+| `part` | modelClause | `(part id geometry)` | freecad, legacy-build123d, mesh/native | Declares a named renderable part from a solid, sketch, path, or compound expression. | `(part body (cylinder radius height))` |
 | `path` | cadOp | `(path segment...)` | freecad, legacy-build123d, mesh/native | Builds a path from path segments. | `(path (polyline points))` |
 | `path-frame` | cadOp | `(path-frame path :at start\|end\|t :up '(x y z))` | freecad, legacy-build123d, mesh/native | Computes a local frame along a path parameter. | `(path-frame rail :at end :up '(0 0 1))` |
 | `pi` | numericConstant | `pi` | freecad, legacy-build123d, mesh/native | Built-in circle constant. | `(* radius pi)` |
@@ -2953,7 +2953,7 @@ Additional callable forms and helpers. Entries already explained in the precedin
 | `revolve` | cadOp | `(revolve sketch angle)` | freecad, legacy-build123d, mesh/native | Revolves a sketch profile around an axis. | `(revolve profile 360)` |
 | `rib` | cadOp | `(rib solid profile path)` | freecad, legacy-build123d, mesh/native | Adds material: sweeps \`profile\` along \`path\` and unions it onto \`solid\`. | `(rib (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))` |
 | `ribs` | wallPatternMode | `ribs` | mesh/native | Straight rib pattern along the shell parameter direction. | `(wall-pattern (:mode ribs :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
-| `ring` | cadOp | `(ring outer-radius inner-radius segments)` | freecad, legacy-build123d, mesh/native | Creates an annular sketch aliasing to a profile with one outer and one hole circle. | `(ring 20 10 64)` |
+| `ring` | cadOp | `(ring outer-radius inner-radius)` | freecad, legacy-build123d, mesh/native | Creates an annular sketch aliasing to a profile with one outer and one hole circle. | `(ring 20 10)` |
 | `rings` | wallPatternMode | `rings` | mesh/native | Ring bands around the shell parameter direction. | `(wall-pattern (:mode rings :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)` |
 | `rossler-points` | pointListHelper | `(rossler-points count dt scale)` | freecad, legacy-build123d, mesh/native | Samples a deterministic Rossler attractor projection. | `(rossler-points 80 0.03 6)` |
 | `rotate` | cadOp | `(rotate x-deg y-deg z-deg geometry)` | freecad, legacy-build123d, mesh/native | Rotates geometry in degrees around local axes. | `(rotate 0 0 45 body)` |
@@ -2978,13 +2978,13 @@ Additional callable forms and helpers. Entries already explained in the precedin
 | `superellipse-point` | pointListHelper | `(superellipse-point angle rx ry exponent)` | freecad, legacy-build123d, mesh/native | Samples one point from a superellipse. | `(superellipse-point (deg->rad 45) 30 20 4)` |
 | `surface-trim` | cadOp | `(surface-trim ...)` | mesh/native | Supported \`.ecky\` surface entry. Read backend guide and validation errors for exact constraints. | `(surface-trim ...)` |
 | `svg` | cadOp | `(svg path-or-data)` | freecad, legacy-build123d, mesh/native | Imports SVG profile/path data where backend lowering supports it. | `(svg iconData)` |
-| `sweep` | cadOp | `(sweep profile path)` | freecad, legacy-build123d, mesh/native | Sweeps a profile along a path. | `(sweep (circle 2 16) rail)` |
+| `sweep` | cadOp | `(sweep profile path)` | freecad, legacy-build123d, mesh/native | Sweeps a profile along a path. | `(sweep (circle 2) rail)` |
 | `tag-edge` | modelClause | `(tag-edge id :edge or :edges selector target)` | freecad, legacy-build123d, mesh/native | Names a stable edge selection for downstream operations and analysis. | `(tag-edge rim :edges "top" body)` |
 | `tag-edges` | modelClause | `(tag-edges id :edge or :edges selector target)` | freecad, legacy-build123d, mesh/native | Names a stable edge selection for downstream operations and analysis. | `(tag-edges rim :edges "top" body)` |
 | `tag-face` | modelClause | `(tag-face id :face or :faces selector target)` | freecad, legacy-build123d, mesh/native | Names a stable face selection for downstream operations and analysis. | `(tag-face mounting :faces "bottom" body)` |
 | `tag-vertex` | modelClause | `(tag-vertex id :vertex selector target)` | freecad, legacy-build123d, mesh/native | Names a stable vertex selection for downstream operations and analysis. | `(tag-vertex datum :vertex "top" body)` |
 | `tan` | numericHelper | `(tan radians)` | freecad, legacy-build123d, mesh/native | Trigonometric helper using radians. | `(tan (deg->rad 45))` |
-| `taper` | cadOp | `(taper height scale sketch) or (taper height scale-x scale-y sketch)` | freecad, legacy-build123d, mesh/native | Extrudes a sketch while scaling the top section. | `(taper 30 0.7 0.7 (circle 12 32))` |
+| `taper` | cadOp | `(taper height scale sketch) or (taper height scale-x scale-y sketch)` | freecad, legacy-build123d, mesh/native | Extrudes a sketch while scaling the top section. | `(taper 30 0.7 0.7 (circle 12))` |
 | `tapped-hole` | cadOp | `(tapped-hole :iso "M8" :length len [:radius r] [:pitch p] [:depth d] [:base-width w] [:crest-width w] [:lefthand #t])` | freecad, legacy-build123d, mesh/native | A tapped (internal female) thread cut as a positive cavity: a named-radius bore cylinder at the ISO minor diameter unioned with a helical relief ridge whose crest reaches the major diameter. \`:iso "M8"\` decodes a metric designation; an equal-nominal \`thread\` mates with it. | `(tapped-hole :iso "M8" :length 14)` |
 | `tau` | numericConstant | `tau` | freecad, legacy-build123d, mesh/native | Built-in circle constant. | `(* radius tau)` |
 | `text` | cadOp | `(text value size [:font selector])` | freecad, legacy-build123d, mesh/native | Creates a text profile. \`:font\` selects the face for this call before downstream extrusion. | `(extrude (text "A" 12 :font "Arial") 2)` |
@@ -3083,7 +3083,7 @@ instantiating part.
 (define-component vent
   ((number radius 4mm :label "Vent radius")
    (number depth 3mm :label "Cut depth"))
-  (cylinder radius depth 32))
+  (cylinder radius depth))
 
 (model
   (part cutter (vent :radius 5mm :depth 4mm)))
@@ -3140,6 +3140,7 @@ ranges or `latest`.
 
 ## Geometry rules
 
+- Round primitives accept dimensions only: `(cylinder radius height)`, `(cone bottom-radius top-radius height)`, `(circle radius)`, and `(ring outer-radius inner-radius)`. For hexagonal or other polygonal geometry use `regular-polygon` plus `extrude`; segment counts are not accepted by round primitives.
 - Start with primitives or closed 2D profiles. Use `extrude`, `revolve`, `sweep`, or `loft` to create solids.
 - `(hole :type solid|sketch|path|shape :goal "...")` is a typed planning
   placeholder. It deliberately fails lowering; never ship it as finished geometry.

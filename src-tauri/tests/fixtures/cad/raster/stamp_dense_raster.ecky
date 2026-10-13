@@ -151,10 +151,10 @@
       (build
         (shape tapered_grip
           (chamfer grip_base_chamfer :edges "bottom"
-            (cone grip_bottom_r grip_top_r grip_h 64)))
+            (cone grip_bottom_r grip_top_r grip_h)))
         (shape male_thread_core
           (translate 0 0 thread_origin_z
-            (cylinder thread_core_r thread_total_l 64)))
+            (cylinder thread_core_r thread_total_l)))
         (shape male_thread_ridge
           (translate 0 0 thread_origin_z
             (helical-ridge
@@ -168,7 +168,7 @@
           (union male_thread_core male_thread_ridge))
         (shape male_thread_envelope
           (translate 0 0 thread_origin_z
-            (cylinder thread_major_r thread_total_l 96)))
+            (cylinder thread_major_r thread_total_l)))
         (shape male_thread
           (intersection male_thread_unclipped male_thread_envelope))
         (shape finished

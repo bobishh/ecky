@@ -2383,9 +2383,9 @@ mod tests {
                 (difference
                   (difference
                     (difference
-                      (union (box 40 40 12) (cylinder 22 12 96))
-                      (cylinder 15 14 96))
-                    (translate 8 0 -1 (cylinder 2 14 48)))
+                      (union (box 40 40 12) (cylinder 22 12))
+                      (cylinder 15 14))
+                    (translate 8 0 -1 (cylinder 2 14)))
                   (thread :radius 16 :pitch 1.5 :length 6 :depth 0.6))))
             "#,
         );
@@ -2407,9 +2407,9 @@ mod tests {
                   (difference
                     (difference
                       (difference
-                        (union (box 40 40 12) (cylinder 22 12 96))
-                        (cylinder 15 14 96))
-                      (translate 8 0 -1 (cylinder 2 14 48)))
+                        (union (box 40 40 12) (cylinder 22 12))
+                        (cylinder 15 14))
+                      (translate 8 0 -1 (cylinder 2 14)))
                     (thread :radius 16 :pitch 1.5 :length 6 :depth 0.6)))))
             "#,
         );
@@ -3965,10 +3965,10 @@ mod tests {
                 (build
                   (shape positive
                     (union
-                      (cylinder 25.7 16.5 128)
+                      (cylinder 25.7 16.5)
                       (translate 0 0 13.5
                         (chamfer 0.6 :edges "top"
-                          (cylinder 30.7 3 128)))))
+                          (cylinder 30.7 3)))))
                   (shape cutter
                     (translate 0 0 -0.3
                       (tapped-hole
@@ -4076,7 +4076,7 @@ mod tests {
                        (z_center (/ part_width 2)))
                   (build
                     (shape collar_shell
-                      (cylinder outer_r part_width 64 :align '(center center min)))
+                      (cylinder outer_r part_width :align '(center center min)))
                     (shape clamping_ear_left
                       (translate (- 0 outer_r (/ ear_l 2)) 0 0
                         (box ear_l ear_w part_width :align '(center center min))))
@@ -4088,23 +4088,23 @@ mod tests {
                         (box (* boss_r 1.6) boss_offset part_width :align '(center center min))))
                     (shape wire_boss
                       (translate 0 (+ outer_r boss_offset) 0
-                        (cylinder boss_r part_width 48 :align '(center center min))))
+                        (cylinder boss_r part_width :align '(center center min))))
                     (shape full_blank
                       (union collar_shell clamping_ear_left clamping_ear_right neck_bridge wire_boss))
                     (shape tube_void
                       (translate 0 0 -1
-                        (cylinder inner_r (+ part_width 2) 64 :align '(center center min))))
+                        (cylinder inner_r (+ part_width 2) :align '(center center min))))
                     (shape bolt_void_L
                       (translate (- 0 outer_r (/ ear_l 2)) 0 z_center
                         (rotate 90 0 0
-                          (cylinder (/ hardware_m4_d 2) (+ ear_w 4) 32 :align '(center center center)))))
+                          (cylinder (/ hardware_m4_d 2) (+ ear_w 4) :align '(center center center)))))
                     (shape bolt_void_R
                       (translate (+ outer_r (/ ear_l 2)) 0 z_center
                         (rotate 90 0 0
-                          (cylinder (/ hardware_m4_d 2) (+ ear_w 4) 32 :align '(center center center)))))
+                          (cylinder (/ hardware_m4_d 2) (+ ear_w 4) :align '(center center center)))))
                     (shape honjo_stay_void
                       (translate 0 (+ outer_r boss_offset) -1
-                        (cylinder (/ honjo_wire_d 2) (+ part_width 2) 48 :align '(center center min))))
+                        (cylinder (/ honjo_wire_d 2) (+ part_width 2) :align '(center center min))))
                     (shape nut_trap_L
                       (translate (- 0 outer_r 4.5) (- 0 (/ ear_w 2) 0.1) z_center
                         (box nut_thick nut_flat nut_flat :align '(center min center))))
@@ -6530,7 +6530,7 @@ exit 11
         let program = crate::ecky_scheme::compile_to_core_program(
             r#"(model
               (part insert (build
-                (shape positive (cylinder 10 8 64))
+                (shape positive (cylinder 10 8))
                 (shape cutter
                   (tapped-hole :radius 7 :pitch 2 :length 9 :depth 1))
                 (result (difference positive cutter)))))"#,

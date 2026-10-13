@@ -168,13 +168,12 @@
             female-dovetail-grooves))
         (shape clip-outer
           (rotate 0 90 0
-            (cylinder clip-outer-radius clip-width 64)))
+            (cylinder clip-outer-radius clip-width)))
         (shape clip-inner
           (translate clip-bore-cutter-start 0 0
             (rotate 0 90 0
               (cylinder clip-inner-radius
-                        clip-bore-cutter-length
-                        64))))
+                        clip-bore-cutter-length))))
         (shape clip-opening
           (translate (/ clip-width 2) 0 0
             (box (+ clip-width (* clip-cutter-overshoot 2))
@@ -216,8 +215,7 @@
                      blade-box-center-y
                      (+ blade-box-z blade-box-bottom)
             (cylinder blade-thumb-radius
-                      (+ (- blade-box-height blade-box-bottom) 1)
-                      48)))
+                      (+ (- blade-box-height blade-box-bottom) 1))))
         (shape blade-box
           (difference blade-box-outer
             (union blade-box-cavity blade-cover-seat blade-thumb-scoop)))

@@ -681,8 +681,7 @@
             (rotate 90 0 0
               (cylinder
                 integrated-seat-slot-r
-                integrated-seat-cut-depth
-                96))))
+                integrated-seat-cut-depth))))
         (shape front-integrated-seat-top-cut
           (translate
             (- 0 integrated-seat-slot-r)
@@ -723,7 +722,7 @@
         ;; D holes
         (shape d-hole-base
           (intersection
-            (cylinder hole-r (+ ear-t 0.4) 48)
+            (cylinder hole-r (+ ear-t 0.4))
             (translate (- 0 flat-d) (- 0 hole-r) 0
               (box hole-profile-w hole-d (+ ear-t 0.4)
                 :align '(min min min)))))
@@ -739,7 +738,7 @@
         (shape body-ear-round
           (translate ear-x rail-y body-catch-z
             (rotate 0 90 0
-              (cylinder ear-r ear-t 48))))
+              (cylinder ear-r ear-t))))
 
         (shape body-ear-gusset-local
           (loft
@@ -1103,11 +1102,11 @@
         ;; filament + hygrometer
         (shape filament-socket
           (translate filament-x 0 bushing-socket-z
-            (cylinder bushing-socket-r (+ wall-thickness 1) 64)))
+            (cylinder bushing-socket-r (+ wall-thickness 1))))
 
         (shape hygrometer-socket
           (translate hygro-roof-x hygro-roof-y hygro-socket-z
-            (cylinder insert-socket-r hygro-socket-l 128)))
+            (cylinder insert-socket-r hygro-socket-l)))
 
         (shape upper-cut
           (difference upper-positive
@@ -1116,7 +1115,7 @@
         ;; D hole
         (shape d-hole-base
           (intersection
-            (cylinder hole-r (+ ear-t 0.4) 48)
+            (cylinder hole-r (+ ear-t 0.4))
             (translate (- 0 flat-d) (- 0 hole-r) 0
               (box hole-profile-w hole-d (+ ear-t 0.4)
                 :align '(min min min)))))
@@ -1132,7 +1131,7 @@
         (shape lid-ear-round
           (translate ear-x rail-y lid-catch-z
             (rotate 0 90 0
-              (cylinder ear-r ear-t 48))))
+              (cylinder ear-r ear-t))))
 
         (shape lid-ear-gusset-local
           (loft
@@ -1384,7 +1383,7 @@
               :align '(center min min))))
         (shape bearing-round-cut
           (translate 0 0 (- 0 cradle-depth 0.1)
-            (cylinder bearing-slot-r (+ bearing-cut-depth 0.2) 96)))
+            (cylinder bearing-slot-r (+ bearing-cut-depth 0.2))))
         (shape bearing-top-cut
           (translate
             (- 0 bearing-slot-r)
@@ -1604,7 +1603,7 @@
           (rotate 0 0 240 star-blade-long))
         (shape star-hub-positive
           (translate 0 0 (- 0 star-half)
-            (cylinder star-hub-r star-l 96)))
+            (cylinder star-hub-r star-l)))
         (shape star-positive
           (union
             star-hub-positive
@@ -1623,10 +1622,10 @@
           (extrude axle-plug-profile axle-plug-l))
         (shape axle-journal
           (translate 0 0 journal-z
-            (cylinder journal-r journal-l 64)))
+            (cylinder journal-r journal-l)))
         (shape axle-snap-head
           (translate 0 0 snap-head-z
-            (cone snap-lip-r snap-tip-r snap-head-l 64)))
+            (cone snap-lip-r snap-tip-r snap-head-l)))
         (shape half-axle-positive
           (union axle-plug axle-journal axle-snap-head))
         (shape axle-snap-slot
@@ -1713,13 +1712,12 @@
        (print-y (+ spool-width 175)))
       (build
         (shape bearing-positive
-          (cylinder dryer-bearing-outer-radius dryer-bearing-width 96))
+          (cylinder dryer-bearing-outer-radius dryer-bearing-width))
         (shape bearing-bore
           (translate 0 0 -0.1
             (cylinder
               dryer-bearing-inner-radius
-              (+ dryer-bearing-width 0.2)
-              64)))
+              (+ dryer-bearing-width 0.2))))
         (shape bearing-ring
           (difference bearing-positive bearing-bore))
         (shape front-bearing-local
@@ -1756,12 +1754,11 @@
   (part bearing-print-gauge
     (translate 0 64 0
       (difference
-        (cylinder dryer-bearing-outer-radius dryer-bearing-width 96)
+        (cylinder dryer-bearing-outer-radius dryer-bearing-width)
         (translate 0 0 -0.1
           (cylinder
             dryer-bearing-inner-radius
-            (+ dryer-bearing-width 0.2)
-            64)))))
+            (+ dryer-bearing-width 0.2))))))
 
   ;; removable C-latches
   (define-component dryer-c-latches
@@ -1861,10 +1858,10 @@
             ;; Positive hinge stock. Bore is cut after every union below.
             (translate x loop-center-y loop-center-z
               (rotate 0 90 0
-                (cylinder loop-outer-r latch-body-width 96)))
+                (cylinder loop-outer-r latch-body-width)))
             (translate x lobe-y lower-lobe-z
               (rotate 0 90 0
-                (cylinder lobe-r latch-body-width 48)))
+                (cylinder lobe-r latch-body-width)))
             ;; Full-width pull tabs stay parallel to the enclosure wall.
             ;; Hinge side has no finger tab; lower removable side keeps one.
             (translate x spine-y lower-tail-z
@@ -1872,7 +1869,7 @@
                 :align '(min min min)))
             (translate x tail-tip-y lower-tail-tip-z
               (rotate 0 90 0
-                (cylinder tail-tip-r latch-body-width 48)))))
+                (cylinder tail-tip-r latch-body-width)))))
         (shape badge-ring-cutter
           (place
             (location
@@ -1880,7 +1877,7 @@
                 :origin (list badge-center-x badge-face-y badge-center-z))
               :rotate '(90 0 0))
             (extrude
-              (ring badge-r badge-inner-r 96)
+              (ring badge-r badge-inner-r)
               badge-cut-l
               :symmetric #t)))
         (shape badge-drop-cutter
@@ -1922,7 +1919,7 @@
         (shape hinge-bore
           (translate (- x 0.2) loop-center-y loop-center-z
             (rotate 0 90 0
-              (cylinder loop-inner-r (+ latch-body-width 0.4) 96))))
+              (cylinder loop-inner-r (+ latch-body-width 0.4)))))
         ;; Final subtraction guarantees a hollow captive ring. The spine cannot
         ;; refill the bore and the 0.2 mm overrun removes coplanar end faces.
         (shape front
@@ -2028,7 +2025,7 @@
       (build
         (shape base
           (intersection
-            (cylinder r length 48)
+            (cylinder r length)
             (translate (- 0 flat) (- 0 r) 0
               (box profile-w diameter length
                 :align '(min min min)))))
@@ -2157,7 +2154,7 @@
         ;; primitive collapsing to a smooth cylinder at this small radius.
         (shape male-thread-core
           (translate 0 0 retaining-thread-z
-            (cylinder retaining-thread-r retaining-thread-l 64)))
+            (cylinder retaining-thread-r retaining-thread-l)))
         (shape male-thread-ridge
           (translate 0 0 retaining-thread-z
             (helical-ridge
@@ -2171,31 +2168,30 @@
           (union male-thread-core male-thread-ridge))
         (shape male-thread-envelope
           (translate 0 0 retaining-thread-z
-            (cylinder thread-major-r retaining-thread-l 96)))
+            (cylinder thread-major-r retaining-thread-l)))
         (shape male-thread
           (intersection male-thread-unclipped male-thread-envelope))
         (shape positive
           (union
             (chamfer 0.8 :edges "bottom"
-              (cylinder flange-r flange-h 64))
+              (cylinder flange-r flange-h))
             (translate 0 0 stem-z
-              (cylinder stem-r stem-l 64))
+              (cylinder stem-r stem-l))
             male-thread
             (translate 0 0 barb-root-chamfer-z
               (cone
                 barb-root-chamfer-r
                 barb-root-r
-                barb-root-chamfer-h
-                64))
+                barb-root-chamfer-h))
             (translate 0 0 barb-z
-              (cylinder barb-root-r barb-h 48))
+              (cylinder barb-root-r barb-h))
             (translate 0 0 (+ barb-z 2.5)
-              (cone barb-crest-r barb-root-r 2 48))
+              (cone barb-crest-r barb-root-r 2))
             (translate 0 0 (+ barb-z 7)
-              (cone barb-crest-r barb-tip-r 3 48))))
+              (cone barb-crest-r barb-tip-r 3))))
         (shape filament-passage
           (translate 0 0 hole-start
-            (cylinder passage-r hole-l 64)))
+            (cylinder passage-r hole-l)))
         (shape finished
           (difference positive filament-passage))
         (result
@@ -2263,7 +2259,7 @@
       (build
         (shape positive
           (chamfer 0.7 :edges "top"
-            (cylinder collar-r collar-h 64)))
+            (cylinder collar-r collar-h)))
         (shape female-thread-cutter
           (translate 0 0 thread-cut-start
             (tapped-hole
@@ -2277,7 +2273,7 @@
           (translate 0 0 -0.3
             ;; Full-major-radius counterbore removes the helix where it crosses
             ;; the bottom face. It also gives the printed male thread a lead-in.
-            (cylinder thread-entry-r thread-entry-h 64)))
+            (cylinder thread-entry-r thread-entry-h)))
         (shape finished
           ;; Separate cuts avoid a coincident inner edge at the ring bottom.
           (difference
@@ -2338,20 +2334,19 @@
        (print-x (+ body-w 95)))
       (build
         (shape hose-positive
-          (cylinder hose-outer-r filament-hose-length 64))
+          (cylinder hose-outer-r filament-hose-length))
         (shape hose-bore
           (translate 0 0 (- cut-overrun)
             (cylinder
               hose-inner-r
-              (+ filament-hose-length cut-overrun cut-overrun)
-              64)))
+              (+ filament-hose-length cut-overrun cut-overrun))))
         (shape bottom-lead-in
           (translate 0 0 (- cut-overrun)
-            (cone entry-r hose-inner-r (+ entry-h cut-overrun) 64)))
+            (cone entry-r hose-inner-r (+ entry-h cut-overrun))))
         (shape top-lead-in
           (translate 0 0 (- filament-hose-length entry-h)
             (cone
-              hose-inner-r entry-r (+ entry-h cut-overrun) 64)))
+              hose-inner-r entry-r (+ entry-h cut-overrun))))
         (shape finished
           (difference
             hose-positive
@@ -2415,9 +2410,9 @@
       (build
         (shape positive
           (union
-            (cylinder outer-r height 128)
+            (cylinder outer-r height)
             (chamfer 0.6 :edges "top"
-              (cylinder skirt-r skirt-h 128))))
+              (cylinder skirt-r skirt-h))))
         ;; Female thread cutter: central bore plus printable helical relief.
         (shape thread-cutter
           (translate 0 0 -0.3
@@ -2498,7 +2493,7 @@
       (build
         (shape hygrometer-pocket
           (translate 0 0 (- 0 bore-overrun)
-            (cylinder pocket-r (+ total-l bore-overrun bore-overrun) 128)))
+            (cylinder pocket-r (+ total-l bore-overrun bore-overrun))))
         (shape positive
           (union
             (thread
@@ -2510,7 +2505,7 @@
               :crest-width hygrometer-thread-crest-width-local)
             (translate 0 0 flange-z
               (chamfer 0.8 :edges "top"
-                (cylinder grip-r flange-h 12)))))
+                (cylinder grip-r flange-h)))))
         (shape finished
           (difference positive hygrometer-pocket))
         (result

@@ -1,7 +1,7 @@
 fixture: daughter-flower-airtag-bracelet
-  part: daughter-flower-body key: sha256:eecf6c24c1bfef179f44fb305be11c502a4208502b09ef274206a8f288c8ba78
-  part: daughter-flower-center-lid key: sha256:e25d49bc932446068563adb4726ef9e5ef8f6cb6869afe2a3a251963b98c46e3
-  part: daughter-tpu-breakaway-strap key: sha256:6f955871f5c6931b6a66fb6238a6712cb48beb662c6e334ae3dbb7bdb1285bda
+  part: daughter-flower-body key: sha256:44aab0960519a61f121a44cae482209e6c36a712802ca36882b1b8903d81dc0c
+  part: daughter-flower-center-lid key: sha256:5a55f5189014a1220a349d9ca1f8df0f091b273ca1a4c12a9471373dd1ad5ef8
+  part: daughter-tpu-breakaway-strap key: sha256:d36347c63ec382b9ac63967c20bac38691cce782e2ba48edef476ec8493d1c4e
 fixture: dovetail-box
   part: dovetail_box_body key: sha256:598e32158e8ced00e15471ac305eb2a5b8364f8bdd2aa30d251fc62467f53653
   part: dovetail_box_lid key: sha256:399349c6a5921ed087818c9360c41107b750bbf84befd0e1c5558f5096d32795
@@ -35,7 +35,7 @@ fixture: helicoid-thread-coupon
   part: coupon_male_035 key: sha256:326ca845634d43cf90b3a8f50243d0292270b506ecc9a670e045b1de94574796
   part: coupon_female_035 key: sha256:233f3fccf7c154c388ac6b01d488caf50549b129f83a2eb85cb786a78d40ff76
 fixture: iphone-17e-case-multipart
-  part: iphone-17e-tpu-case key: sha256:c40da41f8e0f93097d02e2a16adec622a01b11021ea07ae33f8b34de77398567
+  part: iphone-17e-tpu-case key: sha256:360205aadf63407c8ae50bfe445aab825dfd65bdc5386b505fbd13989672fbda
   part: camera-frame-outer-petg key: sha256:cf66413daa66ba1a68d25339014a66e69f5bc99191b89dc940d1ecf033d306b5
   part: camera-frame-inner-petg key: sha256:88e8192047c54ffa9be0ee1fdd1888fcf54709274932e1f48e041585777047b8
 fixture: iphone-17e-case-tpu

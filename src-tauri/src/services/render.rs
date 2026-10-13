@@ -4705,7 +4705,7 @@ exit 5
                           :theta-steps 32
                           :radius (+ 18 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793)))))
                           :z-map (+ z (* fz 2))))
-                      (translate 0 0 28 (cylinder 4 18 32))))))"#,
+                      (translate 0 0 28 (cylinder 4 18))))))"#,
             &DesignParams::new(),
             Some(MacroDialect::EckyIrV0),
             Some(GeometryBackend::EckyRust),
@@ -5198,7 +5198,7 @@ exit 5
                           :theta-steps 32
                           :radius (+ 18 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793)))))
                           :z-map (+ z (* fz 2))))
-                      (translate 0 0 28 (cylinder 4 18 32))))))"#,
+                      (translate 0 0 28 (cylinder 4 18))))))"#,
             &DesignParams::new(),
             Some(MacroDialect::EckyIrV0),
             Some(GeometryBackend::EckyRust),

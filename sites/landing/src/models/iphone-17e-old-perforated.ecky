@@ -73,22 +73,19 @@
       (translate camera-x camera-y -0.5
         (cylinder
           camera-hole-radius
-          aperture-cutter-height
-          64)))
+          aperture-cutter-height)))
 
     (mic-aperture-cutter
       (translate mic-x mic-y -0.5
         (cylinder
           mic-hole-radius
-          aperture-cutter-height
-          32)))
+          aperture-cutter-height)))
 
     (flash-aperture-cutter
       (translate flash-x flash-y -0.5
         (cylinder
           flash-hole-radius
-          aperture-cutter-height
-          48)))
+          aperture-cutter-height)))
 
     (flange-cut
       (difference
@@ -127,56 +124,56 @@
         (- 0.0 post-half-spacing-x)
         post-half-spacing-y
         post-start-z
-        (cylinder post-radius post-length 40)))
+        (cylinder post-radius post-length)))
 
     (post-top-right-stem
       (translate
         post-half-spacing-x
         post-half-spacing-y
         post-start-z
-        (cylinder post-radius post-length 40)))
+        (cylinder post-radius post-length)))
 
     (post-bottom-left-stem
       (translate
         (- 0.0 post-half-spacing-x)
         (- 0.0 post-half-spacing-y)
         post-start-z
-        (cylinder post-radius post-length 40)))
+        (cylinder post-radius post-length)))
 
     (post-bottom-right-stem
       (translate
         post-half-spacing-x
         (- 0.0 post-half-spacing-y)
         post-start-z
-        (cylinder post-radius post-length 40)))
+        (cylinder post-radius post-length)))
 
     (post-top-left-bead
       (translate
         (- 0.0 post-half-spacing-x)
         post-half-spacing-y
         post-bead-start-z
-        (cylinder post-bead-radius post-bead-height 40)))
+        (cylinder post-bead-radius post-bead-height)))
 
     (post-top-right-bead
       (translate
         post-half-spacing-x
         post-half-spacing-y
         post-bead-start-z
-        (cylinder post-bead-radius post-bead-height 40)))
+        (cylinder post-bead-radius post-bead-height)))
 
     (post-bottom-left-bead
       (translate
         (- 0.0 post-half-spacing-x)
         (- 0.0 post-half-spacing-y)
         post-bead-start-z
-        (cylinder post-bead-radius post-bead-height 40)))
+        (cylinder post-bead-radius post-bead-height)))
 
     (post-bottom-right-bead
       (translate
         post-half-spacing-x
         (- 0.0 post-half-spacing-y)
         post-bead-start-z
-        (cylinder post-bead-radius post-bead-height 40)))
+        (cylinder post-bead-radius post-bead-height)))
 
     (all-posts
       (union
@@ -261,22 +258,19 @@
       (translate camera-x camera-y -0.5
         (cylinder
           camera-hole-radius
-          through-cutter-height
-          64)))
+          through-cutter-height)))
 
     (mic-aperture-cutter
       (translate mic-x mic-y -0.5
         (cylinder
           mic-hole-radius
-          through-cutter-height
-          32)))
+          through-cutter-height)))
 
     (flash-aperture-cutter
       (translate flash-x flash-y -0.5
         (cylinder
           flash-hole-radius
-          through-cutter-height
-          48)))
+          through-cutter-height)))
 
     ;; Post holes
 
@@ -294,28 +288,28 @@
         (- 0.0 post-half-spacing-x)
         post-half-spacing-y
         -0.5
-        (cylinder post-hole-radius through-cutter-height 40)))
+        (cylinder post-hole-radius through-cutter-height)))
 
     (post-top-right-hole
       (translate
         post-half-spacing-x
         post-half-spacing-y
         -0.5
-        (cylinder post-hole-radius through-cutter-height 40)))
+        (cylinder post-hole-radius through-cutter-height)))
 
     (post-bottom-left-hole
       (translate
         (- 0.0 post-half-spacing-x)
         (- 0.0 post-half-spacing-y)
         -0.5
-        (cylinder post-hole-radius through-cutter-height 40)))
+        (cylinder post-hole-radius through-cutter-height)))
 
     (post-bottom-right-hole
       (translate
         post-half-spacing-x
         (- 0.0 post-half-spacing-y)
         -0.5
-        (cylinder post-hole-radius through-cutter-height 40)))
+        (cylinder post-hole-radius through-cutter-height)))
 
     ;; Flex slots running outward from each post hole
 
@@ -967,8 +961,7 @@
           rear-panel-thickness
           (cylinder
             corner-bumper-radius
-            side-wall-height
-            64)))
+            side-wall-height)))
 
       (top-right-bumper
         (translate
@@ -977,8 +970,7 @@
           rear-panel-thickness
           (cylinder
             corner-bumper-radius
-            side-wall-height
-            64)))
+            side-wall-height)))
 
       (bottom-left-bumper
         (translate
@@ -987,8 +979,7 @@
           rear-panel-thickness
           (cylinder
             corner-bumper-radius
-            side-wall-height
-            64)))
+            side-wall-height)))
 
       (bottom-right-bumper
         (translate
@@ -997,8 +988,7 @@
           rear-panel-thickness
           (cylinder
             corner-bumper-radius
-            side-wall-height
-            64)))
+            side-wall-height)))
 
       (all-corner-bumpers
         (union
@@ -1365,8 +1355,7 @@
           -0.5
           (cylinder
             (/ rear-camera-hole-diameter 2.0)
-            rear-through-cutter-height
-            64)))
+            rear-through-cutter-height)))
 
       (mic-hole-cutter
         (translate
@@ -1375,8 +1364,7 @@
           -0.5
           (cylinder
             (/ rear-mic-hole-diameter 2.0)
-            rear-through-cutter-height
-            32)))
+            rear-through-cutter-height)))
 
       (flash-hole-cutter
         (translate
@@ -1385,8 +1373,7 @@
           -0.5
           (cylinder
             (/ rear-flash-hole-diameter 2.0)
-            rear-through-cutter-height
-            48)))
+            rear-through-cutter-height)))
 
       ;; Camera frame post holes
 
@@ -1412,8 +1399,7 @@
           -0.5
           (cylinder
             camera-tpu-post-hole-radius
-            rear-through-cutter-height
-            40)))
+            rear-through-cutter-height)))
 
       (camera-top-right-post-hole
         (translate
@@ -1424,8 +1410,7 @@
           -0.5
           (cylinder
             camera-tpu-post-hole-radius
-            rear-through-cutter-height
-            40)))
+            rear-through-cutter-height)))
 
       (camera-bottom-left-post-hole
         (translate
@@ -1436,8 +1421,7 @@
           -0.5
           (cylinder
             camera-tpu-post-hole-radius
-            rear-through-cutter-height
-            40)))
+            rear-through-cutter-height)))
 
       (camera-bottom-right-post-hole
         (translate
@@ -1448,8 +1432,7 @@
           -0.5
           (cylinder
             camera-tpu-post-hole-radius
-            rear-through-cutter-height
-            40)))
+            rear-through-cutter-height)))
 
       ;; USB-C bottom opening
 
@@ -1514,42 +1497,42 @@
       (bottom-port-1
         (translate left-port-1-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-2
         (translate left-port-2-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-3
         (translate left-port-3-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-4
         (translate left-port-4-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-5
         (translate right-port-5-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-6
         (translate right-port-6-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-7
         (translate right-port-7-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-8
         (translate right-port-8-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
     )
 
     (difference

@@ -138,10 +138,8 @@ pub struct TranspileGateOutcome {
 
 /// Fixed translate instruction prepended to the foreign source in the user
 /// message. It carries the *semantic* ask the deterministic transpiler could not
-/// do (parametrize, loop-ify) plus a portability rule learned from real output:
-/// the facet-count argument on `cylinder`/`circle` is a tessellation hint and is
-/// ignored on non-native backends, so a true polygonal prism must use
-/// `regular-polygon` + `extrude`.
+/// do (parametrize, loop-ify) plus the distinction between round primitives and
+/// explicit polygonal geometry. Round primitives accept dimensions only.
 pub const TRANSLATE_PREAMBLE: &str = "\
 Translate the CAD source below into ONE parametric Ecky `(model ...)` program.
 
@@ -149,10 +147,10 @@ Translate the CAD source below into ONE parametric Ecky `(model ...)` program.
   block; do not copy dead numbers. Derive dependent dimensions as expressions.
 - Express repeated features as loops (`repeat-union` / `for-union`), never as N
   hand-copied translated solids.
-- Portability: the facet-count argument on `cylinder`/`circle` is a tessellation
-  hint only and is IGNORED on non-native backends (it renders round). For a true
-  polygonal prism (e.g. a hex bolt head) use `(extrude (regular-polygon SIDES
-  circumradius) height)`, never a faceted cylinder.
+- Round primitives accept dimensions only: `(cylinder radius height)`,
+  `(cone bottom-radius top-radius height)`, `(circle radius)`, and
+  `(ring outer-radius inner-radius)`. For a polygonal prism (e.g. a hex bolt
+  head), use `(extrude (regular-polygon SIDES circumradius) height)`.
 - Add `(verify ...)` clauses for the invariants that must hold (at least a single
   watertight solid: `stl connected-component-count` = 1, `stl
   non-manifold-edge-count` = 0).

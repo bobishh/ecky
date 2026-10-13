@@ -1389,7 +1389,7 @@ enabled = params.get("enabled", False)
                   (select profile "bulb" :options (("Bulb" "bulb") ("Lantern" "lantern")))
                   (toggle vents #t)
                   (image litho ""))
-                (part body (cylinder 20 80 48)))"#
+                (part body (cylinder 20 80)))"#
                 .to_string(),
         );
 

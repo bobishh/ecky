@@ -11,7 +11,7 @@
     (number radius 20 :label "Radius" :min 5 :max 80)
     (number height 30 :label "Height" :min 10 :max 100)
     (boolean useCap #f :label "Use cap"))
-  (part body (cylinder radius height 48))
+  (part body (cylinder radius height))
   (meta :title "Test Model" :version "1.0")
   (verify (tag body) (metric body (stl connected-component-count)) (expect body (= 1)))
   (feature shell :role enclosure :params (radius) (box radius 40 2))
@@ -28,11 +28,11 @@
   (part base (box x x x)))
 
 (let ((r 20) (h 40))
-  (part cylinder-part (cylinder r h 32)))
+  (part cylinder-part (cylinder r h)))
 
 (let* ((r 10) (h (* r 3)) (wall 2))
-  (part tube (difference (cylinder r h 32)
-                          (cylinder (- r wall) h 32))))
+  (part tube (difference (cylinder r h)
+                          (cylinder (- r wall) h))))
 
 ; Expression forms
 (define wall-thickness 2)
@@ -47,7 +47,7 @@
 
 (if useCap
     (sphere radius)
-    (cylinder radius height 48))
+    (cylinder radius height))
 
 ; Quoted expression
 (quote (center center min))
@@ -209,13 +209,13 @@
 
 (sphere 12)
 
-(cylinder 8 30 48)
+(cylinder 8 30)
 
-(cone 12 6 30 48)
+(cone 12 6 30)
 
-(circle 20 64)
+(circle 20)
 
-(ring 20 10 64)
+(ring 20 10)
 
 (rectangle 40 20)
 
@@ -251,7 +251,7 @@
 
 (loft bottom top)
 
-(sweep (circle 2 16) rail)
+(sweep (circle 2) rail)
 
 (helical-ridge :radius 32 :pitch 5.25 :height 16.8 :base-width 1.45 :crest-width 0.55 :depth 1.5)
 
@@ -292,7 +292,7 @@
 
 (chamfer 1 :edges "bottom" body)
 
-(taper 30 0.7 0.7 (circle 12 32))
+(taper 30 0.7 0.7 (circle 12))
 
 (twist 40 90 profile)
 
@@ -426,7 +426,7 @@
 
 ; Definition highlighting test
 (define my-box (box 10 10 10))
-(define my-cylinder (cylinder 5 20 32))
+(define my-cylinder (cylinder 5 20))
 
 ; Part definition highlighting
 (part main-body (union (box 20 20 20) (sphere 10)))

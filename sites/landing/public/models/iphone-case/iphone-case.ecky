@@ -483,8 +483,7 @@
           camera-cluster-support-base-z
           (cylinder
             lens-support-radius
-            lens-clamp-tpu-support-thickness
-            8)))
+            lens-clamp-tpu-support-thickness)))
 
       (secondary-support
         (translate
@@ -493,8 +492,7 @@
           camera-cluster-support-base-z
           (cylinder
             (+ cluster-secondary-pad-radius lens-clamp-tpu-border-width)
-            lens-clamp-tpu-support-thickness
-            8)))
+            lens-clamp-tpu-support-thickness)))
 
       (camera-cluster-support
         (hull lens-support secondary-support))
@@ -556,8 +554,7 @@
               :edges "bottom"
               (cylinder
                 corner-bumper-radius
-                corner-bumper-print-height
-                48)))))
+                corner-bumper-print-height)))))
 
       (top-right-bumper
         (translate
@@ -572,8 +569,7 @@
               :edges "bottom"
               (cylinder
                 corner-bumper-radius
-                corner-bumper-print-height
-                48)))))
+                corner-bumper-print-height)))))
 
       (bottom-left-bumper
         (translate
@@ -588,8 +584,7 @@
               :edges "bottom"
               (cylinder
                 corner-bumper-radius
-                corner-bumper-print-height
-                48)))))
+                corner-bumper-print-height)))))
 
       (bottom-right-bumper
         (translate
@@ -604,8 +599,7 @@
               :edges "bottom"
               (cylinder
                 corner-bumper-radius
-                corner-bumper-print-height
-                48)))))
+                corner-bumper-print-height)))))
 
       (all-corner-bumpers
         (union
@@ -1018,8 +1012,7 @@
           (- camera-cluster-support-base-z (* 2.0 boolean-overlap))
           (cylinder
             camera-egg-inner-camera-radius
-            rear-through-cutter-height
-            8)))
+            rear-through-cutter-height)))
 
       (camera-egg-secondary-inner-cutter
         (translate
@@ -1028,8 +1021,7 @@
           (- camera-cluster-support-base-z (* 2.0 boolean-overlap))
           (cylinder
             camera-egg-inner-secondary-radius
-            rear-through-cutter-height
-            8)))
+            rear-through-cutter-height)))
 
       (camera-egg-opening-cutter
         (hull

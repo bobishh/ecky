@@ -513,21 +513,19 @@
 
       (lens-support
         (translate back-camera-center-x back-camera-center-y 0
-          (cylinder lens-support-radius rear-panel-thickness 64)))
+          (cylinder lens-support-radius rear-panel-thickness)))
 
       (mic-support
         (translate back-mic-center-x back-mic-center-y 0
           (cylinder
             (+ (/ rear-mic-hole-diameter 2.0) 2.0)
-            rear-panel-thickness
-            32)))
+            rear-panel-thickness)))
 
       (flash-support
         (translate back-flash-center-x back-flash-center-y 0
           (cylinder
             (+ (/ rear-flash-hole-diameter 2.0) 2.0)
-            rear-panel-thickness
-            48)))
+            rear-panel-thickness)))
 
       (camera-to-mic-strut
         (lattice-strut
@@ -595,8 +593,7 @@
           rear-panel-thickness
           (cylinder
             corner-bumper-radius
-            side-wall-height
-            64)))
+            side-wall-height)))
 
       (top-right-bumper
         (translate
@@ -605,8 +602,7 @@
           rear-panel-thickness
           (cylinder
             corner-bumper-radius
-            side-wall-height
-            64)))
+            side-wall-height)))
 
       (bottom-left-bumper
         (translate
@@ -615,8 +611,7 @@
           rear-panel-thickness
           (cylinder
             corner-bumper-radius
-            side-wall-height
-            64)))
+            side-wall-height)))
 
       (bottom-right-bumper
         (translate
@@ -625,8 +620,7 @@
           rear-panel-thickness
           (cylinder
             corner-bumper-radius
-            side-wall-height
-            64)))
+            side-wall-height)))
 
       (all-corner-bumpers
         (union
@@ -984,8 +978,7 @@
         (translate camera-center-x camera-center-y -0.2
           (cylinder
             lens-guard-seat-radius
-            (+ lens-guard-seat-depth 0.2)
-            64)))
+            (+ lens-guard-seat-depth 0.2))))
 
       (lens-guard-neck-cutter
         (translate
@@ -995,8 +988,7 @@
           (cylinder
             lens-guard-neck-radius
             (+ lens-guard-installed-collar-length
-               (* 2.0 boolean-overlap))
-            64)))
+               (* 2.0 boolean-overlap)))))
 
       (lens-guard-groove-cutter
         (translate
@@ -1008,8 +1000,7 @@
           (cylinder
             lens-guard-groove-radius
             (+ lens-guard-snap-bead-height
-               (* 2.0 boolean-overlap))
-            64)))
+               (* 2.0 boolean-overlap)))))
 
       (mic-hole-cutter
         (translate
@@ -1018,8 +1009,7 @@
           -0.5
           (cylinder
             (/ rear-mic-hole-diameter 2.0)
-            rear-through-cutter-height
-            32)))
+            rear-through-cutter-height)))
 
       (flash-hole-cutter
         (translate
@@ -1028,8 +1018,7 @@
           -0.5
           (cylinder
             (/ rear-flash-hole-diameter 2.0)
-            rear-through-cutter-height
-            48)))
+            rear-through-cutter-height)))
 
       ;; USB-C bottom opening
 
@@ -1094,42 +1083,42 @@
       (bottom-port-1
         (translate left-port-1-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-2
         (translate left-port-2-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-3
         (translate left-port-3-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-4
         (translate left-port-4-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-5
         (translate right-port-5-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-6
         (translate right-port-6-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-7
         (translate right-port-7-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-8
         (translate right-port-8-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
     )
 
     (difference
@@ -1191,14 +1180,13 @@
 
       (opening-cutter
         (translate 0 0 -0.5
-          (cylinder opening-radius through-height 64)))
+          (cylinder opening-radius through-height)))
 
       (flange
         (difference
           (cylinder
             flange-radius
-            lens-guard-flange-thickness
-            64)
+            lens-guard-flange-thickness)
           opening-cutter))
 
       (collar
@@ -1206,8 +1194,7 @@
           (translate 0 0 lens-guard-flange-thickness
             (cylinder
               collar-radius
-              installed-collar-length
-              64))
+              installed-collar-length))
           opening-cutter))
 
       ;; Tapered lead-in. TPU socket flexes; PETG ring stays stiff.
@@ -1222,8 +1209,7 @@
             (cone
               snap-bead-radius
               collar-radius
-              lens-guard-snap-bead-height
-              64))
+              lens-guard-snap-bead-height))
           opening-cutter))
     )
 

@@ -78,13 +78,13 @@
       (+ snap-neck-radius snap-interference-radius fit-clearance))
     (through-height (+ island-thickness 1.0))
 
-    (camera-pad (cylinder camera-pad-radius island-thickness 64))
+    (camera-pad (cylinder camera-pad-radius island-thickness))
     (mic-pad
       (translate mic-center-x mic-center-y 0
-        (cylinder mic-pad-radius island-thickness 32)))
+        (cylinder mic-pad-radius island-thickness)))
     (flash-pad
       (translate flash-center-x flash-center-y 0
-        (cylinder flash-pad-radius island-thickness 48)))
+        (cylinder flash-pad-radius island-thickness)))
 
     ;; Two blended spans keep a deliberate waist around the microphone.
     (camera-mic-lobe (hull camera-pad mic-pad))
@@ -93,18 +93,18 @@
 
     (camera-bore-cutter
       (translate 0 0 -0.5
-        (cylinder base-bore-radius through-height 64)))
+        (cylinder base-bore-radius through-height)))
     (mic-opening-cutter
       (translate mic-center-x mic-center-y -0.5
-        (cylinder (/ mic-opening-diameter 2.0) through-height 32)))
+        (cylinder (/ mic-opening-diameter 2.0) through-height)))
     (flash-opening-cutter
       (translate flash-center-x flash-center-y -0.5
-        (cylinder (/ flash-opening-diameter 2.0) through-height 48)))
+        (cylinder (/ flash-opening-diameter 2.0) through-height)))
 
     ;; Female undercut opens toward TPU and captures the outer snap skirt.
     (camera-groove-cutter
       (translate 0 0 -0.1
-        (cylinder groove-radius (+ groove-depth 0.1) 64)))
+        (cylinder groove-radius (+ groove-depth 0.1))))
   )
 
   (difference
@@ -145,26 +145,26 @@
     (through-height
       (+ island-thickness skirt-length snap-bead-height 1.0))
 
-    (camera-pad (cylinder camera-pad-radius island-thickness 64))
+    (camera-pad (cylinder camera-pad-radius island-thickness))
     (mic-pad
       (translate mic-center-x mic-center-y 0
-        (cylinder mic-pad-radius island-thickness 32)))
+        (cylinder mic-pad-radius island-thickness)))
     (flash-pad
       (translate flash-center-x flash-center-y 0
-        (cylinder flash-pad-radius island-thickness 48)))
+        (cylinder flash-pad-radius island-thickness)))
     (camera-mic-lobe (hull camera-pad mic-pad))
     (mic-flash-lobe (hull mic-pad flash-pad))
     (island-blank (union camera-mic-lobe mic-flash-lobe))
 
     (camera-opening-cutter
       (translate 0 0 -0.5
-        (cylinder camera-opening-radius through-height 64)))
+        (cylinder camera-opening-radius through-height)))
     (mic-opening-cutter
       (translate mic-center-x mic-center-y -0.5
-        (cylinder (/ mic-opening-diameter 2.0) through-height 32)))
+        (cylinder (/ mic-opening-diameter 2.0) through-height)))
     (flash-opening-cutter
       (translate flash-center-x flash-center-y -0.5
-        (cylinder (/ flash-opening-diameter 2.0) through-height 48)))
+        (cylinder (/ flash-opening-diameter 2.0) through-height)))
 
     (outer-island
       (difference
@@ -176,7 +176,7 @@
     (snap-skirt
       (difference
         (translate 0 0 island-thickness
-          (cylinder snap-neck-radius skirt-length 64))
+          (cylinder snap-neck-radius skirt-length))
         camera-opening-cutter))
 
     (snap-bead-start-z
@@ -184,7 +184,7 @@
     (snap-bead
       (difference
         (translate 0 0 snap-bead-start-z
-          (cone snap-bead-radius snap-neck-radius snap-bead-height 64))
+          (cone snap-bead-radius snap-neck-radius snap-bead-height))
         camera-opening-cutter))
 
     ;; Three radial slots flex the hidden skirt; visible island remains continuous.
@@ -917,15 +917,15 @@
 
       (lens-support
         (translate back-camera-center-x back-camera-center-y 0
-          (cylinder lens-support-radius rear-panel-thickness 64)))
+          (cylinder lens-support-radius rear-panel-thickness)))
 
       (mic-support
         (translate back-mic-center-x back-mic-center-y 0
-          (cylinder mic-support-radius rear-panel-thickness 32)))
+          (cylinder mic-support-radius rear-panel-thickness)))
 
       (flash-support
         (translate back-flash-center-x back-flash-center-y 0
-          (cylinder flash-support-radius rear-panel-thickness 48)))
+          (cylinder flash-support-radius rear-panel-thickness)))
 
       (camera-mic-support-lobe
         (hull lens-support mic-support))
@@ -994,8 +994,7 @@
               :edges "bottom"
               (cylinder
                 corner-bumper-radius
-                corner-bumper-total-height
-                48)))))
+                corner-bumper-total-height)))))
 
       (top-right-bumper
         (translate
@@ -1010,8 +1009,7 @@
               :edges "bottom"
               (cylinder
                 corner-bumper-radius
-                corner-bumper-total-height
-                48)))))
+                corner-bumper-total-height)))))
 
       (bottom-left-bumper
         (translate
@@ -1026,8 +1024,7 @@
               :edges "bottom"
               (cylinder
                 corner-bumper-radius
-                corner-bumper-total-height
-                48)))))
+                corner-bumper-total-height)))))
 
       (bottom-right-bumper
         (translate
@@ -1042,8 +1039,7 @@
               :edges "bottom"
               (cylinder
                 corner-bumper-radius
-                corner-bumper-total-height
-                48)))))
+                corner-bumper-total-height)))))
 
       (all-corner-bumpers
         (union
@@ -1432,8 +1428,7 @@
           lens-clamp-seat-cutter-z
           (cylinder
             lens-clamp-camera-seat-radius
-            lens-clamp-seat-cutter-height
-            64)))
+            lens-clamp-seat-cutter-height)))
 
       (lens-clamp-mic-seat-pad
         (translate
@@ -1442,8 +1437,7 @@
           lens-clamp-seat-cutter-z
           (cylinder
             lens-clamp-mic-seat-radius
-            lens-clamp-seat-cutter-height
-            32)))
+            lens-clamp-seat-cutter-height)))
 
       (lens-clamp-flash-seat-pad
         (translate
@@ -1452,8 +1446,7 @@
           lens-clamp-seat-cutter-z
           (cylinder
             lens-clamp-flash-seat-radius
-            lens-clamp-seat-cutter-height
-            48)))
+            lens-clamp-seat-cutter-height)))
 
       (lens-clamp-inner-seat-cutter
         (union
@@ -1473,8 +1466,7 @@
           (cylinder
             lens-clamp-snap-through-radius
             (+ lens-clamp-tpu-capture-thickness
-               (* 2.0 boolean-overlap))
-            64)))
+               (* 2.0 boolean-overlap)))))
 
       (mic-hole-cutter
         (translate
@@ -1483,8 +1475,7 @@
           -0.5
           (cylinder
             (/ rear-mic-hole-diameter 2.0)
-            rear-through-cutter-height
-            32)))
+            rear-through-cutter-height)))
 
       (flash-hole-cutter
         (translate
@@ -1493,8 +1484,7 @@
           -0.5
           (cylinder
             (/ rear-flash-hole-diameter 2.0)
-            rear-through-cutter-height
-            48)))
+            rear-through-cutter-height)))
 
       ;; USB-C bottom opening
 
@@ -1559,42 +1549,42 @@
       (bottom-port-1
         (translate left-port-1-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-2
         (translate left-port-2-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-3
         (translate left-port-3-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-4
         (translate left-port-4-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-5
         (translate right-port-5-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-6
         (translate right-port-6-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-7
         (translate right-port-7-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
 
       (bottom-port-8
         (translate right-port-8-x bottom-cutter-start-y usb-center-z
           (rotate 90 0 0
-            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+            (cylinder bottom-port-radius bottom-port-cutter-length))))
     )
 
     (difference

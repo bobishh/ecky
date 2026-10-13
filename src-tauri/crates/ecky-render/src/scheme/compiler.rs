@@ -11379,19 +11379,15 @@ fn parse_ring_alias_call(
             "`ring` does not accept keyword arguments.",
         ));
     }
-    if !(args.len() == 2 || args.len() == 3) {
+    if args.len() != 2 {
         return Err(CompilerError::new(
             CompilerErrorKind::Parse,
-            "`ring` expects outer-radius inner-radius and optional segments.",
+            "`ring` expects outer-radius and inner-radius.",
         ));
     }
 
-    let mut outer_args = vec![args[0].clone()];
-    let mut inner_args = vec![args[1].clone()];
-    if let Some(segments) = args.get(2) {
-        outer_args.push(segments.clone());
-        inner_args.push(segments.clone());
-    }
+    let outer_args = vec![args[0].clone()];
+    let inner_args = vec![args[1].clone()];
 
     let outer = CoreNode::new(
         alloc_node_id(next_node),
@@ -12629,7 +12625,7 @@ mod tests {
                      (default-h (* default-r 3)))
                 (params (number radius default-r :label "Radius")
                         (number height default-h :label "Height"))
-                (part body (cylinder radius height 48))))
+                (part body (cylinder radius height))))
             "#,
         )
         .expect("compile");
@@ -12905,7 +12901,7 @@ mod tests {
 
     #[test]
     fn ring_alias_infers_sketch_kind_before_typecheck() {
-        let program = compile_to_core_program("(model (part body (extrude (ring 20 10 64) 5)))")
+        let program = compile_to_core_program("(model (part body (extrude (ring 20 10) 5)))")
             .expect("ring alias should infer sketch kind");
 
         let CoreNodeKind::Call { op, args, .. } = &program.parts[0].root.kind else {
@@ -14024,7 +14020,7 @@ mod tests {
                                    (jy (+ y (* 2.4 (hash-signed (+ col 19.19) (+ row 7.73) seed))))
                                    (r (+ 2.2 (* 1.1 (voronoi2 (/ jx 14.0) (/ jy 12.0) seed)))))
                               (translate jx jy 0
-                                (cylinder r 8 24))))
+                                (cylinder r 8))))
                           (range 0 cell-count))))))))
             "#,
         )
@@ -15127,8 +15123,8 @@ mod tests {
             (define-component knuckle
               ((number pin_d 8) (number clearance 0.3))
               (difference
-                (cylinder (* 2 pin_d) 10 96)
-                (cylinder (+ pin_d clearance) 12 96)))
+                (cylinder (* 2 pin_d) 10)
+                (cylinder (+ pin_d clearance) 12)))
             (model
               (part hinge_a (knuckle :pin_d 6))
               (part hinge_b (knuckle)))
@@ -15721,7 +15717,7 @@ mod tests {
             r#"
             (define-component knob
               ((number d 10 :label "Diameter" :min 4 :max 20 :step 0.5))
-              (cylinder d 5 64))
+              (cylinder d 5))
             (model (part body (knob :d 12)))
             "#,
         )
@@ -15734,7 +15730,7 @@ mod tests {
     fn component_instantiation_rejects_unknown_keyword() {
         let err = compile_to_core_program(
             r#"
-            (define-component knuckle ((number pin_d 8)) (cylinder pin_d 10 96))
+            (define-component knuckle ((number pin_d 8)) (cylinder pin_d 10))
             (model (part a (knuckle :bogus 1)))
             "#,
         )
@@ -15752,7 +15748,7 @@ mod tests {
     fn component_instantiation_rejects_missing_required_argument() {
         let err = compile_to_core_program(
             r#"
-            (define-component knuckle ((number pin_d)) (cylinder pin_d 10 96))
+            (define-component knuckle ((number pin_d)) (cylinder pin_d 10))
             (model (part a (knuckle)))
             "#,
         )
@@ -15766,7 +15762,7 @@ mod tests {
     fn component_instantiation_rejects_positional_arguments() {
         let err = compile_to_core_program(
             r#"
-            (define-component knuckle ((number pin_d 8)) (cylinder pin_d 10 96))
+            (define-component knuckle ((number pin_d 8)) (cylinder pin_d 10))
             (model (part a (knuckle 6)))
             "#,
         )
@@ -15799,7 +15795,7 @@ mod tests {
             (define-component lug ((number d 4))
               (let* ((r (/ d 2))
                      (h (* r 3)))
-                (translate 0 0 (max r 1) (cylinder r h 48))))
+                (translate 0 0 (max r 1) (cylinder r h))))
             (model (part body (lug :d 6)))
             "#,
         )
@@ -15845,7 +15841,7 @@ mod tests {
     fn components_nest_and_allocate_fresh_node_ids() {
         let program = compile_to_core_program(
             r#"
-            (define-component pin ((number d 2)) (cylinder d 10 48))
+            (define-component pin ((number d 2)) (cylinder d 10))
             (define-component pair ((number d 2))
               (union
                 (pin :d d)
@@ -15873,7 +15869,7 @@ mod tests {
     fn component_expansion_anchors_at_call_site() {
         let program = compile_to_core_program(
             r#"
-            (define-component pin ((number d 2)) (cylinder d 10 48))
+            (define-component pin ((number d 2)) (cylinder d 10))
             (model (part a (pin :d 3)) (part b (pin)))
             "#,
         )
@@ -16016,7 +16012,7 @@ mod tests {
                 (tag clearance_check)
                 (metric min_wall_thickness "body")
                 (expect (>= value 1)))
-              (cylinder (+ pin_d clearance) 10 96))
+              (cylinder (+ pin_d clearance) 10))
             (model
               (part hinge_a (knuckle :pin_d 6))
               (part hinge_b (knuckle)))
@@ -16042,7 +16038,7 @@ mod tests {
             r#"
             (define-component pin ((number d 2))
               (verify (tag pin_ok) (metric min_wall_thickness "body") (expect (>= value 1)))
-              (cylinder d 10 48))
+              (cylinder d 10))
             (define-component pair ((number d 2))
               (union (pin :d d) (translate 5 0 0 (pin :d d))))
             (model (part left (pair :d 3)))
@@ -16063,7 +16059,7 @@ mod tests {
         let source = r#"
             (define-component pin ((number d 2))
               (verify (tag pin_ok) (metric min_wall_thickness "body") (expect (>= value 1)))
-              (cylinder d 10 48))
+              (cylinder d 10))
             (model (part a (pin :d 3)))
         "#;
         let lowered = lower_component_definitions_source(source).expect("lowering");
@@ -16099,8 +16095,8 @@ mod tests {
             (define-component knuckle
               ((number pin_d 8) (number clearance 0.3))
               (difference
-                (cylinder (* 2 pin_d) 10 96)
-                (cylinder (+ pin_d clearance) 12 96)))
+                (cylinder (* 2 pin_d) 10)
+                (cylinder (+ pin_d clearance) 12)))
             (model
               (part hinge_a (knuckle :pin_d 6))
               (part hinge_b (knuckle)))

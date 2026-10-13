@@ -67,7 +67,7 @@ instantiating part.
 (define-component vent
   ((number radius 4mm :label "Vent radius")
    (number depth 3mm :label "Cut depth"))
-  (cylinder radius depth 32))
+  (cylinder radius depth))
 
 (model
   (part cutter (vent :radius 5mm :depth 4mm)))
@@ -124,6 +124,7 @@ ranges or `latest`.
 
 ## Geometry rules
 
+- Round primitives accept dimensions only: `(cylinder radius height)`, `(cone bottom-radius top-radius height)`, `(circle radius)`, and `(ring outer-radius inner-radius)`. For hexagonal or other polygonal geometry use `regular-polygon` plus `extrude`; segment counts are not accepted by round primitives.
 - Start with primitives or closed 2D profiles. Use `extrude`, `revolve`, `sweep`, or `loft` to create solids.
 - `(hole :type solid|sketch|path|shape :goal "...")` is a typed planning
   placeholder. It deliberately fails lowering; never ship it as finished geometry.

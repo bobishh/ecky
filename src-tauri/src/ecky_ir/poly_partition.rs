@@ -2171,10 +2171,10 @@ mod tests {
                           (scale scale-factor scale-factor scale-factor
                             (solidify (import-stl "/tmp/dog.stl")))))
                       (shape lead
-                        (cone lead-r bore-r 1mm 96))
+                        (cone lead-r bore-r 1mm))
                       (shape shaft
                         (translate 0 0 0.8mm
-                          (cylinder bore-r 6mm 96)))
+                          (cylinder bore-r 6mm)))
                       (shape cutter
                         (union lead shaft))
                       (shape placed-cutter

@@ -50,8 +50,8 @@ Read first:
     (let* ((radius (/ width 2))
            (hole-r 3))
       (difference
-        (cylinder radius height 96)
-        (translate 0 0 -0.5 (cylinder hole-r (+ height 1) 96))))))
+        (cylinder radius height)
+        (translate 0 0 -0.5 (cylinder hole-r (+ height 1)))))))
 ```
 
 ## Bad shape

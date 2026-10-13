@@ -2,7 +2,6 @@
 
 ## Boundary
 - Surface fixture: `src-tauri/tests/fixtures/cad/surface/canonical_cup.build123d.py`
-- Reference fixture: `src-tauri/tests/fixtures/cad/reference/thomas_modular_ramp_legacy.py`
 - Authored model fixtures: `src-tauri/tests/fixtures/cad/surface/*.ecky`
 
 ## Rule
@@ -39,7 +38,7 @@
 - MCP/bootstrap guidance now teaches current `.ecky` Scheme authoring surface. Compatibility labels still say `eckyIrV0`; canonical guide resource is `ecky://guides/ecky-source` with `ecky://guides/ecky-ir-v0` kept as alias.
 - Thomas phase 1 landed:
   - `surface/thomas_modular_ramp_body.ecky` now true body-only target
-  - `python3 server/check_thomas_body_parity.py` -> `EXCELLENT MATCH`
+  - Current `.ecky` regression fixtures remain; historical Python parity harness retired on 2026-10-12.
 - Thomas phased authored sources landed:
   - `surface/thomas_modular_ramp_grooves.ecky`
   - `surface/thomas_modular_ramp.ecky`

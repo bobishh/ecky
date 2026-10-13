@@ -4,4 +4,4 @@
   (part henon_opening
     (extrude (polygon (henon-points 12 10)) 2))
   (part lorenz_guide
-    (sweep (circle 0.8 12) (path (lorenz-points 12 0.01 18)))))
+    (sweep (circle 0.8) (path (lorenz-points 12 0.01 18)))))

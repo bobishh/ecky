@@ -2409,7 +2409,7 @@ impl FreecadLowerer {
             }
             "cylinder" => {
                 let parsed = ParsedCallArgs::parse("cylinder", args, &["align"])?;
-                if parsed.positional.len() < 2 {
+                if parsed.positional.len() != 2 {
                     return Err(validation("`cylinder` expects radius and height."));
                 }
                 let r = self.lower_num_expr(&parsed.positional[0], scope)?;
@@ -2428,7 +2428,7 @@ impl FreecadLowerer {
             }
             "cone" => {
                 let parsed = ParsedCallArgs::parse("cone", args, &["align"])?;
-                if parsed.positional.len() < 3 {
+                if parsed.positional.len() != 3 {
                     return Err(validation(
                         "`cone` expects bottom radius, top radius, and height.",
                     ));
@@ -2495,7 +2495,7 @@ impl FreecadLowerer {
                 });
             }
             "circle" => {
-                if args.is_empty() {
+                if args.len() != 1 {
                     return Err(validation("`circle` expects radius."));
                 }
                 let r = self.lower_num_expr(&args[0], scope)?;

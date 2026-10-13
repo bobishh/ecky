@@ -31,7 +31,7 @@ The important line is the result expression:
                  (jy (+ y (* 2.4 (hash-signed (+ col 19.19) (+ row 7.73) 54))))
                  (r (+ 2.2 (* 1.1 (voronoi2 (/ jx 14.0) (/ jy 12.0) 23)))))
             (translate jx jy 0
-              (cylinder r 8 24))))
+              (cylinder r 8))))
         (range 0 cell-count)))))
 ```
 
@@ -98,7 +98,7 @@ The entrances are generated from one parametric chamber count:
                (z (+ wall (* (+ row 0.55) floor_gap))))
           (translate x (* -0.5 hotel_d) z
             (rotate 90 0 0
-              (cylinder entrance_r (+ hotel_d 6) 24)))))
+              (cylinder entrance_r (+ hotel_d 6))))))
       (range 0 (* chamber_cols 3)))))
 ```
 

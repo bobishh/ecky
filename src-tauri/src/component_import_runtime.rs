@@ -1547,7 +1547,7 @@ mod tests {
     }
 
     fn cage_source() -> &'static str {
-        "(define-component cage ((number diameter 74)) (cylinder diameter 40 48))"
+        "(define-component cage ((number diameter 74)) (cylinder diameter 40))"
     }
 
     fn resolve(
@@ -1639,7 +1639,7 @@ mod tests {
     #[test]
     fn explicit_entry_symbol_resolves_export() {
         let coordinate = cage_coordinate();
-        let source = "(define-component cage-v2 ((number diameter 74)) (cylinder diameter 40 48))";
+        let source = "(define-component cage-v2 ((number diameter 74)) (cylinder diameter 40))";
         let resolver = MemoryResolver::new().with(coordinate, "cage-v2", source, "sha256:cccc");
         let authored = r#"
             (import-component "bike.kit" :version "1.2.0" :component "cage" :as holder)
@@ -1719,7 +1719,7 @@ mod tests {
         // and must not produce an import-component declaration or a lock.
         let resolver = MemoryResolver::new();
         let vendored = r#"
-            (define-component holder ((number diameter 74)) (cylinder diameter 40 48))
+            (define-component holder ((number diameter 74)) (cylinder diameter 40))
             (model (part body (holder :diameter 74)))
         "#;
         let resolved = resolve(vendored, &resolver).expect("no live imports");

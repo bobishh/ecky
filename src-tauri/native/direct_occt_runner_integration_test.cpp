@@ -687,9 +687,9 @@ Plan threaded_body_mesh_closure_plan() {
     part.representation = GeometryRepresentation::MeshDomain;
     part.commands = {
         command(1, "box", {number(20), number(20), number(8)}),
-        command(2, "cylinder", {number(8), number(10), number(64)}),
+        command(2, "cylinder", {number(8), number(10)}),
         command(3, "union", {ref(1), ref(2)}),
-        command(4, "cylinder", {number(4), number(12), number(64)}),
+        command(4, "cylinder", {number(4), number(12)}),
         command(5, "difference", {ref(3), ref(4)}),
     };
     plan.parts = {part};

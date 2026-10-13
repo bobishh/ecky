@@ -12,7 +12,7 @@
             (path (18 8 0) (0 8 0) (0 34 0) (22 34 0)))))
       (shape cup (fillet 0.2 (shell wall (revolve cup_profile 360))))
       (shape handle_stop (chamfer 0.4 :edges "bottom" (box 36 24 4 :align '(center center min))))
-      (shape drain_outline (offset 1.2 (circle 5 32)))
+      (shape drain_outline (offset 1.2 (circle 5)))
       (shape soft_outline (offset-rounded 1.4 (rounded-rect 30 16 3)))
       (shape drain (extrude drain_outline 2))
       (shape soft_tray (extrude soft_outline 2))

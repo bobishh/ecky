@@ -175,8 +175,8 @@ A component is reusable geometry with its own parameters. Declare it before `mod
   ((number pin_d 8 :label "Pin diameter" :min 4 :max 12 :step 0.5)
    (number clearance 0.3))
   (difference
-    (cylinder (* 2 pin_d) 10 96)
-    (cylinder (+ pin_d clearance) 12 96)))
+    (cylinder (* 2 pin_d) 10)
+    (cylinder (+ pin_d clearance) 12)))
 ```
 
 - positional 1: component name symbol
@@ -824,21 +824,21 @@ The sphere is centered on all three axes by default. Radius is half the diameter
 
 ### `cylinder`
 
-`(cylinder radius height [segments] [:align '(x y z)])` → Solid.
+`(cylinder radius height [:align '(x y z)])` → Solid.
 
 The axis is Z. X and Y are centered; the base starts at Z = 0. The first argument is radius, not diameter. `(cylinder 3 8)` is 6 mm across and 8 mm tall.
 
-The optional segment count controls polygonal approximations on paths that use them. Native OCCT keeps the cylinder analytic.
+The cross-section is circular on every backend. For a hexagonal prism, use `(extrude (regular-polygon 6 radius) height)`. Round primitives do not accept a segment count; tessellation belongs to rendering.
 
 ### `cone`
 
-`(cone radius1 radius2 height [segments] [:align '(x y z)])` → Solid.
+`(cone radius1 radius2 height [:align '(x y z)])` → Solid.
 
 `radius1` is the bottom radius and `radius2` the top radius. The axis is Z, with its base at 0 by default. Set one radius to zero for a pointed cone; keep both positive for a truncated cone.
 
 ### `circle`
 
-`(circle radius [segments])` → Sketch.
+`(circle radius)` → Sketch.
 
 A circular profile in XY, centered at the origin. It has no height until used by an operation such as `(extrude (circle 8) 4)`.
 
@@ -916,7 +916,7 @@ Read triangles from an STL file. Importing a mesh does not recover its original 
 
 ### `ring`
 
-`(ring outer-radius inner-radius [segments])` → Sketch.
+`(ring outer-radius inner-radius)` → Sketch.
 
 A centered circular profile with a circular hole. The inner radius must be smaller than the outer radius. `(extrude (ring 12 4) 2)` makes the same washer cross-section as the `profile` example above.
 

@@ -2,4 +2,4 @@
   (part fbm
     (wall-pattern
       (:mode fbm :depth 0.6 :uFreq 8 :vFreq 8 :seed 3)
-      (shell 1.0 (cylinder 14 30 40)))))
+      (shell 1.0 (cylinder 14 30)))))

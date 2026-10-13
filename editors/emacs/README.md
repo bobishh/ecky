@@ -132,7 +132,7 @@ If you use `use-package`, add this to your configuration:
 (params (number radius 20 :label "Radius" :min 5 :max 80))
 
 (part body
-  (cylinder radius height 48))
+  (cylinder radius height))
 
 (define wall 2)
 
@@ -141,7 +141,7 @@ If you use `use-package`, add this to your configuration:
 
 (union
   (box 40 20 10)
-  (cylinder 12 30 48))
+  (cylinder 12 30))
 
 (wall-pattern (:mode gyroid :depth 0.6 :uFreq 4 :vFreq 5)
   (shell 2 (cylinder 20 80)))

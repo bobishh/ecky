@@ -1023,8 +1023,8 @@ mod tests {
               (params (number pin_d 8)
                       (number bore 8.3)
                       :relations ((< pin_d bore)))
-              (part pin (cylinder pin_d 10 48))
-              (part sleeve (cylinder bore 10 48)))
+              (part pin (cylinder pin_d 10))
+              (part sleeve (cylinder bore 10)))
         "#;
         let extracted = extract_component(&request(source, "pin")).expect("extract");
 
