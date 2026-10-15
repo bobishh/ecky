@@ -20,11 +20,10 @@ test('Given a new reader When following chapter one Then a complete editable exa
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
-test('Given the reference When reading box Then coordinates and a runnable example are explained', async ({ page }, info) => {
+test('Given the reference When reading box Then coordinates and a runnable example are explained', async ({ page }) => {
   await page.goto('/docs/primitive-signatures/#box');
   await expect(page.locator('.docs-main')).toContainText('X and Y are centered');
   await expect(page.locator('.docs-main pre').first()).toContainText('(model');
-  await page.screenshot({ path: info.outputPath('reference-desktop.png') });
 });
 
 test('Given mobile contents When dismissed with Escape Then reading resumes on the same section', async ({ page }) => {
