@@ -24,6 +24,7 @@ function stage() {
   const bookDir = join(root, 'target', 'book', 'dist', 'books');
   const mdSource = join(root, 'public', 'docs', 'ecky-ir.md');
   const favicon = join(root, 'sites', 'landing', 'public', 'favicon.svg');
+  const analyticsBootstrap = join(root, 'sites', 'landing', 'public', 'analytics-bootstrap.js');
 
   if (!existsSync(docsHtml)) {
     throw new Error(`Build the docs site first: expected ${docsHtml} (run: npm run build:docs-site)`);
@@ -37,6 +38,7 @@ function stage() {
   copyFileSync(join(bookDir, 'ecky-ir-field-guide.epub'), join(docsRoot, 'ecky-ir-field-guide.epub'));
   copyFileSync(mdSource, join(docsRoot, 'ecky-ir.md'));
   if (existsSync(favicon)) copyFileSync(favicon, join(wwwRoot, 'favicon.svg'));
+  if (existsSync(analyticsBootstrap)) copyFileSync(analyticsBootstrap, join(wwwRoot, 'analytics-bootstrap.js'));
 
   console.log(`[docs-serve] staged ${docsRoot}`);
 }

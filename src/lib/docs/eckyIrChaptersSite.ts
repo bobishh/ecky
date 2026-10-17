@@ -90,7 +90,7 @@ function documentHtml(title: string, options: ChaptersSiteOptions, main: string)
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
-    <script defer src="https://analytics.meta-uber-engineer.dev/client.js" data-project="ecky-cad" data-token="216c3f984f307273268ca7e98b97a35f4b14965897d06f872f0e267cbee18b6c"></script>
+    <script defer src="/analytics-bootstrap.js"></script>
     <style>${renderChapterStylesheet()}</style>
   </head>
   <body>
