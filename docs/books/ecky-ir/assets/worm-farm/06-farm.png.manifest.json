@@ -1,8 +1,8 @@
 {
   "sourcePath": "docs/books/ecky-ir/examples/worm-farm/06-farm.ecky",
-  "sourceSha256": "98a453e6356c8490b944ad96392cbd980320edb4474fed0331c7bf6b09b98021",
-  "eckyContentHash": "eaf6ad510caec57836cd2d3ca4346fa83d62d1caa1b173eb6bda0f544a5b3197",
-  "stlBytes": 2961684,
+  "sourceSha256": "b907a61fb1a13655db1d8160d5584dfa5085a2bef54ce9a1e763cb032ab60d98",
+  "eckyContentHash": "570fa9a7d8fcceb1d7b3f1310de62844a94cf9aef67650d2bd1778a0f197e747",
+  "stlBytes": 2957384,
   "pngPath": "docs/books/ecky-ir/assets/worm-farm/06-farm.png",
   "pngWidth": 960,
   "pngHeight": 960,

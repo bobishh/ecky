@@ -1,7 +1,7 @@
 {
   "sourcePath": "docs/books/ecky-ir/examples/worm-farm/02-mushroom-house.ecky",
-  "sourceSha256": "b5577a1f235cb67dcce74397f5aa3792f44aa1136b1ecb77f55bfea4f76f535e",
-  "eckyContentHash": "97f559c64c5ecb2ad8dac3c3590198a10e2ec766378032ec89a42d5b9c4e03f3",
+  "sourceSha256": "632368ba474ba6cdbde7d65887e95270e56a3c63d8b4ab75dc6ff7d21ead419f",
+  "eckyContentHash": "619a58097761dc710d72764bcf16f9b7838646f391be689667e10aa42424c780",
   "stlBytes": 166384,
   "pngPath": "docs/books/ecky-ir/assets/worm-farm/02-mushroom-house.png",
   "pngWidth": 960,

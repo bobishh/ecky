@@ -40,21 +40,27 @@ A `circle` is a flat outline. `sweep` carries that outline along the backbone to
 (model
   (params
     (number bend 24mm :label "Wiggle" :min 12 :max 32 :step 2))
+
   (part worm
-    (let* ((spine (bezier-path
-                    (list (list 0 0 6) (list 0 bend 6)
-                          (list 28 bend 6) (list 28 0 6)
-                          (list 28 (- bend) 6) (list 56 (- bend) 6)
-                          (list 56 0 6))))
-           (body (sweep (circle 6mm) spine)))
-      (union body
-        (translate 0 -2mm 6mm (sphere 6mm))
-        (translate 56mm 3mm 8mm (sphere 8mm))
-        (translate 52mm 8mm 14mm (sphere 3mm))
-        (translate 60mm 8mm 14mm (sphere 3mm))))))
+    (let* ((spine
+             (bezier-path
+               (list
+                 (list 0 0 6)
+                 (list 0 bend 6)
+                 (list 28 bend 6)
+                 (list 28 0 6)
+                 (list 28 (- bend) 6)
+                 (list 56 (- bend) 6)
+                 (list 56 0 6))))
+           (body (sweep (circle 6mm) spine))
+           (tail (translate 0 -2mm 6mm (sphere 6mm)))
+           (head (translate 56mm 3mm 8mm (sphere 8mm)))
+           (left-eye (translate 52mm 8mm 14mm (sphere 3mm)))
+           (right-eye (translate 60mm 8mm 14mm (sphere 3mm))))
+      (union body tail head left-eye right-eye))))
 ```
 
-[Download the complete worm](/docs/examples/14dea4d7024c-01-worm.ecky)
+[Download the complete worm](/docs/examples/4189afc54271-01-worm.ecky)
 
 `model` encloses the whole design. `params` declares the changeable control. `part worm` names the exported object. `let*` names the backbone `spine`, then uses that name to build `body`. Later bindings can use earlier ones. Parentheses group an instruction with its inputs; they are the recipe's bowls, not decoration.
 
@@ -108,19 +114,28 @@ Clearance means room between mating surfaces. It is not a promise that this prin
   (params
     (number wall 2mm :label "House wall" :min 1 :max 3 :step 0.5)
     (number roof_clearance 0.3mm :label "Roof clearance" :min 0.1 :max 0.8 :step 0.1))
+
   (part house
-    (difference
-      (cylinder 18mm 28mm)
-      (translate 0 0 2mm (cylinder (- 18mm wall) 27mm))
-      (translate 0 -16mm 8mm
-        (rotate 90deg 0 0 (cylinder 7mm 18mm :align '(center center center))))))
+    (let* ((outside (cylinder 18mm 28mm))
+           (room
+             (translate 0 0 2mm
+               (cylinder (- 18mm wall) 27mm)))
+           (doorway
+             (translate 0 -16mm 8mm
+               (rotate 90deg 0 0
+                 (cylinder 7mm 18mm :align '(center center center))))))
+      (difference outside room doorway)))
+
   (part roof
-    (translate 0 0 28mm
-      (union (cone 26mm 2mm 18mm)
-        (translate 0 0 -2mm (cylinder (- 18mm wall roof_clearance) 2mm))))))
+    (let* ((mushroom-cap (cone 26mm 2mm 18mm))
+           (roof-plug
+             (translate 0 0 -2mm
+               (cylinder (- 18mm wall roof_clearance) 2mm))))
+      (translate 0 0 28mm
+        (union mushroom-cap roof-plug)))))
 ```
 
-[Download the mushroom house and roof](/docs/examples/b5577a1f235c-02-mushroom-house.ecky)
+[Download the mushroom house and roof](/docs/examples/632368ba474b-02-mushroom-house.ecky)
 
 ### Invite a guest, not a wall
 
@@ -159,18 +174,29 @@ Counts are bare numbers: `5`, not `5mm`. Spacing is a length. This distinction m
 
 ```scheme
 (model
-  (params (number tooth_count 5 :label "Rake teeth" :min 3 :max 7 :step 1))
+  (params
+    (number tooth_count 5 :label "Rake teeth" :min 3 :max 7 :step 1))
+
   (part rake
-    (union
-      (translate 0 0 2mm (rotate -90deg 0 0 (cylinder 2mm 44mm)))
-      (translate 0 0 2mm
-        (rotate 0 90deg 0 (cylinder 2mm 32mm :align '(center center center))))
-      (repeat-union i tooth_count
-        (translate (* (- i (/ (- tooth_count 1) 2)) 4mm) 0 2mm
-          (rotate 90deg 0 0 (cylinder 1mm 12mm)))))))
+    (let* ((handle
+             (translate 0 0 2mm
+               (rotate -90deg 0 0
+                 (cylinder 2mm 44mm))))
+           (crossbar
+             (translate 0 0 2mm
+               (rotate 0 90deg 0
+                 (cylinder 2mm 32mm :align '(center center center)))))
+           (teeth
+             (repeat-union i tooth_count
+               (translate
+                 (* (- i (/ (- tooth_count 1) 2)) 4mm)
+                 0 2mm
+                 (rotate 90deg 0 0
+                   (cylinder 1mm 12mm))))))
+      (union handle crossbar teeth))))
 ```
 
-[Download the rake](/docs/examples/cfca8f409770-03-rake.ecky)
+[Download the rake](/docs/examples/7653d498d626-03-rake.ecky)
 
 ### Catch a copying mistake
 
@@ -218,29 +244,44 @@ The axle radius is 2 mm. The wheel bore adds `axle_clearance`, so a 0.3 mm radia
   (params
     (number wheel_radius 9mm :label "Wheel radius" :min 7 :max 12 :step 1)
     (number axle_clearance 0.3mm :label "Axle clearance" :min 0.1 :max 0.8 :step 0.1))
+
   (part chassis
-    (union
-      (translate 0 0 wheel_radius (box 26mm 42mm 6mm))
-      (repeat-union axle 2
-        (translate 0 (+ -13mm (* axle 26mm)) wheel_radius
-          (rotate 0 90deg 0 (cylinder 2mm 40mm :align '(center center center)))))
-      (translate 0 -10mm (+ wheel_radius 6mm) (box 18mm 20mm 12mm))
-      (translate 0 -14mm (+ wheel_radius 18mm) (cylinder 2mm 12mm))
-      (translate 0 12mm (+ wheel_radius 6mm)
-        (difference
-          (box 20mm 14mm 22mm)
-          (translate 0 0 4mm (box 22mm 10mm 15mm))))))
+    (let* ((body
+             (translate 0 0 wheel_radius
+               (box 26mm 42mm 6mm)))
+           (axles
+             (repeat-union axle 2
+               (translate 0 (+ -13mm (* axle 26mm)) wheel_radius
+                 (rotate 0 90deg 0
+                   (cylinder 2mm 40mm :align '(center center center))))))
+           (engine
+             (translate 0 -10mm (+ wheel_radius 6mm)
+               (box 18mm 20mm 12mm)))
+           (chimney
+             (translate 0 -14mm (+ wheel_radius 18mm)
+               (cylinder 2mm 12mm)))
+           (cabin
+             (translate 0 12mm (+ wheel_radius 6mm)
+               (difference
+                 (box 20mm 14mm 22mm)
+                 (translate 0 0 4mm (box 22mm 10mm 15mm))))))
+      (union body axles engine chimney cabin)))
+
   (part wheels
     (repeat-compound side 2
       (repeat-compound axle 2
-        (translate (* (- (* side 2) 1) 17mm) (+ -13mm (* axle 26mm)) wheel_radius
-          (rotate 0 90deg 0
-            (difference
-              (cylinder wheel_radius 6mm :align '(center center center))
-              (cylinder (+ 2mm axle_clearance) 8mm :align '(center center center)))))))))
+        (let* ((x (* (- (* side 2) 1) 17mm))
+               (y (+ -13mm (* axle 26mm)))
+               (bore_radius (+ 2mm axle_clearance))
+               (wheel
+                 (rotate 0 90deg 0
+                   (difference
+                     (cylinder wheel_radius 6mm :align '(center center center))
+                     (cylinder bore_radius 8mm :align '(center center center))))))
+          (translate x y wheel_radius wheel))))))
 ```
 
-[Download the tractor](/docs/examples/cfc59f9318d6-04-tractor.ecky)
+[Download the tractor](/docs/examples/c22df1745993-04-tractor.ecky)
 
 ### Inspect a useful failure
 
@@ -287,26 +328,38 @@ You met the distinction in the wing extension: sweep follows a path; loft joins 
 
 ```scheme
 (define-component fence_post ((number x 0mm) (number height 22mm))
-    (translate x 0 0
-      (union
-        (cylinder 2mm height)
-        (translate 0 0 height (cone 3mm 0mm 5mm)))))
+  (translate x 0 0
+    (union
+      (cylinder 2mm height)
+      (translate 0 0 height
+        (cone 3mm 0mm 5mm)))))
+
 (model
-  (params (number posts 6 :label "Fence posts" :min 3 :max 9 :step 1))
+  (params
+    (number posts 6 :label "Fence posts" :min 3 :max 9 :step 1))
 
   (part fence
-    (union
-      (repeat-union i posts (fence_post :x (* i 9mm)))
-      (translate (/ (* (- posts 1) 9mm) 2) 0 8mm
-        (box (+ (* (- posts 1) 9mm) 4mm) 2mm 3mm))
-      (translate (/ (* (- posts 1) 9mm) 2) 0 16mm
-        (box (+ (* (- posts 1) 9mm) 4mm) 2mm 3mm))))
+    (let* ((post_row
+             (repeat-union i posts
+               (fence_post :x (* i 9mm))))
+           (rail_length (+ (* (- posts 1) 9mm) 4mm))
+           (rail_center (/ (* (- posts 1) 9mm) 2))
+           (bottom_rail
+             (translate rail_center 0 8mm
+               (box rail_length 2mm 3mm)))
+           (top_rail
+             (translate rail_center 0 16mm
+               (box rail_length 2mm 3mm))))
+      (union post_row bottom_rail top_rail)))
+
   (part carrot
     (translate 20mm -12mm 0
-      (loft 18mm (circle 1mm) (regular-polygon 6 5mm)))))
+      (loft 18mm
+        (circle 1mm)
+        (regular-polygon 6 5mm)))))
 ```
 
-[Download the garden](/docs/examples/f16bd0405eea-05-garden.ecky)
+[Download the garden](/docs/examples/352efddca32f-05-garden.ecky)
 
 ### Reuse without hiding dependencies
 
@@ -355,10 +408,12 @@ Passing mesh checks cannot certify roof fit, tyre friction, stability, strength,
 
 ```scheme
 (define-component fence_post ((number x 0mm) (number height 22mm))
-    (translate x 0 0
-      (union
-        (cylinder 2mm height)
-        (translate 0 0 height (cone 3mm 0mm 5mm)))))
+  (translate x 0 0
+    (union
+      (cylinder 2mm height)
+      (translate 0 0 height
+        (cone 3mm 0mm 5mm)))))
+
 (model
   (params
     (number bend 24mm :label "Worm wiggle" :min 12 :max 32 :step 2)
@@ -371,73 +426,121 @@ Passing mesh checks cannot certify roof fit, tyre friction, stability, strength,
 
   (part worm
     (translate -25mm -30mm 0mm
-      (let* ((spine (bezier-path
-                    (list (list 0 0 6) (list 0 bend 6)
-                          (list 28 bend 6) (list 28 0 6)
-                          (list 28 (- bend) 6) (list 56 (- bend) 6)
-                          (list 56 0 6))))
-           (body (sweep (circle 6mm) spine)))
-      (union body
-        (translate 0 -2mm 6mm (sphere 6mm))
-        (translate 56mm 3mm 8mm (sphere 8mm))
-        (translate 52mm 8mm 14mm (sphere 3mm))
-        (translate 60mm 8mm 14mm (sphere 3mm))))))
+      (let* ((spine
+               (bezier-path
+                 (list
+                   (list 0 0 6)
+                   (list 0 bend 6)
+                   (list 28 bend 6)
+                   (list 28 0 6)
+                   (list 28 (- bend) 6)
+                   (list 56 (- bend) 6)
+                   (list 56 0 6))))
+             (body (sweep (circle 6mm) spine))
+             (tail (translate 0 -2mm 6mm (sphere 6mm)))
+             (head (translate 56mm 3mm 8mm (sphere 8mm)))
+             (left_eye (translate 52mm 8mm 14mm (sphere 3mm)))
+             (right_eye (translate 60mm 8mm 14mm (sphere 3mm))))
+        (union body tail head left_eye right_eye))))
+
   (part house
     (translate -30mm 35mm 0mm
-      (difference
-      (cylinder 18mm 28mm)
-      (translate 0 0 2mm (cylinder (- 18mm wall) 27mm))
-      (translate 0 -16mm 8mm
-        (rotate 90deg 0 0 (cylinder 7mm 18mm :align '(center center center)))))))
+      (let* ((outside (cylinder 18mm 28mm))
+             (room
+               (translate 0 0 2mm
+                 (cylinder (- 18mm wall) 27mm)))
+             (doorway
+               (translate 0 -16mm 8mm
+                 (rotate 90deg 0 0
+                   (cylinder 7mm 18mm :align '(center center center))))))
+        (difference outside room doorway))))
+
   (part roof
     (translate -30mm 35mm 0mm
-      (translate 0 0 28mm
-      (union (cone 26mm 2mm 18mm)
-        (translate 0 0 -2mm (cylinder (- 18mm wall roof_clearance) 2mm))))))
+      (let* ((cap (cone 26mm 2mm 18mm))
+             (plug
+               (translate 0 0 -2mm
+                 (cylinder (- 18mm wall roof_clearance) 2mm))))
+        (translate 0 0 28mm
+          (union cap plug)))))
+
   (part rake
     (translate 35mm 20mm 0mm
-      (union
-      (translate 0 0 2mm (rotate -90deg 0 0 (cylinder 2mm 44mm)))
-      (translate 0 0 2mm
-        (rotate 0 90deg 0 (cylinder 2mm 32mm :align '(center center center))))
-      (repeat-union i tooth_count
-        (translate (* (- i (/ (- tooth_count 1) 2)) 4mm) 0 2mm
-          (rotate 90deg 0 0 (cylinder 1mm 12mm)))))))
+      (let* ((handle
+               (translate 0 0 2mm
+                 (rotate -90deg 0 0 (cylinder 2mm 44mm))))
+             (crossbar
+               (translate 0 0 2mm
+                 (rotate 0 90deg 0
+                   (cylinder 2mm 32mm :align '(center center center)))))
+             (teeth
+               (repeat-union i tooth_count
+                 (translate
+                   (* (- i (/ (- tooth_count 1) 2)) 4mm)
+                   0 2mm
+                   (rotate 90deg 0 0 (cylinder 1mm 12mm))))))
+        (union handle crossbar teeth))))
+
   (part chassis
     (translate 65mm -28mm 0mm
-      (union
-      (translate 0 0 wheel_radius (box 26mm 42mm 6mm))
-      (repeat-union axle 2
-        (translate 0 (+ -13mm (* axle 26mm)) wheel_radius
-          (rotate 0 90deg 0 (cylinder 2mm 40mm :align '(center center center)))))
-      (translate 0 -10mm (+ wheel_radius 6mm) (box 18mm 20mm 12mm))
-      (translate 0 -14mm (+ wheel_radius 18mm) (cylinder 2mm 12mm))
-      (translate 0 12mm (+ wheel_radius 6mm)
-        (difference
-          (box 20mm 14mm 22mm)
-          (translate 0 0 4mm (box 22mm 10mm 15mm)))))))
+      (let* ((body
+               (translate 0 0 wheel_radius
+                 (box 26mm 42mm 6mm)))
+             (axles
+               (repeat-union axle 2
+                 (translate 0 (+ -13mm (* axle 26mm)) wheel_radius
+                   (rotate 0 90deg 0
+                     (cylinder 2mm 40mm :align '(center center center))))))
+             (engine
+               (translate 0 -10mm (+ wheel_radius 6mm)
+                 (box 18mm 20mm 12mm)))
+             (chimney
+               (translate 0 -14mm (+ wheel_radius 18mm)
+                 (cylinder 2mm 12mm)))
+             (cabin
+               (translate 0 12mm (+ wheel_radius 6mm)
+                 (difference
+                   (box 20mm 14mm 22mm)
+                   (translate 0 0 4mm (box 22mm 10mm 15mm))))))
+        (union body axles engine chimney cabin))))
+
   (part wheels
     (translate 65mm -28mm 0mm
       (repeat-compound side 2
-      (repeat-compound axle 2
-        (translate (* (- (* side 2) 1) 17mm) (+ -13mm (* axle 26mm)) wheel_radius
-          (rotate 0 90deg 0
-            (difference
-              (cylinder wheel_radius 6mm :align '(center center center))
-              (cylinder (+ 2mm axle_clearance) 8mm :align '(center center center)))))))))
+        (repeat-compound axle 2
+          (let* ((x (* (- (* side 2) 1) 17mm))
+                 (y (+ -13mm (* axle 26mm)))
+                 (bore_radius (+ 2mm axle_clearance))
+                 (wheel
+                   (rotate 0 90deg 0
+                     (difference
+                       (cylinder wheel_radius 6mm :align '(center center center))
+                       (cylinder bore_radius 8mm :align '(center center center))))))
+            (translate x y wheel_radius wheel))))))
+
   (part fence
     (translate -20mm 68mm 0mm
-      (union
-      (repeat-union i posts (fence_post :x (* i 9mm)))
-      (translate (/ (* (- posts 1) 9mm) 2) 0 8mm
-        (box (+ (* (- posts 1) 9mm) 4mm) 2mm 3mm))
-      (translate (/ (* (- posts 1) 9mm) 2) 0 16mm
-        (box (+ (* (- posts 1) 9mm) 4mm) 2mm 3mm)))))
+      (let* ((post_row
+               (repeat-union i posts
+                 (fence_post :x (* i 9mm))))
+             (rail_length (+ (* (- posts 1) 9mm) 4mm))
+             (rail_center (/ (* (- posts 1) 9mm) 2))
+             (bottom_rail
+               (translate rail_center 0 8mm
+                 (box rail_length 2mm 3mm)))
+             (top_rail
+               (translate rail_center 0 16mm
+                 (box rail_length 2mm 3mm))))
+        (union post_row bottom_rail top_rail))))
+
   (part carrot
-    (translate -10mm 50mm 0mm
-      (translate 20mm -12mm 0
-      (loft 18mm (circle 1mm) (regular-polygon 6 5mm)))))
+    (translate 10mm 38mm 0mm
+      (loft 18mm
+        (circle 1mm)
+        (regular-polygon 6 5mm))))
+
   (view peek_inside (offset-part roof 0 0 24mm))
+
   (verify
     (tag closed_farm)
     (intent "Farm exports have closed mesh edges")
@@ -445,7 +548,7 @@ Passing mesh checks cannot certify roof fit, tyre friction, stability, strength,
     (expect bad_edges (= 0))))
 ```
 
-[Download the complete farm](/docs/examples/98a453e6356c-06-farm.ecky)
+[Download the complete farm](/docs/examples/b907a61fb1a1-06-farm.ecky)
 
 Start at the part names. Collapse everything you already understand, then compare each outer placement with the previous chapter's local coordinates. Long source becomes readable when its pieces have names and a history.
 

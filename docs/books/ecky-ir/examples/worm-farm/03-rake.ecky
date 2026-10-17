@@ -1,10 +1,21 @@
 (model
-  (params (number tooth_count 5 :label "Rake teeth" :min 3 :max 7 :step 1))
+  (params
+    (number tooth_count 5 :label "Rake teeth" :min 3 :max 7 :step 1))
+
   (part rake
-    (union
-      (translate 0 0 2mm (rotate -90deg 0 0 (cylinder 2mm 44mm)))
-      (translate 0 0 2mm
-        (rotate 0 90deg 0 (cylinder 2mm 32mm :align '(center center center))))
-      (repeat-union i tooth_count
-        (translate (* (- i (/ (- tooth_count 1) 2)) 4mm) 0 2mm
-          (rotate 90deg 0 0 (cylinder 1mm 12mm)))))))
+    (let* ((handle
+             (translate 0 0 2mm
+               (rotate -90deg 0 0
+                 (cylinder 2mm 44mm))))
+           (crossbar
+             (translate 0 0 2mm
+               (rotate 0 90deg 0
+                 (cylinder 2mm 32mm :align '(center center center)))))
+           (teeth
+             (repeat-union i tooth_count
+               (translate
+                 (* (- i (/ (- tooth_count 1) 2)) 4mm)
+                 0 2mm
+                 (rotate 90deg 0 0
+                   (cylinder 1mm 12mm))))))
+      (union handle crossbar teeth))))

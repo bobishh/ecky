@@ -2,13 +2,22 @@
   (params
     (number wall 2mm :label "House wall" :min 1 :max 3 :step 0.5)
     (number roof_clearance 0.3mm :label "Roof clearance" :min 0.1 :max 0.8 :step 0.1))
+
   (part house
-    (difference
-      (cylinder 18mm 28mm)
-      (translate 0 0 2mm (cylinder (- 18mm wall) 27mm))
-      (translate 0 -16mm 8mm
-        (rotate 90deg 0 0 (cylinder 7mm 18mm :align '(center center center))))))
+    (let* ((outside (cylinder 18mm 28mm))
+           (room
+             (translate 0 0 2mm
+               (cylinder (- 18mm wall) 27mm)))
+           (doorway
+             (translate 0 -16mm 8mm
+               (rotate 90deg 0 0
+                 (cylinder 7mm 18mm :align '(center center center))))))
+      (difference outside room doorway)))
+
   (part roof
-    (translate 0 0 28mm
-      (union (cone 26mm 2mm 18mm)
-        (translate 0 0 -2mm (cylinder (- 18mm wall roof_clearance) 2mm))))))
+    (let* ((mushroom-cap (cone 26mm 2mm 18mm))
+           (roof-plug
+             (translate 0 0 -2mm
+               (cylinder (- 18mm wall roof_clearance) 2mm))))
+      (translate 0 0 28mm
+        (union mushroom-cap roof-plug)))))

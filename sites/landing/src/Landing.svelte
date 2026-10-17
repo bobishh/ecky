@@ -86,7 +86,7 @@
       <p>Ecky currently runs from source. Setup needs Node.js, Rust, Tauri prerequisites, and the native geometry runtime. The repository has the installation steps.</p>
       <a class="text-link" href={repoUrl + '#running-from-source'} target="_blank" rel="noreferrer">Build instructions ↗</a>
       <div class="reading-links">
-        <a href={chaptersUrl}><strong>Start with a bracket</strong><span>Two boxes, one union, then a dimension change. Continue into fits and larger models.</span></a>
+        <a href={chaptersUrl}><strong>Build a Worm Farm</strong><span>Shape a bendy worm, then add its mushroom house, rake, tractor, and garden one chapter at a time.</span></a>
         <a href={referenceUrl}><strong>Function reference</strong><span>Look up arguments, return types, selectors, and examples while writing a model.</span></a>
       </div>
       <p class="project-note">The language and app are under development. A successful render does not prove a part will fit or hold a load. Print small fit samples before a full assembly.</p>
