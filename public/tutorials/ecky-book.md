@@ -14,7 +14,7 @@ Your job: make one tooth, make a row, then change how many teeth the rake has.
 
 ### Find up, across, and forward {#rake-directions}
 
-![A small rake standing on five downward teeth with its handle leaning upward](/docs/assets/worm-farm/03-rake.png)
+![A small rake standing on five downward teeth with its handle leaning upward](/docs/assets/worm-farm/3d65a054c2b3-03-rake.png)
 
 Think of the printer bed as a table. X goes across it, Y goes away from you, Z goes up. A cylinder starts on that table and grows along Z.
 
@@ -97,7 +97,7 @@ Last chapter we added material with `union`. Now we remove a room and doorway wi
 
 ### Start with the outside {#house-outside}
 
-![A hollow mushroom house with a round doorway and its hollow conical roof resting beside it](/docs/assets/worm-farm/02-mushroom-house.png)
+![A hollow mushroom house with a round doorway and its hollow conical roof resting beside it](/docs/assets/worm-farm/22259b611ccf-02-mushroom-house.png)
 
 `(cylinder 18mm 28mm)` makes a round house 36 mm across and 28 mm tall. Remember: the first number is a radius, so double it to get the width. Its bottom sits at Z = 0.
 
@@ -178,7 +178,7 @@ Repeating a whole expression worked for rake teeth. A fence post adds a pointed 
 
 ### Package one proven post {#garden-component}
 
-![A fence with six pointed round posts and two rails, beside a carrot made by lofting profiles](/docs/assets/worm-farm/05-garden.png)
+![A fence with six pointed round posts and two rails, beside a carrot made by lofting profiles](/docs/assets/worm-farm/42504388ed53-05-garden.png)
 
 A component declaration goes before `model`; its signature lists inputs and defaults. Our `fence_post` accepts `x` and `height`. It builds a cylinder plus a cone, then moves the result to X = `x`. Calling `(fence_post :x 18mm)` uses the default height; calling it with `:height 30mm` overrides that height too.
 
@@ -250,7 +250,7 @@ The **Worm Farm** tractor needs wheels that turn and stay on. A wheel glued to a
 
 ### Lay out eleven pieces {#tractor-pieces}
 
-![The tractor kit: body, two hollow-ended axles, four wheels and four split retaining rivets on the print bed](/docs/assets/worm-farm/04-tractor.png)
+![The tractor kit: body, two hollow-ended axles, four wheels and four split retaining rivets on the print bed](/docs/assets/worm-farm/a07b7545790b-04-tractor.png)
 
 Count one body, two axles, four wheels, four rivets: **eleven separate pieces**. No metal rods, glue, or bought fasteners are part of this design.
 
@@ -258,7 +258,7 @@ The body has two sideways holes. Slide an axle through each hole, put a wheel on
 
 Start with [the small axle–wheel–rivet sample](/docs/examples/f48ecd0bccbd-tractor-fit-coupon.ecky). It uses the exact same component recipes as the tractor, with a shorter axle. Print these three pieces before the whole kit. Put the wheel on the axle, push the rivet in, then check: does the wheel turn, and does it stay on when pulled gently?
 
-![The short axle, flat wheel and split rivet used to test a printed fit](/docs/assets/worm-farm/tractor-fit-coupon.png)
+![The short axle, flat wheel and split rivet used to test a printed fit](/docs/assets/worm-farm/cc3f0cfc956d-tractor-fit-coupon.png)
 
 ### Leave space for the wheel {#tractor-running-fit}
 
@@ -291,7 +291,7 @@ Reference: [difference](https://ecky-cad.com/docs/boolean-and-transform-signatur
 
 Turn `print_layout` **off** to inspect the assembled tractor. The same component recipes move and turn into position. This switch changes exported geometry too: turn it on again before exporting the kit. It is not a preview-only `view`.
 
-![The same tractor parts in their assembled positions, with retaining heads outside the wheels](/docs/assets/worm-farm/tractor-assembled.png)
+![The same tractor parts in their assembled positions, with retaining heads outside the wheels](/docs/assets/worm-farm/0cada126e8df-tractor-assembled.png)
 
 The two repeats choose a side and an axle. Four calls make four wheels, then four more calls make the rivets. All share the named fit dimensions.
 
@@ -425,13 +425,13 @@ This is the hardest mechanism in the book. Start with two links. Once that joint
 
 ### Find the nine moving pieces {#worm-links}
 
-![A nine-piece articulated worm with a face, captive ball joints, rounded body links and a tapered tail](/docs/assets/worm-farm/01-worm.png)
+![A nine-piece articulated worm with a face, captive ball joints, rounded body links and a tapered tail](/docs/assets/worm-farm/2f44ce87f671-01-worm.png)
 
 The complete worm has a head, seven body links, and a tail. They are printed together in a straight row. They must remain **nine separate solids**, even though the balls are already inside their sockets. The straight printing position does not prevent later bending.
 
 Try [the two-link joint sample](/docs/examples/7e8a77ab33ed-worm-joint-coupon.ecky) first. It is the same ball and socket, without the face or long row. After printing, let it cool and gently check movement. Do not force a fused sample; adjust the gap and print another pair.
 
-![Two worm links sharing a captive ball-and-socket joint](/docs/assets/worm-farm/worm-joint-coupon.png)
+![Two worm links sharing a captive ball-and-socket joint](/docs/assets/worm-farm/b27894952c17-worm-joint-coupon.png)
 
 ### A ball inside a cage {#worm-ball-socket}
 
@@ -667,7 +667,7 @@ Welcome to the complete **Worm Farm**: rake, mushroom house, garden, snap-togeth
 
 ### Arrange the familiar pieces {#farm-layout}
 
-![The articulated worm in front of a mushroom house, rake, assembled tractor, fence and carrot](/docs/assets/worm-farm/06-farm.png)
+![The articulated worm in front of a mushroom house, rake, assembled tractor, fence and carrot](/docs/assets/worm-farm/ac7c831703b7-06-farm.png)
 
 The complete source is assembled from the chapter files when the book is built. Downloads are self-contained: you do not need a hidden component library. A source check catches an old tractor or rigid worm accidentally left in the farm.
 

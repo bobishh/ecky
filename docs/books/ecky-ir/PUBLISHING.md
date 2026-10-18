@@ -16,6 +16,10 @@ assembled tractor, and final farm from canonical chapter models; edit the chapte
 models rather than generated copies. Synchronization checks catch drift. `assets/worm-farm/` holds
 native CAD renders and source-hash manifests. Re-render after changing geometry.
 The source links are packaged under content-hashed `/docs/examples/` filenames.
+Published illustrations also include the SHA256 prefix of the PNG bytes, so a
+changed render receives a new browser cache key. Canonical image names stay
+stable for local Markdown and EPUB assembly. Chapter HTML and legacy unversioned
+image paths revalidate; hashed illustration URLs may be cached immutably.
 No online CAD service or AI image generator is needed to read or build the book.
 
 `ecky-ir-corpus.md` remains the source for the human reference, bounded agent

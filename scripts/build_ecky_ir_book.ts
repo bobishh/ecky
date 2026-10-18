@@ -21,7 +21,7 @@ const publicDocsDir = path.join(root, 'public', 'docs');
 
 syncEckyIrContent(root);
 syncSplitBook(root);
-const { chapters, exampleFiles } = readPublishedChapters(root, 'https://ecky-cad.com/docs', '');
+const { chapters, exampleFiles, imageFiles } = readPublishedChapters(root, 'https://ecky-cad.com/docs', '');
 const docsMarkdown = [
   buildLearningMarkdown(chapters, fs.readFileSync(path.join(root, 'docs/books/ecky-ir/introduction.md'), 'utf8')),
   fs.readFileSync(referenceSourcePath, 'utf8').replace(/^# .+\n/, ''),
@@ -38,7 +38,7 @@ fs.writeFileSync(htmlPath, book.html);
 copyHtmlAssets(book);
 writeEpub(book);
 publishToPublicDocs(book);
-for (const [relativePath, bytes] of exampleFiles) {
+for (const [relativePath, bytes] of [...exampleFiles, ...imageFiles]) {
   const outputPath = path.join(publicDocsDir, relativePath);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, bytes);

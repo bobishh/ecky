@@ -211,9 +211,13 @@ export function readPublishedChapters(root: string, sourceBase = '/docs', imageB
         const sourcePath = resolveSource(relativePath);
         const assetRoot = path.join(root, 'docs/books/ecky-ir/assets');
         if (!sourcePath.startsWith(`${assetRoot}${path.sep}`)) throw new Error(`Chapter image outside book assets: ${relativePath}`);
-        const assetPath = `assets/${path.relative(assetRoot, sourcePath).split(path.sep).join('/')}`;
-        imageFiles.set(assetPath, fs.readFileSync(sourcePath));
-        return `![${label}](${imageBase ? `${imageBase}/` : ''}${assetPath})`;
+        const localPath = `assets/${path.relative(assetRoot, sourcePath).split(path.sep).join('/')}`;
+        const bytes = fs.readFileSync(sourcePath);
+        const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 12);
+        const assetPath = `${path.posix.dirname(localPath)}/${hash}-${path.basename(sourcePath)}`;
+        imageFiles.set(assetPath, bytes);
+        // EPUB reads canonical local files; served images use immutable content URLs.
+        return `![${label}](${imageBase ? `${imageBase}/${assetPath}` : localPath})`;
       })
       .replace(/(?<!!)\[([^\]]+)\]\(([^)]+\.ecky)\)/g, (_, label, relativePath) => {
       const sourcePath = resolveSource(relativePath);
