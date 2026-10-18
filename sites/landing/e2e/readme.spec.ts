@@ -6,7 +6,7 @@ test('Given a visitor When reading below the models Then code, setup and project
   await expect(source.getByRole('heading', { name: 'A model is a text file.' })).toBeVisible();
   await expect(source.locator('pre')).toContainText('(model');
   await expect(page.getByRole('link', { name: /Build instructions/ })).toHaveAttribute('href', /#running-from-source/);
-  await expect(page.locator('#learn')).toContainText('Start with a bracket');
+  await expect(page.locator('#learn')).toContainText('Start the Worm Farm');
   await expect(page.locator('.feature-grid')).toHaveCount(0);
   await source.scrollIntoViewIfNeeded();
   await page.screenshot({ path: info.outputPath('landing-bottom.png'), fullPage: true });

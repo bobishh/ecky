@@ -200,11 +200,13 @@ test.describe('Ecky landing', () => {
     expect(errors, 'STL viewer loaded the mesh without errors').toEqual([]);
   });
 
-  test('Given learning routes When the page opens Then chapters and reference are linked', async ({ page }) => {
+  test('Given the Worm Farm book When a visitor starts learning Then the first lesson and reference are linked', async ({ page }) => {
     await page.goto('/');
 
     const learn = page.locator('#learn');
-    await expect(learn.getByRole('link', { name: /Start with a bracket/ })).toHaveAttribute('href', '/docs/chapters/');
+    await expect(learn.getByRole('link', { name: /Start the Worm Farm/ })).toHaveAttribute('href', '/docs/chapters/03-rake/');
+    await expect(learn).toContainText('Begin with a rake');
+    await expect(learn).not.toContainText(/bracket/i);
     await expect(learn.getByRole('link', { name: /Function reference/ })).toHaveAttribute('href', '/docs/');
   });
 });

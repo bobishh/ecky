@@ -4,6 +4,7 @@
 
   const repoUrl = 'https://github.com/bobishh/ecky';
   const chaptersUrl = '/docs/chapters/';
+  const firstChapterUrl = '/docs/chapters/03-rake/';
   const referenceUrl = '/docs/';
   const sourceExample = `(model
   (params
@@ -86,7 +87,7 @@
       <p>Ecky currently runs from source. Setup needs Node.js, Rust, Tauri prerequisites, and the native geometry runtime. The repository has the installation steps.</p>
       <a class="text-link" href={repoUrl + '#running-from-source'} target="_blank" rel="noreferrer">Build instructions ↗</a>
       <div class="reading-links">
-        <a href={chaptersUrl}><strong>Start with a bracket</strong><span>Two boxes, one union, then a dimension change. Continue into fits and larger models.</span></a>
+        <a href={firstChapterUrl}><strong>Start the Worm Farm</strong><span>Begin with a rake. Build a mushroom house, garden, snap-together tractor, and articulated worm.</span></a>
         <a href={referenceUrl}><strong>Function reference</strong><span>Look up arguments, return types, selectors, and examples while writing a model.</span></a>
       </div>
       <p class="project-note">The language and app are under development. A successful render does not prove a part will fit or hold a load. Print small fit samples before a full assembly.</p>
