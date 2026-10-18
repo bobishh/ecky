@@ -1643,6 +1643,7 @@ fn init_db_with_payload_mode(
     crate::exploration_store::ensure_schema(&conn)?;
 
     crate::services::codex_takeover::ensure_schema(&conn)?;
+    crate::services::project_naming::ensure_schema(&conn)?;
     crate::services::jev_classifications::ensure_schema(&conn)?;
 
     crate::capture_runs::ensure_schema(&conn)?;

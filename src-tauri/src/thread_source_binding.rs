@@ -253,7 +253,7 @@ pub(crate) fn stored_folder_export_args(folder: &Path) -> AppResult<(Option<Stri
             !name.is_empty()
                 && name
                     .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
         })
         .ok_or_else(|| {
             AppError::validation(format!(
@@ -525,12 +525,45 @@ pub fn backfill_binding(
         return Ok(existing);
     }
 
-    let slug = project_mirror::project_slug(title, thread_id);
-    let folder = project_mirror::project_dir(app, configured_root, &slug)?;
-    if let Some(manifest) = project_mirror::read_manifest(&folder)? {
+    // Names are not identity. Older unindexed mirrors may still have a default
+    // or ASCII-only title prefix, so discover ownership before creating source.
+    let mut owned = Vec::new();
+    for slug in project_mirror::list_project_slugs(app, configured_root)? {
+        let Ok(folder) = project_mirror::project_dir(app, configured_root, &slug) else {
+            continue;
+        };
+        if let Ok(Some(manifest)) = project_mirror::read_manifest(&folder) {
+            if manifest.thread_id == thread_id {
+                owned.push((folder, manifest));
+            }
+        }
+    }
+    if owned.len() > 1 {
+        return Err(AppError::validation(format!(
+            "Thread '{thread_id}' has multiple unindexed project folders; source ownership is ambiguous."
+        )));
+    }
+    if let Some((folder, manifest)) = owned.pop() {
         // Adopt an existing mirror folder without rewriting its bytes.
         return upsert_binding_row(conn, thread_id, &folder, &manifest.source_digest, None)
             .map_err(AppError::from);
+    }
+
+    let folder = binding_folder(app, configured_root, title, thread_id)?;
+    match std::fs::symlink_metadata(&folder) {
+        Ok(_) => {
+            return Err(AppError::validation(format!(
+                "Cannot initialize source in '{}': existing folder ownership is not established.",
+                folder.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(AppError::persistence(format!(
+                "Cannot inspect source folder '{}': {error}",
+                folder.display()
+            )))
+        }
     }
 
     let source = existing_source.unwrap_or(DEFAULT_THREAD_SOURCE);

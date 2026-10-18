@@ -6,6 +6,9 @@ The system SHALL preserve global Ecky SQLite history and SHALL bind every new
 thread to a persistent source folder and `model.ecky` under configured source
 root. It SHALL create folder, default source, and sidecar binding manifest on
 thread creation. It SHALL retain exact bound path after title/root changes.
+The `stable-project-folder-names` startup migration MAY replace exact legacy
+`untitled-design-<id>` placeholders with neutral names before source consumers
+start; it SHALL preserve contents and update stored source/provider paths together.
 
 #### Scenario: New thread gets source immediately
 

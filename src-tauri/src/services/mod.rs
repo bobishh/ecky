@@ -27,6 +27,7 @@ pub mod managed_jev_trace;
 pub mod manual_code;
 pub mod manual_parameters;
 pub mod printability;
+pub mod project_naming;
 pub mod provider_executable;
 pub mod render;
 pub mod render_snapshot;

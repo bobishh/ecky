@@ -33,6 +33,14 @@ A project keeps its source, conversation, and model versions together. The usual
 
 Source, settings, and history are stored locally. Manual authoring does not require an AI provider. Remote AI connections receive the context needed for the request, which can include source, conversation, attachments, and viewport images.
 
+Blank designs use stable `ecky-design-<id>` source folders, where `<id>` is a
+short suffix of the thread UUID. Supplying a title at creation uses that title
+(including Cyrillic) as the initial prefix. Later conversation titles do not
+move the folder. On startup, Ecky migrates old `untitled-design-<id>` folders to
+the neutral prefix before starting agents and file watchers, preserving source,
+additional files, history, and provider conversations. Occupied destinations
+are left untouched and reported in app logs.
+
 For a concrete example, the repository contains a [bicycle bottle holder](sites/landing/src/models/bicycle-bottle-holder.ecky) and a separate [frame mount rail](sites/landing/src/models/bottle-holder-frame-mount-rail.ecky). Their source includes dimensions for the bottle, frame, walls, and dovetail connection. These are modeling examples; the files alone do not establish physical fit.
 
 ## The model source

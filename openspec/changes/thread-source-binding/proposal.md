@@ -37,6 +37,8 @@ configured source root           normal user-visible folders
 
 - `thread_source_bindings` persists thread ID, absolute folder, source path,
   digest, and timestamps. A thread keeps its folder after rename/root change.
+  `stable-project-folder-names` adds a startup-only migration of exact legacy
+  `untitled-design-<id>` placeholders; subsequent title changes still retain paths.
 - Existing `ecky-project.edn` schema v1 remains the only folder sidecar.
   No schema bump, second manifest, or per-version parser branches.
 - New thread creation creates the folder and default `model.ecky` immediately.

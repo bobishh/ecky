@@ -103,19 +103,20 @@ pub fn projects_root(app: &dyn PathResolver, configured: Option<&str>) -> PathBu
     }
 }
 
-/// Deterministic folder slug: human prefix from the title plus a stable
-/// thread-id suffix so renames and collisions cannot cross-wire folders.
+/// A supplied title names the initial folder. Blank designs use a neutral
+/// prefix; later title changes never change an established source path.
 pub fn project_slug(title: &str, thread_id: &str) -> String {
-    let mut prefix: String = title
+    let title = title.trim();
+    let prefix: String = title
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect::<String>()
         .split('-')
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    prefix.truncate(40);
+    let prefix = prefix.chars().take(40).collect::<String>();
     let suffix: String = thread_id
         .chars()
         .rev()
@@ -125,8 +126,8 @@ pub fn project_slug(title: &str, thread_id: &str) -> String {
         .chars()
         .rev()
         .collect();
-    if prefix.is_empty() {
-        format!("project-{suffix}")
+    if prefix.is_empty() || title.eq_ignore_ascii_case("Untitled design") {
+        format!("ecky-design-{suffix}")
     } else {
         format!("{prefix}-{suffix}")
     }
@@ -140,7 +141,7 @@ pub fn project_dir(
     if slug.is_empty()
         || !slug
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
         return Err(AppError::validation(format!(
             "Project slug `{slug}` is not a safe directory name."
@@ -1602,11 +1603,11 @@ mod tests {
         );
         let slug = project_slug("Película / адаптер", "thread-XYZ99876");
         assert!(
-            slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            slug.chars().all(|c| c.is_alphanumeric() || c == '-'),
             "{slug}"
         );
         assert!(slug.ends_with("XYZ99876"), "{slug}");
-        assert!(project_slug("", "thread-1").starts_with("project-"));
+        assert!(project_slug("", "thread-1").starts_with("ecky-design-"));
     }
 
     #[test]

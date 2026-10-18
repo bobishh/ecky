@@ -77,6 +77,7 @@ jobs:
             context_budget_audit \
             llm_eval_artifacts \
             llm_eval_compare_cli \
+            project_folder_naming \
             provider_turn_intent
           do
             cargo test -p ecky_cad --test "$test_target" --all-features --verbose

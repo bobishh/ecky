@@ -647,7 +647,7 @@ pub fn run() {
                 load_startup_config_or_default(app.handle(), &config_dir, default_config);
 
             let db_path = config_dir.join("history.sqlite");
-            let (conn, startup_warnings) = init_history_db_with_recovery(&config_dir)
+            let (conn, mut startup_warnings) = init_history_db_with_recovery(&config_dir)
                 .map_err(|err| tauri::Error::Io(std::io::Error::other(err)))?;
             let read_conn = db::init_db(&db_path).map_err(|err| {
                 tauri::Error::Io(std::io::Error::other(format!(
@@ -692,6 +692,25 @@ pub fn run() {
             }
             let _ = crate::services::codex_takeover::recover_stale_sending(&conn, startup_now);
             let _ = migrate_legacy_references(&conn);
+            // Move legacy placeholders only before any provider, MCP listener,
+            // source consumer or watcher can retain a working directory/path.
+            let naming = crate::services::project_naming::reconcile_project_names(&conn);
+            if naming.blocked {
+                return Err(std::io::Error::other(format!(
+                    "Project folder relocation must recover before startup: {}",
+                    naming.errors.join("; ")
+                ))
+                .into());
+            }
+            startup_warnings.extend(
+                naming
+                    .errors
+                    .into_iter()
+                    .map(|error| format!("[PROJECT] legacy folder rename deferred: {error}")),
+            );
+            if naming.renamed > 0 {
+                eprintln!("[BOOT] renamed {} legacy project folder(s)", naming.renamed);
+            }
             let last_snapshot = crate::services::session::read_last_snapshot(app.handle(), &conn);
 
             let mcp_port = config.mcp.port;
