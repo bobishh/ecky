@@ -3,11 +3,11 @@ import { expect, test } from '@playwright/test';
 test('Given a new reader When following chapter one Then a complete editable example accompanies the explanation', async ({ page, request }, info) => {
   await page.goto('/docs/chapters/');
   await page.getByRole('link', { name: /Chapter 01/ }).click();
-  const example = page.getByRole('link', { name: 'Download the complete worm' });
+  const example = page.getByRole('link', { name: 'Download the rake' });
   await expect(example).toBeVisible();
   const source = await request.get((await example.getAttribute('href'))!);
   expect(source.ok()).toBe(true);
-  expect(await source.text()).toContain('(body (sweep (circle 6mm) spine))');
+  expect(await source.text()).toContain('(tag connected-rake)');
   await expect(page.locator('.docs-main pre').first()).toContainText('(model');
   await expect(page.locator('.docs-main')).toContainText('Try');
   await expect(page.locator('.docs-main figure img')).toBeVisible();
@@ -44,7 +44,7 @@ test('Given the rewritten chapters When the EPUB is downloaded Then it contains 
   const file = info.outputPath('guide.epub');
   writeFileSync(file, await response.body());
   const content = execFileSync('unzip', ['-p', file, 'OEBPS/content.xhtml'], { encoding: 'utf8' });
-  expect(content).toContain('A worm with a wiggle');
+  expect(content).toContain('A worm that really bends');
   expect(content).toContain('Open the gates, check the farm');
   expect(content).toContain('https://ecky-cad.com/docs/examples/');
 });
@@ -74,5 +74,34 @@ test('Given all six chapters When following their assets Then illustrations and 
       expect(response.ok()).toBe(true);
       expect(await response.text()).toContain('(model');
     }
+  }
+});
+
+
+for (const slug of ['03-rake', '02-mushroom-house', '05-garden', '04-tractor', '01-worm', '06-farm']) {
+  test(`Given ${slug} contents When following links Then each reaches its own heading`, async ({ page }) => {
+    await page.goto(`/docs/chapters/${slug}/`);
+    const contents = page.getByRole('navigation', { name: 'On this page' });
+    const hrefs = await contents.locator('a').evaluateAll(nodes => nodes.map(node => node.getAttribute('href')!));
+    expect(new Set(hrefs).size).toBe(hrefs.length);
+    for (const href of hrefs) {
+      await contents.locator(`a[href="${href}"]`).click();
+      await expect(page.locator(href)).toHaveCount(1);
+      expect(new URL(page.url()).hash).toBe(href);
+      await expect.poll(() => page.locator(href).evaluate(node => {
+        const top = node.getBoundingClientRect().top;
+        const atEnd = scrollY + innerHeight >= document.documentElement.scrollHeight - 2;
+        return top >= 60 && (top < 220 || (atEnd && top < innerHeight));
+      }), { message: `Heading should scroll into reading position: ${slug}${href}` }).toBe(true);
+    }
+  });
+}
+
+test('Given operation index When opening different functions Then each opens its own signature', async ({ page }) => {
+  for (const [name, route] of [['box', 'primitive-signatures'], ['translate', 'boolean-and-transform-signatures']]) {
+    await page.goto('/docs/');
+    await page.locator(`.docs-main a[href="/docs/${route}/#${name}"]`).first().click();
+    await expect(page).toHaveURL(new RegExp(`/docs/${route}/#${name}$`));
+    await expect(page.locator(`h3#${name}`)).toBeVisible();
   }
 });

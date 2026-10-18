@@ -109,34 +109,34 @@ test('Given workbench dock When docs opens Then floating docs window renders les
   const docsWindow = page.locator('[data-window-id="docs"]');
   await expect(docsWindow).toBeVisible();
   await expect(docsWindow.getByRole('heading', { name: 'Worm Farm' })).toBeVisible();
-  await expect(docsWindow.getByRole('button', { name: 'Chapter 1: A worm with a wiggle' })).toBeVisible();
+  await expect(docsWindow.getByRole('button', { name: 'Chapter 1: A rake with teeth pointing down' })).toBeVisible();
   await expect(docsWindow.getByRole('button', { name: 'Chapter 6: Open the gates, check the farm' })).toBeVisible();
 
-  await docsWindow.getByRole('button', { name: 'Chapter 1: A worm with a wiggle' }).click();
-  await expect(docsWindow.getByRole('heading', { name: 'Chapter 1: A worm with a wiggle' })).toBeVisible();
+  await docsWindow.getByRole('button', { name: 'Chapter 1: A rake with teeth pointing down' }).click();
+  await expect(docsWindow.getByRole('heading', { name: 'Chapter 1: A rake with teeth pointing down' })).toBeVisible();
   await expect(docsWindow.locator('pre').first()).toContainText('(model');
   const illustration = docsWindow.locator('figure img').first();
   await expect(illustration).toBeVisible();
   await expect.poll(() => illustration.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
   await expect(docsWindow.locator('pre').filter({ hasText: '(union' }).first()).toBeVisible();
   await docsWindow.getByRole('button', { name: 'OPEN ATTEMPT IN CODE' }).click();
-  const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: A worm with a wiggle.ecky' });
+  const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: A rake with teeth pointing down.ecky' });
   await expect(codeModal).toBeVisible();
   await expect(codeModal).toHaveClass(/window--focused/);
   await expect(docsWindow).not.toHaveClass(/window--focused/);
   expect(await numericZIndex(codeModal)).toBeGreaterThan(await numericZIndex(docsWindow));
-  await expect(codeModal.locator('.cm-content')).toContainText('(body (sweep (circle 6mm) spine))');
+  await expect(codeModal.locator('.cm-content')).toContainText('(tag connected-rake)');
   await expect(codeModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
   await expect(codeModal.getByRole('button', { name: 'FORK TO NEW THREAD' })).toHaveCount(0);
-  await expect(codeModal.getByRole('button', { name: 'INSERT VERIFY' })).toBeVisible();
+  await expect(codeModal.getByRole('button', { name: 'VERIFY EXISTS' })).toBeDisabled();
   await expect(codeModal.getByText('ECKY SOURCE')).toHaveCount(0);
   await expect(codeModal.getByText('SCRATCH SNIPPET ONLY')).toHaveCount(0);
   await codeModal.locator('.window-close').click();
   await expect(codeModal).toBeHidden();
   await expect(docsWindow).toHaveClass(/window--focused/);
 
-  await docsWindow.getByRole('button', { name: 'Chapter 5: A fence, a carrot, and a reusable recipe' }).click();
-  await expect(docsWindow.getByRole('heading', { name: 'Chapter 5: A fence, a carrot, and a reusable recipe' })).toBeVisible();
+  await docsWindow.getByRole('button', { name: 'Chapter 3: A fence, a carrot, and a reusable recipe' }).click();
+  await expect(docsWindow.getByRole('heading', { name: 'Chapter 3: A fence, a carrot, and a reusable recipe' })).toBeVisible();
   await expect(docsWindow.locator('pre').first()).toContainText('(model');
   await docsWindow.getByRole('button', { name: 'OPEN ATTEMPT IN CODE' }).click();
   const tutorialModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: A fence, a carrot, and a reusable recipe.ecky' });
@@ -159,10 +159,10 @@ test('Given fresh thread When docs snippet opens in code Then modal can apply as
   await page.goto('/');
   await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Ecky IR docs', exact: true }).click();
   const docsWindow = page.locator('[data-window-id="docs"]');
-  await docsWindow.getByRole('button', { name: 'Chapter 1: A worm with a wiggle' }).click();
+  await docsWindow.getByRole('button', { name: 'Chapter 1: A rake with teeth pointing down' }).click();
   await docsWindow.getByRole('button', { name: 'OPEN ATTEMPT IN CODE' }).click();
 
-  const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: A worm with a wiggle.ecky' });
+  const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: A rake with teeth pointing down.ecky' });
   await expect(codeModal).toBeVisible();
   await expect(codeModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
 });
@@ -178,4 +178,17 @@ test('Given projects window When plus new opens chooser Then chooser is global n
   const chooser = page.locator('.modal-backdrop').filter({ hasText: 'Start New Project' });
   await expect(chooser).toBeVisible();
   await expect(projectsWindow.getByText('Start New Project')).toHaveCount(0);
+});
+
+test('Given reference index When following different operation links Then each mounts its own section', async ({ page }) => {
+  await page.goto('/');
+  await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Ecky IR docs', exact: true }).click();
+  const docs = page.locator('[data-window-id="docs"]');
+  await docs.getByRole('button', { name: 'Function Reference', exact: true }).click();
+  for (const [name, section] of [['box', 'Primitive Signatures'], ['translate', 'Boolean and Transform Signatures']]) {
+    await docs.getByRole('button', { name: 'Operation Index', exact: true }).click();
+    await docs.locator(`.docs-article a[href="#${name}"]`).first().click();
+    await expect(docs.locator('.docs-article h2')).toHaveText(section);
+    await expect(docs.locator(`h3#${name}`)).toBeInViewport();
+  }
 });

@@ -9,8 +9,8 @@ describe('shared illustrated book in the app', () => {
     expect(container.textContent).toContain('Worm Farm');
     expect(container.querySelectorAll('pre').length).toBe(1);
     await fireEvent.click(getByRole('button', { name: 'OPEN ATTEMPT IN CODE' }));
-    expect(onOpenAttempt.mock.calls[0][0].code).toContain('(body (sweep (circle 6mm) spine))');
-    await fireEvent.click(getByRole('button', { name: /Chapter 5:/ }));
+    expect(onOpenAttempt.mock.calls[0][0].code).toContain('(tag connected-rake)');
+    await fireEvent.click(getByRole('button', { name: /Chapter 3:/ }));
     await fireEvent.click(getByRole('button', { name: 'OPEN ATTEMPT IN CODE' }));
     const code = onOpenAttempt.mock.calls[1][0].code;
     expect(code).toMatch(/^\(define-component fence_post/);

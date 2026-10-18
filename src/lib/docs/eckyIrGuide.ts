@@ -68,6 +68,24 @@ export function resolveSection(
   return sections.find((section) => section.slug === slug) ?? sections[0];
 }
 
+/** Resolve against the whole document before mounting a section. */
+export function resolveDocsAnchor(
+  sections: DocsSection[], hash: string, activeSlug?: string | null,
+): { section: DocsSection; id: string } | null {
+  if (!hash.startsWith('#')) return null;
+  let id: string;
+  try { id = decodeURIComponent(hash.slice(1)); } catch { return null; }
+  if (!id) return null;
+  const candidates = [...sections.filter(section => section.slug === activeSlug),
+    ...sections.filter(section => section.slug !== activeSlug)];
+  for (const section of candidates) {
+    if (section.slug === id || [...section.bodyHtml.matchAll(/\bid="([^"]+)"/g)].some(match => match[1] === id)) {
+      return { section, id };
+    }
+  }
+  return null;
+}
+
 export function renderMarkdownFragment(markdown: string, options: DocsRenderOptions = {}): string {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n');
   const chunks: string[] = [];
@@ -143,15 +161,15 @@ export function renderMarkdownFragment(markdown: string, options: DocsRenderOpti
 
     if (trimmed.startsWith('### ')) {
       flushParagraph();
-      const heading = trimmed.slice(4).trim();
-      chunks.push(`<h3 id="${docsHeadingSlug(heading)}">${renderInline(heading)}</h3>`);
+      const heading = parseAnchoredHeading(trimmed.slice(4).trim());
+      chunks.push(`<h3 id="${heading.id}">${renderInline(heading.title)}</h3>`);
       continue;
     }
 
     if (trimmed.startsWith('#### ')) {
       flushParagraph();
-      const heading = trimmed.slice(5).trim();
-      chunks.push(`<h4 id="${docsHeadingSlug(heading)}">${renderInline(heading)}</h4>`);
+      const heading = parseAnchoredHeading(trimmed.slice(5).trim());
+      chunks.push(`<h4 id="${heading.id}">${renderInline(heading.title)}</h4>`);
       continue;
     }
 
@@ -254,6 +272,11 @@ function renderInline(text: string): string {
   output = output.replace(/`([^`]+)`/g, (_match, code) => `<code>${code}</code>`);
   output = output.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   return output;
+}
+
+function parseAnchoredHeading(value: string): { title: string; id: string } {
+  const match = value.match(/^(.*?) \{#([a-z0-9-]+)\}$/);
+  return match ? { title: match[1], id: match[2] } : { title: value, id: docsHeadingSlug(value) };
 }
 
 export function docsHeadingSlug(value: string): string {

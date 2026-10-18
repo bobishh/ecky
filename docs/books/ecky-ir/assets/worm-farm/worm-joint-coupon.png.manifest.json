@@ -1,0 +1,13 @@
+{
+  "sourcePath": "docs/books/ecky-ir/examples/worm-farm/worm-joint-coupon.ecky",
+  "sourceSha256": "7e8a77ab33eda836c277d3c1c6e51925248eafe4a6983f812bacd9e4472287c3",
+  "eckyContentHash": "8df2c2b728de8e342a0bd103584864c068fa90db4c8a6ac2be675c871880eb56",
+  "stlBytes": 1074884,
+  "pngPath": "docs/books/ecky-ir/assets/worm-farm/worm-joint-coupon.png",
+  "pngWidth": 960,
+  "pngHeight": 960,
+  "nonBackgroundCoverage": 0.14359266493055556,
+  "renderer": "three-webgl-swiftshader",
+  "backend": "direct-occt",
+  "generatedBy": "scripts/render_ecky_preview_png.mjs"
+}

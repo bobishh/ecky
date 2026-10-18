@@ -5,11 +5,11 @@
 Build one little farm, learning one new idea at a time. Website, app Chapters,
 and EPUB share the following Markdown sources and their complete examples.
 
-- [Chapter 1: A worm with a wiggle](missions/01-worm.md)
+- [Chapter 1: A rake with teeth pointing down](missions/03-rake.md)
 - [Chapter 2: A mushroom with a front door](missions/02-mushroom-house.md)
-- [Chapter 3: A rake for a farmer with no hands](missions/03-rake.md)
-- [Chapter 4: The smallest tractor traffic jam](missions/04-tractor.md)
-- [Chapter 5: A fence, a carrot, and a reusable recipe](missions/05-garden.md)
+- [Chapter 3: A fence, a carrot, and a reusable recipe](missions/05-garden.md)
+- [Chapter 4: Wheels, axles, and snap-on rivets](missions/04-tractor.md)
+- [Chapter 5: A worm that really bends](missions/01-worm.md)
 - [Chapter 6: Open the gates, check the farm](missions/06-farm.md)
 
 [Source/build/publishing runbook](PUBLISHING.md) explains all serving paths.

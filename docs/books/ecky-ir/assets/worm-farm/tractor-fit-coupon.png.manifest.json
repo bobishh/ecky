@@ -1,0 +1,13 @@
+{
+  "sourcePath": "docs/books/ecky-ir/examples/worm-farm/tractor-fit-coupon.ecky",
+  "sourceSha256": "f48ecd0bccbdca2af7739730ccd2d4e24c49652262c07681fc5cff9cc20ae282",
+  "eckyContentHash": "6e71d22de422df9f5edc1b18c2b3ab14ff8b6a33ab643e45c07a3fa207ecd0a0",
+  "stlBytes": 295584,
+  "pngPath": "docs/books/ecky-ir/assets/worm-farm/tractor-fit-coupon.png",
+  "pngWidth": 960,
+  "pngHeight": 960,
+  "nonBackgroundCoverage": 0.08988823784722222,
+  "renderer": "three-webgl-swiftshader",
+  "backend": "direct-occt",
+  "generatedBy": "scripts/render_ecky_preview_png.mjs"
+}

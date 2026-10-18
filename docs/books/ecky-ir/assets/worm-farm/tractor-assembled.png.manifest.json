@@ -1,0 +1,13 @@
+{
+  "sourcePath": "docs/books/ecky-ir/examples/worm-farm/tractor-assembled.ecky",
+  "sourceSha256": "296c738aad508b962ee2551b026a4197d0fad22b4252142b9b9d1a5759b1c4d9",
+  "eckyContentHash": "c0daa2798f3985414c54fdd68f37255fb284d0799546a9c79bb058f45f783f51",
+  "stlBytes": 958884,
+  "pngPath": "docs/books/ecky-ir/assets/worm-farm/tractor-assembled.png",
+  "pngWidth": 960,
+  "pngHeight": 960,
+  "nonBackgroundCoverage": 0.3963888888888889,
+  "renderer": "three-webgl-swiftshader",
+  "backend": "direct-occt",
+  "generatedBy": "scripts/render_ecky_preview_png.mjs"
+}

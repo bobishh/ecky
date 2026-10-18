@@ -5,33 +5,43 @@ title: Chapter 2: A mushroom with a front door
 
 # Chapter 2: A mushroom with a front door
 
-The **Worm Farm** farmer has found a mushroom. Unfortunately it is entirely solid inside. Very good mushroom; very bad house.
+The **Worm Farm** farmer has found a mushroom. Unfortunately it is solid inside. Very good mushroom; very bad house.
 
-Last chapter we **added** material with `union`. This chapter removes it with `difference`. We also learn to keep a roof separate, so our farmer can rearrange the furniture without eating the ceiling.
+Last chapter we added material with `union`. Now we remove a room and doorway with `difference`, then make a separate roof that lifts off.
 
 ## Start with the outside {#house-outside}
 
-![A hollow mushroom house with a round doorway and a wide removable conical roof](../assets/worm-farm/02-mushroom-house.png)
+![A hollow mushroom house with a round doorway and its hollow conical roof resting beside it](../assets/worm-farm/02-mushroom-house.png)
 
-A `cylinder` takes radius and height, in that order. `(cylinder 18mm 28mm)` is a round house 36 mm across and 28 mm tall. Its default bottom is Z = 0, and its X/Y centre is the origin. A `cone` takes bottom radius, top radius, height. The roof narrows from radius 26 to radius 2 over 18 mm.
+`(cylinder 18mm 28mm)` makes a round house 36 mm across and 28 mm tall. Remember: the first number is a radius, so double it to get the width. Its bottom sits at Z = 0.
 
-Current round primitives take dimensions only. An extra “number of sides” is rejected. For a hexagonal shape, use `(extrude (regular-polygon 6 radius) height)`; we will try that in the garden chapter. A cylinder is round on purpose.
+For the roof, `(cone 26mm 2mm 26mm)` narrows from a wide bottom to a small top over 26 mm of height. Both round shapes take dimensions, not a “number of sides.”
+
+Reference: [cylinder](https://ecky-cad.com/docs/primitive-signatures/#cylinder), [cone](https://ecky-cad.com/docs/primitive-signatures/#cone).
 
 ## Scoop out a room {#house-cavity}
 
-A cutter is a shape you subtract. It does not become another exported object. Put the big cylinder first in `difference`, then the smaller room and the doorway.
+Imagine pressing a smaller cylinder into the big one, then removing everything it touches. That smaller shape is a **cutter**. Put the house first and its cutters after it:
 
-Our `wall` control is 2 mm. The room radius is `18 - 2 = 16`; its diameter is 32. Its bottom starts at Z = 2, leaving a 2 mm floor. The room is 27 mm tall, so it ends at Z = 29—one millimetre above the outside. That overshoot opens the top cleanly.
+```scheme
+(difference outside room doorway)
+```
 
-The doorway cutter is another cylinder, turned sideways with `rotate`. Angles such as `90deg` are degrees. A cylinder normally points up Z; rotation around X turns its axis along Y. The cutter reaches the front wall and ends inside the room. It does not drill a second door through the back.
+`wall` starts at 2 mm. The room radius is `18 - wall`, or 16 mm. Its bottom starts 2 mm above the bed, leaving a floor. The room cutter ends at Z = 29, above the 28 mm house, so the top opens completely.
 
-## Keep the roof movable {#house-roof}
+The doorway cutter is a cylinder turned sideways, just as we turned the rake's bar. It cuts the front wall and reaches the room. It stops before the back wall, so we get one door.
 
-`part house` and `part roof` are separate pieces. Joining them would give our worm a permanently sealed mushroom. Ordinary `translate` affects the exported position; here it raises the roof to the house's top at Z = 28.
+A cutter disappears after subtraction. Do not export it as another `part`, or you would fill the room again.
 
-The short plug under the roof fits into the room. Its radius is `18 - wall - roof_clearance`. At the defaults that is 15.7 mm, against the room's 16 mm radius: 0.3 mm of space **per side**, or 0.6 mm across the diameter.
+Reference: [difference](https://ecky-cad.com/docs/boolean-and-transform-signatures/#difference).
 
-Clearance means room between mating surfaces. It is not a promise that this printer and filament will fit perfectly. Print a short ring and plug before spending time on the complete house.
+## Make a roof that lifts off {#house-roof}
+
+`part house` and `part roof` keep the two pieces separate. The roof is hollow too: a short round opening makes its rim, and a cone scoops out the space above it. Its sloped inner surface rises at 45 degrees. Its wide, flat rim rests on the bed for printing.
+
+The roof fits **over the outside** of the house. Its opening radius is `18 + roof_clearance`, or 18.3 mm. That leaves 0.3 mm per side around the 18 mm wall. Changing `wall` changes the room; changing `roof_clearance` changes this fit.
+
+`house_print_layout` starts on, placing the roof beside the house on the bed. Turn it off to inspect the roof over the house. This changes export positions too; return to print layout before exporting the two pieces. The assembled placement shows the nominal skirt position; the sloped inside seats on the rim when printed.
 
 ## Build the house {#house-source}
 
@@ -39,13 +49,13 @@ Clearance means room between mating surfaces. It is not a promise that this prin
 
 [Download the mushroom house and roof](../examples/worm-farm/02-mushroom-house.ecky)
 
-## Invite a guest, not a wall {#house-experiment}
+## Try, predict, inspect {#house-experiment}
 
-1. Predict `wall = 3`: the outer size stays fixed; the room and roof plug get smaller.
-2. Render, then inspect the doorway and floor. The cutter should cross the wall completely.
-3. Change `roof_clearance` from 0.3 to 0.5. Only the plug radius changes; the room does not.
-4. For a deliberate failure of design, move the room cutter upward to Z = 8. Rendering can still succeed, but the floor becomes 8 mm thick. A valid solid can still be a bad house.
+1. Set `wall` to 3. Predict: the outside stays the same, but the room gets smaller. The roof opening stays the same.
+2. Look through the doorway. Find the floor and the open top.
+3. Increase `roof_clearance` to 0.5. Predict: more room around the wall, with the house unchanged.
+4. Make a deliberate mistake: move the room cutter's bottom from Z = 2 to Z = 8. The model can still render, but the floor becomes much thicker. Restore 2 mm.
 
-**You can now:** subtract a cavity, turn a cutter, preserve a floor, and derive a mating dimension from a named clearance. Save both parts for the farm.
+Run verification and expect two pieces. Print a small rim sample before choosing a final roof fit; a numerical gap does not guarantee your printer's fit.
 
-Extra practice: [a bottle-frame clamp](../projects/07-bottle-cage/01-frame-clamp.ecky) subtracts a bore from a cylinder; [the peaked dovetail](../projects/03-supportless-dovetail/solution-peaked-roof.ecky) adds a more demanding sliding fit. Work on small samples before a whole mount.
+**You can now:** remove a cavity, cut a doorway, preserve a floor, and leave a named gap between separate pieces. Next, repeat a reusable fence post.

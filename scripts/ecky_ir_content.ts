@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { syncWormFarmSources } from './worm_farm_sources';
 
 const REFERENCE_HEADING = '## Appendix: Language Reference';
 const AGENT_START = '<!-- ECKY_AGENT_REFERENCE_START -->';
@@ -134,6 +135,7 @@ function projectHumanReference(markdown: string): string {
 }
 
 export function syncEckyIrContent(root: string, check = false): void {
+  syncWormFarmSources(root, check);
   const corpusPath = path.join(root, 'docs/books/ecky-ir/ecky-ir-corpus.md');
   const projection = projectEckyIrContent(fs.readFileSync(corpusPath, 'utf8'));
   const outputs = [
@@ -184,11 +186,11 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
 }
 
 const missionFiles = [
-  ['worm-farm-01', '01-worm.md'],
-  ['worm-farm-02', '02-mushroom-house.md'],
   ['worm-farm-03', '03-rake.md'],
-  ['worm-farm-04', '04-tractor.md'],
+  ['worm-farm-02', '02-mushroom-house.md'],
   ['worm-farm-05', '05-garden.md'],
+  ['worm-farm-04', '04-tractor.md'],
+  ['worm-farm-01', '01-worm.md'],
   ['worm-farm-06', '06-farm.md'],
 ] as const;
 
@@ -236,8 +238,7 @@ export function buildLearningMarkdown(chapters: Array<{ title: string; markdown:
       const body = chapter.markdown.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '')
         .replace(/^# .+\n+/, '')
         .replace(/^### /gm, '#### ')
-        .replace(/^## /gm, '### ')
-        .replace(/ \{#[a-z0-9-]+\}/g, '');
+        .replace(/^## /gm, '### ');
       return `## ${chapter.title}\n\n${body}`;
     }),
     '',

@@ -5,7 +5,7 @@ title: Loft a wing and repeat a blade
 
 # Loft a wing and repeat a blade
 
-This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](01-worm.md) for a gradual introduction; return here for practical engineering exercises.
+This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](03-rake.md) for a gradual introduction; return here for practical engineering exercises.
 
 A loft joins cross-sections into a solid. Here two four-point profiles become a wing-shaped study. You will change its span and taper, then read how one blade is repeated around a hub. These examples demonstrate geometry, not tested flying parts.
 

@@ -57,3 +57,20 @@ fn worked_book_examples_compile_in_declared_order() {
             .unwrap_or_else(|error| panic!("compile {}: {error}", source_path.display()));
     }
 }
+
+#[test]
+fn all_worm_farm_downloads_compile_with_declared_checks() {
+    let examples = repository_root().join("docs/books/ecky-ir/examples/worm-farm");
+    let mut count = 0;
+    for entry in fs::read_dir(examples).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|value| value.to_str()) != Some("ecky") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).unwrap();
+        ecky_cad_lib::ecky_scheme::compile_to_core_program(&source)
+            .unwrap_or_else(|error| panic!("compile {}: {error}", path.display()));
+        count += 1;
+    }
+    assert_eq!(count, 9);
+}

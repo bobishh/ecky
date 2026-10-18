@@ -1,49 +1,63 @@
 ---
 id: worm-farm-03-rake
-title: Chapter 3: A rake for a farmer with no hands
+title: Chapter 1: A rake with teeth pointing down
 ---
 
-# Chapter 3: A rake for a farmer with no hands
+# Chapter 1: A rake with teeth pointing down
 
-The **Worm Farm** needs tools. Our farmer ordered a rake, then remembered the whole “no hands” situation. Build it anyway. Perhaps the tractor will help.
+Our **Worm Farm** needs a rake. Start with three things you can point to: a handle, a bar, and five teeth. The teeth reach the ground. The handle points up toward the farmer.
 
-You already know cylinders, rotations, translations, and joins. We will arrange those familiar shapes and let a **repeat** do the boring copying.
+Your job: make one tooth, make a row, then change how many teeth the rake has.
 
-## Plan a tool before copying it {#rake-plan}
+## Find up, across, and forward {#rake-directions}
 
-![A rake with a long round handle, a horizontal crossbar, and five short tines](../assets/worm-farm/03-rake.png)
+![A small rake standing on five downward teeth with its handle leaning upward](../assets/worm-farm/03-rake.png)
 
-The handle is a cylinder of radius 2 and length 44, rotated -90 degrees around X. It runs toward positive Y. The crossbar is another cylinder, rotated around Y to run along X. The teeth run toward negative Y. Their roots overlap the crossbar, so `union` can make one tool.
+Think of the printer bed as a table. X goes across it, Y goes away from you, Z goes up. A cylinder starts on that table and grows along Z.
 
-All their centres sit at Z = 2. The thicker handle and bar reach Z = 0; thinner teeth sit slightly above the ground. This is a desk model laid flat, not a steel tool tested for digging.
+Read `(cylinder 1.3mm 12mm)` as “a round tooth, radius 1.3, height 12.” Radius is half the width. The flat tip sits at Z = 0; its other end reaches the bar at Z = 12. The tooth does not need rotating.
 
-## Ask for five teeth {#rake-repeat}
+Reference: [cylinder](https://ecky-cad.com/docs/primitive-signatures/#cylinder).
 
-`repeat-union` makes copies and joins them. The compact form `(repeat-union i tooth_count geometry)` gives `i` the values 0 through `tooth_count - 1`. With five teeth, that is 0, 1, 2, 3, 4.
+## Make the bar and handle {#rake-handle}
 
-The tooth X position is `(i - (tooth_count - 1) / 2) × 4mm`. For five teeth the positions are -8, -4, 0, 4, 8. The subtraction centres the whole row; multiplying sets spacing. We did not manually place five cutters or invent five controls.
+The bar crosses X. We turn a cylinder a quarter turn around Y: `rotate 0 90deg 0`. Its length is centred with `:align '(center center center)`, then `translate` lifts it to the tops of the teeth.
 
-Counts are bare numbers: `5`, not `5mm`. Spacing is a length. This distinction matters when an expression combines them.
+The handle starts at the bar too. A smaller turn, `rotate -35deg 0 0`, makes it lean upward and backward. `35deg` means 35 degrees. Imagine holding the real rake: the handle must rise away from the ground while the teeth stay down.
 
-## Build and count {#rake-source}
+`union` joins overlapping shapes. The tops of the teeth enter the round bar, and the handle enters its middle. Touching in a picture is insufficient; these pieces need shared material.
+
+Reference: [rotate](https://ecky-cad.com/docs/boolean-and-transform-signatures/#rotate), [union](https://ecky-cad.com/docs/boolean-and-transform-signatures/#union).
+
+## Turn one tooth into five {#rake-repeat}
+
+`repeat-union i tooth_count` makes a row and joins it. For five teeth, `i` takes the values 0, 1, 2, 3, 4. We subtract 2 to centre them, then multiply by the 4 mm spacing:
+
+| Tooth | X position |
+| --- | --- |
+| First | −8 mm |
+| Second | −4 mm |
+| Middle | 0 mm |
+| Fourth | 4 mm |
+| Last | 8 mm |
+
+`let*` gives dimensions names. Read `tooth-length` as a labelled ruler. Later expressions can use rulers named above them. `head-length` follows the number of teeth, so its ends stay near the outer teeth.
+
+You can change `tooth_count` in the controls instead of copying and pasting another tooth.
+
+## Build the rake {#rake-source}
 
 <!-- example: ../examples/worm-farm/03-rake.ecky -->
 
 [Download the rake](../examples/worm-farm/03-rake.ecky)
 
-## Catch a copying mistake {#rake-experiment}
+## Try, predict, inspect {#rake-experiment}
 
-1. Predict the positions for seven teeth: -12, -8, -4, 0, 4, 8, 12 mm.
-2. Set `tooth_count` to 7, render, and count the teeth.
-3. Temporarily replace the tooth's Y position `0` with `-5mm`. The roots move away from the crossbar and leave disconnected geometry. Rendering alone does not prove the tool is one piece.
-4. Restore 0 and five teeth. Now alter one radius in the tooth expression: all teeth change together.
+1. Open the complete example. Count five teeth. Find their flat tips at Z = 0.
+2. Set `tooth_count` to 7. Predict: two more teeth and a longer bar. The handle stays in the middle.
+3. Turn the view sideways. The teeth point toward the bed; the handle rises away from it.
+4. As a deliberate mistake, change only `head-height` to `20mm`. The teeth no longer reach the bar. Rendering may work, but the connected-piece check should fail. Restore `tooth-length`.
 
-Changing a count can also outgrow its support. The crossbar spans -16 to 16 mm; the offered maximum of seven teeth keeps their roots within it. If you extend the range later, derive the bar length too.
+`verify` at the bottom asks for one connected piece. Run model verification after rendering. It catches a detached handle or row of teeth; it cannot decide whether the rake looks good.
 
-## A different kind of stretching {#rake-loft}
-
-For shapes that change outline along their length, copying is not enough. A `loft` joins profiles, rather like pulling a skin between two differently shaped hoops. Our garden carrot will use that idea. A sweep follows a backbone; a loft follows a sequence of cross-sections.
-
-The [wing study](../projects/04-parametric-wing/worked-stations.ecky) starts with two four-point outlines. The [taper-and-twist version](../projects/04-parametric-wing/solution-taper-twist.ecky) derives its tip from `root_chord × taper_ratio`. Set the ratio to 0.45: a 44 mm root gives a 19.8 mm tip. No unused independent tip control remains.
-
-**You can now:** rotate familiar solids into a tool, centre a repeated row, and recognise why a changing count can break a design. Keep the rake; the tractor needs wheels next.
+**You can now:** read dimensions, turn and move a shape, repeat a tooth, and check that joins actually join. Next, give the farmer a hollow house.

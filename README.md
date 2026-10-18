@@ -6,7 +6,7 @@ Models are stored as `.ecky` source: a small modeling language with Lisp-style s
 
 The project is at **0.0.1** and under active development. Expect to build from source, encounter bugs, and see changes to the language and APIs.
 
-[Illustrated CAD book](docs/books/ecky-ir/missions/01-worm.md) · [Language reference](public/docs/ecky-ir.md) · [Website and examples](https://ecky-cad.com/)
+[Illustrated CAD book](docs/books/ecky-ir/missions/03-rake.md) · [Language reference](public/docs/ecky-ir.md) · [Website and examples](https://ecky-cad.com/)
 
 ![Ecky desktop workspace with project cards, a filament-dryer model, editable source, and a Codex conversation](docs/screenshots/ecky-workbench.png)
 
@@ -115,8 +115,8 @@ STEP availability depends on the geometry path; mesh-based results do not necess
 ## Documentation and development
 
 The illustrated **Worm Farm** book builds one small world across six chapters:
-Bézier worm, mushroom house, rake, tractor, garden, then checked assembly.
-Start with [the first chapter](docs/books/ecky-ir/missions/01-worm.md).
+rake, mushroom house, garden, snap-together tractor, articulated worm, then checked assembly.
+Start with [the first chapter](docs/books/ecky-ir/missions/03-rake.md).
 The shared introduction is `docs/books/ecky-ir/introduction.md`; chapter sources
 are `docs/books/ecky-ir/missions/01-worm.md` through `06-farm.md`. Website,
 app Documentation → Chapters, and EPUB read these same Markdown files.

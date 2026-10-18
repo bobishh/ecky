@@ -1,12 +1,12 @@
 {
   "sourcePath": "docs/books/ecky-ir/examples/worm-farm/03-rake.ecky",
-  "sourceSha256": "7653d498d6265eaf40d8d8b641eac1c20ab21a29c25a5311befab0adf1c9fb99",
-  "eckyContentHash": "03eaae36c4fe817b3b267ab1dedf3d75f8088ec19f56f488302bb6ca3fbe787d",
-  "stlBytes": 197684,
+  "sourceSha256": "90811a79b40376758e60f3f121b345eea428abe05654c7a0ca45196f0302975c",
+  "eckyContentHash": "f41885ee3ca0504631ca1f9f180c1915215a0a507b881597e475c0b8e18fc1d0",
+  "stlBytes": 205684,
   "pngPath": "docs/books/ecky-ir/assets/worm-farm/03-rake.png",
   "pngWidth": 960,
   "pngHeight": 960,
-  "nonBackgroundCoverage": 0.046329210069444446,
+  "nonBackgroundCoverage": 0.06741644965277778,
   "renderer": "three-webgl-swiftshader",
   "backend": "direct-occt",
   "generatedBy": "scripts/render_ecky_preview_png.mjs"

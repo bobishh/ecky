@@ -1,21 +1,166 @@
-(model
-  (params
-    (number bend 24mm :label "Wiggle" :min 12 :max 32 :step 2))
+; Captive ball joints with central neck windows and unbroken lower/upper lips.
+(define-component worm-link
+  ((number joint-clearance 0.6mm)
+   (number joint-yaw-limit 35deg)
+   (number joint-pitch-limit 20deg)
+   (toggle has-socket true)
+   (toggle has-ball true))
+  (let* ((ball-radius 4mm)
+         (joint-height 5mm)
+         (socket-wall 2mm)
+         (cavity-radius (+ ball-radius joint-clearance))
+         (socket-outer-radius (+ cavity-radius socket-wall))
+         (socket-height 12mm)
+         (socket-throat-radius 3mm)
+         (socket-top-lever (- socket-height joint-height))
+         (body-relief-radius (+ joint-clearance
+           (* socket-outer-radius (cos (deg->rad joint-pitch-limit)))
+           (* socket-top-lever (sin (deg->rad joint-pitch-limit)))))
+         (ball-offset 11mm)
+         (socket-offset -12mm)
+         (neck-start 1.2mm)
+         (neck-length (- ball-offset neck-start))
+         (neck-width 4.8mm)
+         (neck-height 2.8mm)
+         (window-bottom 1.6mm)
+         (window-top (- socket-height window-bottom))
+         (window-height (- window-top window-bottom))
+         (window-center (/ (+ window-top window-bottom) 2))
+         (window-corner-radius 1mm)
+         (neck-motion-clearance 1.2mm)
+         (passage-half-width (+ (/ neck-width 2) neck-motion-clearance))
+         (ball-bed-pedestal-radius 1.4mm)
+         (ball-bed-pedestal-height 1.3mm)
+         (ball-bed-flat-height 0.6mm)
+         (pedestal-motion-clearance 0.3mm)
+         (bottom-throat-radius (+ pedestal-motion-clearance
+           (* ball-bed-pedestal-radius (cos (deg->rad joint-pitch-limit)))
+           (* joint-height (sin (deg->rad joint-pitch-limit)))))
+         (cutter-length 16mm))
+    (build
+      (shape rounded-body
+        (clip-plane
+          (translate 0 0 4.8mm (scale 1.15 1.12 1 (sphere 7.2mm)))
+          :origin '(0 0 0) :normal '(0 0 1) :keep "positive"))
+      (shape body-with-joint-relief
+        (if has-ball
+          (difference rounded-body
+            (translate ball-offset 0 -1mm (cylinder body-relief-radius 16mm)))
+          rounded-body))
+      (shape socket-housing
+        (if has-socket
+          (union body-with-joint-relief
+            (translate socket-offset 0 0 (cylinder socket-outer-radius socket-height)))
+          body-with-joint-relief))
+      (shape socket-cavity
+        (union
+          (translate socket-offset 0 joint-height (sphere cavity-radius))
+          (translate socket-offset 0 joint-height
+            (cylinder socket-throat-radius socket-height))
+          (translate socket-offset 0 -1mm
+            (cylinder bottom-throat-radius (+ window-bottom 1mm)))))
+      (shape neck-passage-base
+        (translate (- cutter-length) 0 window-center
+          (rotate 90deg 0 90deg
+            (extrude
+              (rounded-rect (* passage-half-width 2) window-height window-corner-radius)
+              cutter-length))))
+      (shape neck-motion-envelope
+        (translate socket-offset 0 0
+          (apply union
+            (map (lambda (yaw) (rotate 0 0 yaw neck-passage-base))
+              (linspace (- joint-yaw-limit) joint-yaw-limit 7)))))
+      (shape captive-socket
+        (if has-socket
+          (difference socket-housing socket-cavity neck-motion-envelope)
+          socket-housing))
+      (shape grounded-ball
+        (union
+          (clip-plane
+            (translate ball-offset 0 joint-height (sphere ball-radius))
+            :origin (list 0 0 ball-bed-flat-height) :normal '(0 0 1) :keep "positive")
+          (translate ball-offset 0 0
+            (cylinder ball-bed-pedestal-radius ball-bed-pedestal-height))))
+      (shape central-neck-bridge
+        (translate neck-start 0 window-center
+          (rotate 90deg 0 90deg
+            (extrude (slot-overall neck-width neck-height) neck-length))))
+      (result
+        (if has-ball
+          (union captive-socket central-neck-bridge grounded-ball)
+          captive-socket)))))
 
-  (part worm
-    (let* ((spine
-             (bezier-path
-               (list
-                 (list 0 0 6)
-                 (list 0 bend 6)
-                 (list 28 bend 6)
-                 (list 28 0 6)
-                 (list 28 (- bend) 6)
-                 (list 56 (- bend) 6)
-                 (list 56 0 6))))
-           (body (sweep (circle 6mm) spine))
-           (tail (translate 0 -2mm 6mm (sphere 6mm)))
-           (head (translate 56mm 3mm 8mm (sphere 8mm)))
-           (left-eye (translate 52mm 8mm 14mm (sphere 3mm)))
-           (right-eye (translate 60mm 8mm 14mm (sphere 3mm))))
-      (union body tail head left-eye right-eye))))
+(model
+  (meta :title "Articulated puzzle worm")
+  (params
+    (number body-count 7 :label "Body links" :min 2 :max 10 :step 1 :frozen true)
+    (number joint-yaw-limit 35deg :label "Side motion envelope" :min 25deg :max 40deg :step 5deg)
+    (number joint-pitch-limit 20deg :label "Vertical motion envelope" :min 15deg :max 25deg :step 5deg)
+    (number joint-clearance 0.6mm :label "Joint clearance" :min 0.4mm :max 0.8mm :step 0.05mm))
+  (verify
+    (tag closed-link-surfaces)
+    (metric bad-edges (stl non-manifold-edge-count))
+    (expect bad-edges (= 0)))
+  (verify
+    (tag separate-moving-links)
+    (intent "Head, body links and tail must remain separate solids")
+    (metric link-count (stl connected-component-count))
+    (expect link-count (= 9)))
+  (verify
+    (tag grounded-head)
+    (metric contact (stl bed-contact-area-ratio head))
+    (expect contact (>= 0.12)))
+  (verify
+    (tag grounded-body-links)
+    (metric contact (stl bed-contact-area-ratio body-links))
+    (expect contact (>= 0.12)))
+  (verify
+    (tag grounded-tail)
+    (metric contact (stl bed-contact-area-ratio tail))
+    (expect contact (>= 0.12)))
+  (verify
+    (tag preview-artifact)
+    (metric present (manifest has-model-stl))
+    (expect present (= true)))
+  (let* ((link-pitch 23mm))
+    (part head
+      (build
+        (shape head-body
+          (worm-link :joint-yaw-limit joint-yaw-limit :joint-pitch-limit joint-pitch-limit :joint-clearance joint-clearance :has-socket false :has-ball true))
+        (shape face-eyes
+          (apply union (map (lambda (side)
+              (translate -4.8mm (* side 3mm) 10.6mm (sphere 1.9mm))) '(-1 1))))
+        (shape face-with-nose
+          (union head-body face-eyes
+            (translate -6.5mm 0 7mm (sphere 2.2mm))))
+        (shape pupil-recesses
+          (apply union (map (lambda (side)
+              (translate -5.3mm (* side 3mm) 11.7mm (cylinder 0.8mm 3mm))) '(-1 1))))
+        (shape rounded-horns
+          (apply union
+            (map (lambda (side)
+              (translate -2.8mm (* side 4.8mm) 9mm
+                (rotate (* side -10deg) 0 -8deg
+                  (union
+                    (cone 1.7mm 0.65mm 5.5mm)
+                    (translate 0 0 5.3mm (sphere 0.8mm))))))
+              '(-1 1))))
+        (result (difference (union face-with-nose rounded-horns) pupil-recesses))))
+    (part body-links
+      (translate link-pitch 0 0
+        (linear-array body-count link-pitch 0 0
+          (worm-link :joint-yaw-limit joint-yaw-limit :joint-pitch-limit joint-pitch-limit :joint-clearance joint-clearance))))
+    (part tail
+      (translate (* (+ body-count 1) link-pitch) 0 0
+        (build
+          (shape tail-root
+            (worm-link :joint-yaw-limit joint-yaw-limit :joint-pitch-limit joint-pitch-limit :joint-clearance joint-clearance :has-ball false))
+          (shape tapered-tail-tip
+            (clip-plane
+              (hull
+                (translate 5mm 0 2.4mm (sphere 3.4mm))
+                (translate 10mm 0.8mm 1.8mm (sphere 2.7mm))
+                (translate 14mm 1.5mm 1.4mm (sphere 2mm)))
+              :origin '(0 0 0) :normal '(0 0 1) :keep "positive"))
+          (result (union tail-root tapered-tail-tip))))))
+  (tag-face head-bed :faces "bottom" head))

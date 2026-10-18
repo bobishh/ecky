@@ -2246,31 +2246,69 @@ mod tests {
                 None
             }
         }
-        let root = std::env::temp_dir().join(format!("ecky-farm-{}", Uuid::new_v4()));
-        fs::create_dir_all(&root).expect("test directory");
-        let resolver = FarmResolver(root.clone());
-        let source = include_str!("../../../docs/books/ecky-ir/examples/worm-farm/06-farm.ecky");
-        let bundle = crate::services::render::render_cli_ecky(
-            source,
-            &DesignParams::new(),
-            GeometryBackend::EckyRust,
-            None,
-            &resolver,
-        )
-        .expect("render the complete farm");
-        let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
-            .expect("read native manifest");
-        let result = verify_structure_with_author_verification(&bundle, &manifest);
-        let evidence = serde_json::to_string_pretty(&result).expect("verification evidence");
-        println!("{evidence}");
-        let _ = fs::remove_dir_all(root);
-        assert_eq!(result.authored_verify_checks.len(), 1, "{evidence}");
-        assert_eq!(
-            result.authored_verify_checks[0].status,
-            crate::contracts::AuthoredVerifyCheckStatus::Passed,
-            "{evidence}"
-        );
-        assert!(result.passed, "{evidence}");
+        let examples = [
+            (
+                include_str!("../../../docs/books/ecky-ir/examples/worm-farm/01-worm.ecky"),
+                6,
+            ),
+            (
+                include_str!(
+                    "../../../docs/books/ecky-ir/examples/worm-farm/02-mushroom-house.ecky"
+                ),
+                1,
+            ),
+            (
+                include_str!("../../../docs/books/ecky-ir/examples/worm-farm/03-rake.ecky"),
+                1,
+            ),
+            (
+                include_str!("../../../docs/books/ecky-ir/examples/worm-farm/04-tractor.ecky"),
+                2,
+            ),
+            (
+                include_str!("../../../docs/books/ecky-ir/examples/worm-farm/06-farm.ecky"),
+                2,
+            ),
+            (
+                include_str!(
+                    "../../../docs/books/ecky-ir/examples/worm-farm/tractor-fit-coupon.ecky"
+                ),
+                1,
+            ),
+            (
+                include_str!(
+                    "../../../docs/books/ecky-ir/examples/worm-farm/worm-joint-coupon.ecky"
+                ),
+                1,
+            ),
+        ];
+        for (source, checks) in examples {
+            let root = std::env::temp_dir().join(format!("ecky-farm-{}", Uuid::new_v4()));
+            fs::create_dir_all(&root).expect("test directory");
+            let resolver = FarmResolver(root.clone());
+            let bundle = crate::services::render::render_cli_ecky(
+                source,
+                &DesignParams::new(),
+                GeometryBackend::EckyRust,
+                None,
+                &resolver,
+            )
+            .expect("render book example");
+            let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
+                .expect("read native manifest");
+            let result = verify_structure_with_author_verification(&bundle, &manifest);
+            let evidence = serde_json::to_string_pretty(&result).expect("verification evidence");
+            println!("{evidence}");
+            let _ = fs::remove_dir_all(root);
+            assert_eq!(result.authored_verify_checks.len(), checks, "{evidence}");
+            assert!(
+                result.authored_verify_checks.iter().all(
+                    |check| check.status == crate::contracts::AuthoredVerifyCheckStatus::Passed
+                ),
+                "{evidence}"
+            );
+            assert!(result.passed, "{evidence}");
+        }
     }
 
     fn bounds(

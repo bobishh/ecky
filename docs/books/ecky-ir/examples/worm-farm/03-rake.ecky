@@ -1,21 +1,23 @@
 (model
   (params
     (number tooth_count 5 :label "Rake teeth" :min 3 :max 7 :step 1))
-
   (part rake
-    (let* ((handle
-             (translate 0 0 2mm
-               (rotate -90deg 0 0
-                 (cylinder 2mm 44mm))))
-           (crossbar
-             (translate 0 0 2mm
-               (rotate 0 90deg 0
-                 (cylinder 2mm 32mm :align '(center center center)))))
-           (teeth
-             (repeat-union i tooth_count
-               (translate
-                 (* (- i (/ (- tooth_count 1) 2)) 4mm)
-                 0 2mm
-                 (rotate 90deg 0 0
-                   (cylinder 1mm 12mm))))))
-      (union handle crossbar teeth))))
+    (let* ((tooth-length 12mm)
+           (tooth-radius 1.3mm)
+           (head-height tooth-length)
+           (head-radius 2mm)
+           (tooth-spacing 4mm)
+           (head-length (+ (* (- tooth_count 1) tooth-spacing) (* head-radius 2)))
+           (handle (translate 0 0 head-height
+             (rotate -35deg 0 0 (cylinder 2mm 44mm))))
+           (crossbar (translate 0 0 head-height
+             (rotate 0 90deg 0
+               (cylinder head-radius head-length :align '(center center center)))))
+           (teeth (repeat-union i tooth_count
+             (translate (* (- i (/ (- tooth_count 1) 2)) tooth-spacing) 0 0
+               (cylinder tooth-radius tooth-length)))))
+      (union handle crossbar teeth)))
+  (verify
+    (tag connected-rake)
+    (metric pieces (stl connected-component-count))
+    (expect pieces (= 1))))

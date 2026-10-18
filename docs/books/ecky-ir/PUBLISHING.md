@@ -3,12 +3,17 @@
 ## Source ownership
 
 The illustrated **Worm Farm** book starts at `introduction.md` and the six ordered
-`missions/01-worm.md` through `missions/06-farm.md` files. Each chapter names its
+`missions/*.md` files: rake, house, garden, tractor, worm, farm. Stable filenames
+retain their original numbers; `missionFiles` in `scripts/ecky_ir_content.ts`
+defines reading order. Each chapter names its
 complete example with an `<!-- example: relative/path.ecky -->` marker. Builders
 insert those exact bytes into a code fence; edit the `.ecky` file once, rather
 than maintaining two copies. Chapter image links resolve under `assets/`.
 
-`examples/worm-farm/` holds the six runnable models. `assets/worm-farm/` holds
+`examples/worm-farm/` holds six chapter models, two fit samples, and an assembled
+tractor illustration source. `scripts/worm_farm_sources.ts` composes samples,
+assembled tractor, and final farm from canonical chapter models; edit the chapter
+models rather than generated copies. Synchronization checks catch drift. `assets/worm-farm/` holds
 native CAD renders and source-hash manifests. Re-render after changing geometry.
 The source links are packaged under content-hashed `/docs/examples/` filenames.
 No online CAD service or AI image generator is needed to read or build the book.
@@ -23,7 +28,7 @@ They are distinct from the new book in the app's Documentation → Chapters read
 ## Build graph
 
 1. `npm run sync:book-source` projects corpus references and extra exercises,
-   splits legacy levels, and assembles `public/tutorials/ecky-book.md` from the
+   splits legacy levels, regenerates composed model sources, and assembles `public/tutorials/ecky-book.md` from the
    same source chapters the website uses. `check:book-source` detects drift.
 2. `npm run build:book` performs synchronization, builds offline HTML/EPUB under
    `target/book/dist/books/`, and publishes EPUB, images and exact source downloads
@@ -49,6 +54,8 @@ npm run check:book-source
 npm run check:mission-assets
 npm run test:unit
 npm run typecheck
+cargo test --manifest-path src-tauri/Cargo.toml --test worm_farm_mechanics -- --ignored
+cargo test --manifest-path src-tauri/Cargo.toml --lib worm_farm_render_executes_its_authored_verification -- --ignored
 ```
 
 Browser proof uses the isolated docs server, never an existing browser session:

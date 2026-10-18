@@ -5,7 +5,7 @@ title: Read a multipart phone case
 
 # Read a multipart phone case
 
-This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](01-worm.md) for a gradual introduction; return here for practical engineering exercises.
+This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](03-rake.md) for a gradual introduction; return here for practical engineering exercises.
 
 This is a source walkthrough of a three-part case: a TPU shell and two PETG camera-frame inserts. It is an earlier design than the single-piece case on the landing page. Use the file linked here so the part names match the text.
 

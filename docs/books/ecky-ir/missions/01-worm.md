@@ -1,55 +1,81 @@
 ---
 id: worm-farm-01-worm
-title: Chapter 1: A worm with a wiggle
+title: Chapter 5: A worm that really bends
 ---
 
-# Chapter 1: A worm with a wiggle
+# Chapter 5: A worm that really bends
 
-Welcome to **Worm Farm**. Our farmer has no arms, owns a suspiciously large rake, and considers a mushroom a perfectly respectable address. Your job is to build the farm, one useful idea at a time.
+The **Worm Farm** needs its farmer. A curved solid still stays rigid after printing. Our worm has separate links: a ball on one link sits inside a socket on the next. The links can move while staying captured.
 
-By the last chapter you will have a bendy worm, a hollow mushroom house with a removable roof, a rake, a tractor with separate wheels, and a garden fence. More importantly, you will be able to predict what a parameter changes, explain why geometry failed, and export a checked design of your own.
+This is the hardest mechanism in the book. Start with two links. Once that joint works, making a longer worm is repetition.
 
-You need Ecky with its native geometry backend. Open a new project, put the complete source below in its code editor, and render. Manual modeling needs no AI connection. A millimetre, written `mm`, is a unit of length; ten of them make a centimetre. These examples are small desk models.
+## Find the nine moving pieces {#worm-links}
 
-## Meet the farmer {#meet-worm}
+![A nine-piece articulated worm with a face, captive ball joints, rounded body links and a tapered tail](../assets/worm-farm/01-worm.png)
 
-![A continuous S-shaped Bézier worm with a round head and two raised eyes](../assets/worm-farm/01-worm.png)
+The complete worm has a head, seven body links, and a tail. They are printed together in a straight row. They must remain **nine separate solids**, even though the balls are already inside their sockets. The straight printing position does not prevent later bending.
 
-The worm is a tube following a curved backbone. Its head and eyes are spheres—round solids. A `sphere` takes a **radius**, the distance from its middle to its skin. `(sphere 3mm)` makes an eye 6 mm across.
+Try [the two-link joint sample](../examples/worm-farm/worm-joint-coupon.ecky) first. It is the same ball and socket, without the face or long row. After printing, let it cool and gently check movement. Do not force a fused sample; adjust the gap and print another pair.
 
-A `translate` moves a shape. Its three distances are X, Y, Z: across, along, up. `(translate 52mm 8mm 14mm (sphere 3mm))` puts the eye's **centre** at that address. It does not move the eye's bottom to Z = 14. Its bottom is at 11.
+![Two worm links sharing a captive ball-and-socket joint](../assets/worm-farm/worm-joint-coupon.png)
 
-`union` joins overlapping solids. The eyes overlap the head, and the head overlaps the tube. Move an eye far away and it becomes a loose eyeball. Our farmer is dramatic enough already; put it back.
+## A ball inside a cage {#worm-ball-socket}
 
-## Make a backbone {#worm-backbone}
+Look at one connection from above. The ball belongs to the link on the left. The cage belongs to the link on the right. The gap between them is empty space, not a second material.
 
-A Bézier curve has handles. They pull on its direction and bend; the curve usually does **not** pass through the handles. Think of bending a soft garden hose by steering the ends, rather than sticking pins through every point.
+| Name in the recipe | Job |
+| --- | --- |
+| `ball-radius` | Size of the moving ball: 4 mm |
+| `cavity-radius` | Ball radius plus `joint-clearance`: 4.6 mm by default |
+| `socket-wall` | Material around that cavity: 2 mm |
+| `socket-throat-radius` | Top opening: smaller than the ball, so it stays captive |
+| `link-pitch` | Distance between neighbouring link centres: 23 mm |
 
-This backbone has two cubic curves joined together. A cubic uses four control points. The second curve shares the first curve's last point, so the list has **seven points**, not eight. Point 1 is the tail; point 4 joins the bends; point 7 meets the head. Points 2, 3, 5, 6 steer the bends.
+`difference` scoops the cavity out of the socket housing. It removes a round opening above and a smaller opening below. The ball cannot pass through either opening. The ball and socket remain separate; a `union` between neighbouring links would lock the joint.
 
-All backbone points have Z = 6. Its radius is also 6, so the tube reaches the ground at Z = 0. The `bend` control changes the Y positions of the handles. It leaves the tail, middle join, and head connection fixed.
+Reference: [sphere](https://ecky-cad.com/docs/primitive-signatures/#sphere), [difference](https://ecky-cad.com/docs/boolean-and-transform-signatures/#difference).
 
-You do not need to derive the curve equation today. Identify which numbers are handles and which are endpoints. That is enough to direct your first creature.
+## Give the neck somewhere to move {#worm-neck-window}
 
-## Give the backbone a body {#worm-source}
+A short neck joins the ball to its own body. The neck needs a side window in the next socket. Without that window the neck hits the wall as soon as you try to turn it.
 
-A `circle` is a flat outline. `sweep` carries that outline along the backbone to make a solid tube. The tail sphere rounds off the tube's otherwise flat end. Its centre sits 2 mm behind the backbone start, leaving a clear overlap instead of matching the tube's end rim exactly. Read the short source from inside outward: circle + curve → tube; tube + head + eyes → worm.
+The recipe sweeps a cutter through several sideways angles to clear a fan-shaped window. It leaves **1.6 mm of unbroken material below and above** the window. Those lips keep the ball captive. Cutting the window all the way through the top would weaken that cage.
+
+A second cut relieves the nearby rounded body so it does not block the socket during up-and-down motion. The flat underside and a small ball pedestal put material on the print bed. The bottom opening also clears that pedestal as the socket tilts. Its radius is derived from the pedestal and motion angle; it stays smaller than the ball.
+
+`joint-yaw-limit` and `joint-pitch-limit` size the clearance envelope. They do not animate the worm. They are design targets for side and vertical movement, not proof of a printed angle or permission to force the joint.
+
+## Reuse one joint recipe {#worm-repeat}
+
+`worm-link` builds one rounded body with an optional socket and ball. The head uses `:has-socket false`; the tail uses `:has-ball false`. Ordinary body links have both.
+
+The row is the short part of the code:
+
+```scheme
+(translate link-pitch 0 0
+  (linear-array body-count link-pitch 0 0
+    (worm-link :joint-clearance joint-clearance)))
+```
+
+This fragment needs the component and bindings from the complete file. It says: start one pitch after the head, then place seven body links at that same spacing. `linear-array` groups copies without joining neighbours.
+
+The head adds eyes and horns. The tail rounds three shrinking shapes into a tip. Those decorations do not replace the joint.
+
+## Open the complete worm {#worm-source}
+
+Use the complete example as a recipe to inspect and modify. The detailed joint is longer than the rake because it has to clear moving parts and keep them captured. Find the names from the table before reading every cutter.
 
 <!-- example: ../examples/worm-farm/01-worm.ecky -->
 
 [Download the complete worm](../examples/worm-farm/01-worm.ecky)
 
-`model` encloses the whole design. `params` declares the changeable control. `part worm` names the exported object. `let*` names the backbone `spine`, then uses that name to build `body`. Later bindings can use earlier ones. Parentheses group an instruction with its inputs; they are the recipe's bowls, not decoration.
+## Try one joint before nine {#worm-experiment}
 
-Native Ecky currently samples each cubic Bézier into 16 path segments. The preview is an approximation to the intended curve; slight bands in the render are expected. Tight bends can make a swept body intersect itself. We will keep this control in a tested range instead of promising every imaginable wiggle works.
+1. Render the two-link sample. Inspect the ball through the top opening and neck through the side window.
+2. Find `joint-clearance = 0.6mm`. Predict: increasing it enlarges the cavity; it does not shrink the ball. Change it to 0.7 and inspect again.
+3. Compare a printed sample before and after that change. Keep the setting that moves freely while staying captive. Tiny gaps depend on printer settings and material.
+4. Render the complete worm and run verification. Expect nine closed pieces. `body-count` is frozen at seven because that count check expects seven body links plus two ends. When deliberately changing the count in source, update the expectation too.
 
-## Bend, predict, inspect {#worm-experiment}
+Closed meshes and separate links establish only part of the mechanism. Check the window and body relief, then test a printed pair before the full worm.
 
-1. Predict what `bend = 16` changes. The handles move closer to Y = 0; the body should become less wiggly.
-2. Render that value. Check that both eyes still touch the head.
-3. Try `bend = 30`. Compare the bends, then return to 24.
-4. Move one eye's X coordinate from 52 to 90. Find the detached eye, then restore 52.
-
-**You can now:** read a shape's position, distinguish radius from diameter, steer Bézier handles, and explain how a sweep makes a solid. Keep the worm file: the house is next.
-
-Extra practice: [the connected bracket](../projects/01-corner-bracket/02-connected-solution.ecky) teaches the same move-and-join idea with flat faces. Its back flange must overlap its foot; a union cannot invent material across a gap.
+**You can now:** explain a captive ball joint, distinguish clearance from a motion control, preserve retaining lips, and repeat a working link. Time to bring the farm together.

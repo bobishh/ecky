@@ -9,6 +9,7 @@ import {
   parseDocsDocument,
   renderMarkdownFragment,
   resolveSection,
+  resolveDocsAnchor,
 } from './eckyIrGuide';
 
 function docsFixture(): string {
@@ -133,4 +134,19 @@ test('reader preserves links, quoted code, escaped table pipes and numbered step
   assert.match(html, /<ol><li>Open source\.<\/li><li>Render it\.<\/li><\/ol>/);
   assert.match(html, /<td><code>a\|b<\/code><\/td>/);
   assert.doesNotMatch(renderMarkdownFragment('[bad](javascript:alert(1))'), /href="javascript/);
+});
+
+
+test('Given a reference index link When resolving an operation Then its own mounted section is selected', () => {
+  const { sections } = parseDocsDocument(docsFixture());
+  assert.equal(resolveDocsAnchor(sections, '#box', 'operation-index')?.section.slug, 'primitive-signatures');
+  assert.equal(resolveDocsAnchor(sections, '#translate', 'operation-index')?.section.slug, 'boolean-and-transform-signatures');
+  assert.equal(resolveDocsAnchor(sections, '#missing-operation', 'operation-index'), null);
+});
+
+test('Given an authored chapter anchor When rendering Then link and heading retain the same identity', () => {
+  const html = renderMarkdownFragment('### Wheel fit {#tractor-fit}\n\n[Measure the gap](#tractor-fit)');
+  assert.match(html, /<h3 id="tractor-fit">Wheel fit<\/h3>/);
+  assert.match(html, /href="#tractor-fit"/);
+  assert.doesNotMatch(html, /\{#/);
 });

@@ -5,7 +5,7 @@ title: Make a hollow travel case
 
 # Make a hollow travel case
 
-This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](01-worm.md) for a gradual introduction; return here for practical engineering exercises.
+This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](03-rake.md) for a gradual introduction; return here for practical engineering exercises.
 
 The razor travel kit has a base, sliding lid, and small blade cover. Start with the empty base: it shows how wall and floor thickness come from one subtraction. Then inspect the features that hold the lid and contents.
 

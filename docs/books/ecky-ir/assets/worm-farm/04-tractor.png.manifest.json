@@ -1,12 +1,12 @@
 {
   "sourcePath": "docs/books/ecky-ir/examples/worm-farm/04-tractor.ecky",
-  "sourceSha256": "c22df1745993408d00ff5f962d14411a6c3ea3168d879f00d3aa10e64c0cdf33",
-  "eckyContentHash": "71a0f52c9f566ac8987c2f41b38fefdda382fc7fe425a34a3cea16b7140c57e9",
-  "stlBytes": 306084,
+  "sourceSha256": "192f9ba3f5db603792ff0d4b1a7b5e06843bdced12a4cf3a7cff62fee5a1b84c",
+  "eckyContentHash": "2864c1a0512cbbfbf6a1f40e1468ee48235c2671e4df2e8dcf4de469d309c3a7",
+  "stlBytes": 958884,
   "pngPath": "docs/books/ecky-ir/assets/worm-farm/04-tractor.png",
   "pngWidth": 960,
   "pngHeight": 960,
-  "nonBackgroundCoverage": 0.38538194444444446,
+  "nonBackgroundCoverage": 0.21873046875,
   "renderer": "three-webgl-swiftshader",
   "backend": "direct-occt",
   "generatedBy": "scripts/render_ecky_preview_png.mjs"

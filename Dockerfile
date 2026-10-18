@@ -38,7 +38,7 @@ RUN apk add --no-cache zip
 RUN npm init -y && npm install tsx
 
 # Copy the book builders + projection pipeline + pure-TS dependencies.
-COPY scripts/build_ecky_ir_book.ts scripts/build_ecky_ir_docs_site.ts scripts/ecky_ir_content.ts scripts/ecky_ir_source.ts ./scripts/
+COPY scripts/build_ecky_ir_book.ts scripts/build_ecky_ir_docs_site.ts scripts/ecky_ir_content.ts scripts/ecky_ir_source.ts scripts/worm_farm_sources.ts ./scripts/
 COPY src/lib/docs/ ./src/lib/docs/
 
 # Copy the canonical corpus, six static chapter sources, exact Ecky

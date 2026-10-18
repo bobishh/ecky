@@ -5,7 +5,7 @@ title: Fit a clamp and a sliding rail
 
 # Fit a clamp and a sliding rail
 
-This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](01-worm.md) for a gradual introduction; return here for practical engineering exercises.
+This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](03-rake.md) for a gradual introduction; return here for practical engineering exercises.
 
 This chapter uses two small pieces of a bottle mount: a clamp around a round tube and a rail that slides into a channel. Work on the fits before opening the full cage.
 

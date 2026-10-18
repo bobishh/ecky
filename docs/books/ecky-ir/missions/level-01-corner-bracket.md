@@ -5,7 +5,7 @@ title: Build a bracket, then an enclosure
 
 # Build a bracket, then an enclosure
 
-This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](01-worm.md) for a gradual introduction; return here for practical engineering exercises.
+This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](03-rake.md) for a gradual introduction; return here for practical engineering exercises.
 
 A bracket is a useful first model: two boxes overlap, and `union` joins them. You will change its width, separate its two shapes, and see why placement matters before adding holes or a lid.
 

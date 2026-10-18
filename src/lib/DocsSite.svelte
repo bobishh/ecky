@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import referenceMarkdown from '../../public/docs/ecky-ir.md?raw';
   import {
     parseDocsDocument,
     resolveSection,
+    resolveDocsAnchor,
     type DocsSection,
   } from './docs/eckyIrGuide';
 
@@ -26,10 +28,35 @@
   let activeSlug = $state<string | null>(documentData.sections[0]?.slug ?? null);
   let activeSection = $derived(resolveSection(documentData.sections, activeSlug));
 
+  let article = $state<HTMLElement>();
+  let linkError = $state('');
+
+  async function followAnchor(event: MouseEvent) {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href^="#"]') : null;
+    if (!link || !article?.contains(link)) return;
+    event.preventDefault();
+    const target = resolveDocsAnchor(documentData.sections, link.getAttribute('href') ?? '', activeSlug);
+    if (!target) {
+      linkError = `Reference heading not found: ${link.getAttribute('href')}`;
+      return;
+    }
+    linkError = '';
+    activeSlug = target.section.slug;
+    await tick();
+    if (!article || activeSlug !== target.section.slug) return;
+    const heading = [...article.querySelectorAll<HTMLElement>('[id]')].find(node => node.id === target.id);
+    if (heading) heading.scrollIntoView({ block: 'start' });
+    else article.scrollTop = 0;
+  }
+
   function selectSection(section: DocsSection) {
+    linkError = '';
     activeSlug = section.slug;
   }
 </script>
+
+<svelte:window onclick={followAnchor} />
 
 <svelte:head>
   {#if showHead}
@@ -64,7 +91,8 @@
         </div>
         </aside>
 
-        <article class="docs-article">
+        <article class="docs-article" bind:this={article}>
+          {#if linkError}<p role="alert">{linkError}</p>{/if}
           <div class="docs-article__meta">
           {#if activeSection.status === 'pending'}
             <span class="docs-status docs-status--pending">Pending</span>

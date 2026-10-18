@@ -115,8 +115,7 @@ function renderChapterMarkdown(markdown: string): string {
   const normalizedHeadings = withoutTitle
     .replace(/^###\s+/gm, '#### ')
     .replace(/^##\s+/gm, '### ');
-  return renderMarkdownFragment(normalizedHeadings)
-    .replace(/<h([34]) id="[^"]*">(.*?) \{#([a-z0-9-]+)\}<\/h\1>/g, '<h$1 id="$3">$2</h$1>');
+  return renderMarkdownFragment(normalizedHeadings);
 }
 
 function renderChapterContents(markdown: string): string {

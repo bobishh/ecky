@@ -5,7 +5,7 @@ title: Read the film scanner assembly
 
 # Read the film scanner assembly
 
-This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](01-worm.md) for a gradual introduction; return here for practical engineering exercises.
+This is an advanced workshop worksheet. Start with the illustrated [Worm Farm book](03-rake.md) for a gradual introduction; return here for practical engineering exercises.
 
 The film scanner combines rails, film inserts, a tunnel, a cover, and a threaded lens carrier. This chapter follows three settings through the source: rail clearance, film format, and thread clearance.
 

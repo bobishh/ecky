@@ -5,8 +5,8 @@
 **Clear condition:** Preview shows one connected L-bracket where the foot and flange overlap, and the source compiles.
 
 These are extra engineering exercises. For the illustrated beginner book,
-start with [Worm Farm](missions/01-worm.md): a Bézier worm grows a farm with a
-house, tools, a tractor and a garden. Return here to apply those ideas to
+start with [Worm Farm](https://ecky-cad.com/docs/chapters/03-rake/): build a rake,
+house, garden, snap-together tractor and articulated worm. Return here to apply those ideas to
 practical parts. This bracket is the shelf support for a robot's emergency
 biscuit stash. Its two shapes must overlap; robots cannot eat an invisible join.
 
