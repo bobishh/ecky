@@ -11,6 +11,7 @@ pub mod component_package;
 pub mod config;
 pub mod design;
 pub mod dialog;
+pub mod docs;
 pub mod exploration_cycle;
 pub mod exploration_run;
 pub mod external_shape_edit;

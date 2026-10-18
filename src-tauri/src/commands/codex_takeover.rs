@@ -84,6 +84,18 @@ fn now_seconds() -> i64 {
         .as_secs() as i64
 }
 
+fn emit_owned_provider_update(
+    app: &tauri::AppHandle,
+    binding: &CodexTakeoverBinding,
+    method: &str,
+) -> AppResult<()> {
+    app.emit(
+        "codex-provider-updated",
+        crate::contracts::CodexProviderHistoryUpdate::for_binding(binding, method),
+    )
+    .map_err(|error| AppError::internal(error.to_string()))
+}
+
 fn record_queue_delivery_error(
     conn: &rusqlite::Connection,
     queue_id: &str,
@@ -507,6 +519,7 @@ async fn ensure_binding(
             };
         }
     };
+    emit_owned_provider_update(app, &binding, "binding/created")?;
     state
         .codex_app_server
         .name_thread(&binding.codex_thread_id, &title)
@@ -1426,12 +1439,14 @@ pub fn initialize_codex_queue_supervisor(state: AppState, app: tauri::AppHandle)
                             ));
                         }
                     }
-                    let _ = dispatch_app.emit(
-                        "codex-provider-updated",
-                        serde_json::json!({
-                            "threadId": binding.codex_thread_id,
-                            "method": if result.is_ok() { "queue/dispatched" } else { "queue/failed" },
-                        }),
+                    let _ = emit_owned_provider_update(
+                        &dispatch_app,
+                        &binding,
+                        if result.is_ok() {
+                            "queue/dispatched"
+                        } else {
+                            "queue/failed"
+                        },
                     );
                 });
             }
@@ -1478,13 +1493,7 @@ pub async fn get_codex_takeover(
                     let next_cursor = page.next_cursor.clone();
                     match persist_codex_messages(&backfill_state, &binding, &page.messages).await {
                         Ok(changed) if changed > 0 => {
-                            let _ = app.emit(
-                                "codex-provider-updated",
-                                serde_json::json!({
-                                    "threadId": binding.codex_thread_id,
-                                    "method": "history/persisted",
-                                }),
-                            );
+                            let _ = emit_owned_provider_update(&app, &binding, "history/persisted");
                         }
                         Ok(_) => {}
                         Err(error) => {
@@ -1553,16 +1562,9 @@ pub async fn send_codex_takeover_prompt(
     let snapshot = queued_snapshot_for(&state, binding.clone()).await?;
     let delivery_state = state.inner().clone();
     let delivery_app = app.clone();
-    let codex_thread_id = binding.codex_thread_id.clone();
     tauri::async_runtime::spawn(async move {
         let _ = dispatch_queue_for(&delivery_state, &binding).await;
-        let _ = delivery_app.emit(
-            "codex-provider-updated",
-            serde_json::json!({
-                "threadId": codex_thread_id,
-                "method": "queue/dispatched",
-            }),
-        );
+        let _ = emit_owned_provider_update(&delivery_app, &binding, "queue/dispatched");
     });
     Ok(snapshot)
 }
@@ -3720,10 +3722,6 @@ pub(crate) async fn persist_realtime_message(
     }
     .ok_or_else(|| AppError::not_found("Codex voice transcript has no owned Ecky binding."))?;
     persist_codex_messages(&state, &binding, &[message]).await?;
-    app.emit(
-        "codex-provider-updated",
-        serde_json::json!({"threadId": thread_id, "method": "history/persisted"}),
-    )
-    .map_err(|error| AppError::internal(error.to_string()))?;
+    emit_owned_provider_update(app, &binding, "history/persisted")?;
     Ok(())
 }

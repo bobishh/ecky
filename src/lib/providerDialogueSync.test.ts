@@ -5,11 +5,28 @@ import test from 'node:test';
 import type { CodexDialogueMessage } from './tauri/contracts';
 import {
   applyProviderDialogueAction,
+  codexProviderUpdateTarget,
   createProviderDialogueState,
   projectProviderDialogue,
   isProviderResultCurrent,
   type ProviderDialogueSnapshot,
 } from './providerDialogueSync';
+
+test('first owned provider update can initialize an unloaded dialogue without a text send', () => {
+  const event = { eckyThreadId: 'ecky-1', threadId: 'codex-1', method: 'history/persisted' };
+  assert.equal(codexProviderUpdateTarget(event, 'ecky-1', 'provider:codex', null), 'ecky-1');
+  assert.equal(codexProviderUpdateTarget(event, 'other', 'provider:codex', null), null);
+  assert.equal(codexProviderUpdateTarget(event, 'ecky-1', 'api_key', null), null);
+  assert.equal(codexProviderUpdateTarget({ threadId: 'unknown', method: 'history/persisted' }, 'ecky-1', 'provider:codex', null), null);
+});
+
+test('provider stream updates need the exact active binding while owned cursor changes can refresh it', () => {
+  const binding = { eckyThreadId: 'ecky-1', codexThreadId: 'codex-1' };
+  const event = { threadId: 'codex-1', method: 'item/agentMessage/delta' };
+  assert.equal(codexProviderUpdateTarget(event, 'ecky-1', 'provider:codex', binding), 'ecky-1');
+  assert.equal(codexProviderUpdateTarget({ ...event, threadId: 'codex-old' }, 'ecky-1', 'provider:codex', binding), null);
+  assert.equal(codexProviderUpdateTarget({ ...event, eckyThreadId: 'ecky-1', threadId: 'codex-new' }, 'ecky-1', 'provider:codex', binding), 'ecky-1');
+});
 
 function message(id: string, timestamp: number, content = id): CodexDialogueMessage {
   return { id, role: 'assistant', content, status: 'success', timestamp, attachments: [] };

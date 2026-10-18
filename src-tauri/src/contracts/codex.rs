@@ -28,6 +28,25 @@ pub struct CodexTakeoverBinding {
     pub updated_at: i64,
 }
 
+/// Durable updates route by Ecky ownership even before a UI has loaded its binding.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProviderHistoryUpdate {
+    pub ecky_thread_id: String,
+    pub thread_id: String,
+    pub method: String,
+}
+
+impl CodexProviderHistoryUpdate {
+    pub fn for_binding(binding: &CodexTakeoverBinding, method: &str) -> Self {
+        Self {
+            ecky_thread_id: binding.ecky_thread_id.clone(),
+            thread_id: binding.codex_thread_id.clone(),
+            method: method.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderEventKind {
@@ -168,4 +187,33 @@ pub struct CodexVoiceConnection {
 pub struct CodexVoiceStopInput {
     pub ecky_thread_id: String,
     pub session_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_history_notifications_include_both_thread_identities() {
+        let binding = CodexTakeoverBinding {
+            ecky_thread_id: "ecky-first-voice".into(),
+            codex_thread_id: "codex-cursor".into(),
+            label: "Worm".into(),
+            cwd: "/project".into(),
+            bootstrap_version: 1,
+            created_at: 1,
+            updated_at: 1,
+        };
+        for method in ["binding/created", "history/persisted"] {
+            let value =
+                serde_json::to_value(CodexProviderHistoryUpdate::for_binding(&binding, method))
+                    .unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "eckyThreadId": "ecky-first-voice", "threadId": "codex-cursor", "method": method,
+                })
+            );
+        }
+    }
 }

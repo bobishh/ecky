@@ -29,6 +29,14 @@ NVIDIA Speech; Rust SHALL reject direct standalone STT in those modes before I/O
 - **AND** previously persisted delegation rows are excluded before pagination limits without deleting raw history
 - **AND** ordinary messages, quoted examples, and incomplete envelopes remain visible
 
+#### Scenario: First conversation starts with voice
+
+- **GIVEN** an Ecky thread without a Codex binding or loaded provider snapshot
+- **WHEN** voice creates its owned binding and completed speech is persisted
+- **THEN** backend updates identify the owning Ecky thread and current external cursor
+- **AND** Dialogue loads and displays spoken user and assistant messages without any text submission
+- **AND** unrelated project events and results arriving after a thread or mode switch cannot replace the active dialogue
+
 #### Scenario: Codex cannot start voice
 
 - **WHEN** realtime negotiation or microphone acquisition fails

@@ -120,6 +120,9 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
         ...(turnTraces ? { turnTraces } : {}),
       },
     });
+    w.__EMIT_CODEX_OWNED_EVENT__ = (method: string, eckyThreadId = binding.eckyThreadId, threadId = binding.codexThreadId) => w.__EVENT_HANDLERS__['codex-provider-updated']?.({
+      payload: { method, eckyThreadId, threadId },
+    });
     w.__EMIT_AGY_EVENT__ = (method: string, liveMessages?: unknown[], runtime?: unknown, turnTraces?: unknown[]) => w.__EVENT_HANDLERS__['agy-provider-updated']?.({
       event: 'agy-provider-updated', id: 1, payload: {
         conversationId: agyBinding.agyConversationId,
@@ -147,12 +150,34 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
     };
     window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
       w.__CODEX_CALLS__.push({ cmd, args });
+      if (cmd === 'start_codex_voice') {
+        if (w.__VOICE_ERROR__) throw { code: 'provider', message: w.__VOICE_ERROR__ };
+        if (!w.__CODEX_BINDING__) {
+          w.__CODEX_BINDING__ = structuredClone(w.__CODEX_SNAPSHOT__.binding);
+          w.__CODEX_SNAPSHOT__.messages = [];
+          w.__CODEX_SNAPSHOT__.nextCursor = null;
+          w.__EMIT_CODEX_OWNED_EVENT__('binding/created');
+        }
+        const answer = { sessionId: (args?.input as any).sessionId, threadId: 'codex-owned-by-ecky-7', sdp: 'answer-sdp' };
+        if (w.__VOICE_PENDING__) return new Promise((resolve) => { w.__VOICE_RESOLVE__ = () => resolve(answer); });
+        return answer;
+      }
+      if (cmd === 'stop_codex_voice') return null;
       if (cmd === 'plugin:event|listen') {
         const event = String(args?.event ?? ''); const handler = Number(args?.handler ?? -1);
         w.__EVENT_HANDLERS__[event] = w[`_${handler}`]; return 1;
       }
       if (cmd === 'plugin:event|unlisten') return null;
       if (cmd === 'get_config') return structuredClone(config);
+      if (cmd === 'safe_save_dialog') return w.__CANCEL_DOC_SAVE__ ? null : '/tmp/worm.ecky';
+      if (cmd === 'export_docs_asset') {
+        if (w.__DOC_EXPORT_ERROR__) throw { code: 'persistence', message: w.__DOC_EXPORT_ERROR__ };
+        return null;
+      }
+      if (cmd === 'open_external_url') {
+        if (w.__EXTERNAL_LINK_ERROR__) throw { code: 'internal', message: w.__EXTERNAL_LINK_ERROR__ };
+        return null;
+      }
       if (cmd === 'save_config') {
         if (w.__CONFIG_SAVE_ERROR__) throw 'config.edn: encode: invalid config field connection-type';
         return null;
@@ -220,7 +245,10 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
         w.__ACTIVE_PROVIDER_WRITER__ = structuredClone(args?.input ?? null);
         return null;
       }
-      if (cmd === 'get_codex_takeover') return w.__CODEX_BINDING__ ? structuredClone(w.__CODEX_SNAPSHOT__) : null;
+      if (cmd === 'get_codex_takeover') {
+        if (w.__CODEX_READ_ERROR__) throw { code: 'persistence', message: w.__CODEX_READ_ERROR__ };
+        return w.__CODEX_BINDING__ ? structuredClone(w.__CODEX_SNAPSHOT__) : null;
+      }
       if (cmd === 'get_agy_provider') return w.__AGY_BINDING__ ? structuredClone(w.__AGY_SNAPSHOT__) : null;
       if (cmd === 'get_agy_provider_messages') return { messages: [], nextCursor: null, backwardsCursor: null };
       if (cmd === 'get_codex_takeover_messages') return {
@@ -327,6 +355,7 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
 }
 
 async function selectCodexProvider(page: Page) {
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
   await page.getByRole('button', { name: 'Settings' }).click();
   const settings = page.locator('[data-window-id="settings"]');
   await settings.getByRole('button', { name: 'PROVIDER', exact: true }).click();
@@ -1195,6 +1224,8 @@ test.describe('Codex provider integration', () => {
   });
 
   test('Given provider answer references current model source When user opens that reference Then Code shows the exact line and debug ids stay hidden', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', error => errors.push(error.message));
     await installProviderMocks(page, 'happy', true);
     await page.goto('/');
     await page.evaluate(() => {
@@ -1219,6 +1250,31 @@ test.describe('Codex provider integration', () => {
     const codeWindow = page.locator('[data-window-id="code"]');
     await expect(codeWindow).toBeVisible();
     await expect(codeWindow.locator('.cm-activeLine')).toContainText('(param dryer_section_height 80mm)');
+    expect(new URL(page.url()).pathname).toBe('/');
+    await expect(page.getByTestId('workbench-bottom-dock')).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  test('Given a Codex answer contains an external source link When opened Then native opener handles it and dialogue stays mounted', async ({ page, context }) => {
+    await installProviderMocks(page, 'happy', true);
+    await page.goto('/');
+    await page.evaluate(() => {
+      (window as any).__CODEX_SNAPSHOT__.messages[1].content = 'Исходник: [source.ecky](https://example.test/source.ecky)';
+      (window as any).__WORKBENCH_SENTINEL__ = 'still-mounted';
+    });
+    await selectCodexProvider(page);
+    await openDialogue(page);
+    await page.getByRole('link', { name: 'source.ecky', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'open_external_url'))).toEqual([
+      { cmd: 'open_external_url', args: { url: 'https://example.test/source.ecky' } },
+    ]);
+    expect(context.pages()).toHaveLength(1);
+    expect(await page.evaluate(() => (window as any).__WORKBENCH_SENTINEL__)).toBe('still-mounted');
+    await expect(page.locator('.trail-assistant').filter({ hasText: 'Исходник:' })).toBeVisible();
+    await page.evaluate(() => { (window as any).__EXTERNAL_LINK_ERROR__ = 'system browser unavailable (raw opener error)'; });
+    await page.getByRole('link', { name: 'source.ecky', exact: true }).click();
+    await expect(page.locator('.agent-card').filter({ hasText: 'system browser unavailable (raw opener error)' })).toBeVisible();
+    await expect(page.locator('.trail-assistant').filter({ hasText: 'Исходник:' })).toBeVisible();
   });
 
   test('Given referenced model source cannot load When user opens the reference Then raw source error stays with the answer and Code remains closed', async ({ page }) => {
@@ -1588,27 +1644,12 @@ async function installRealtimeMediaMocks(page: Page) {
   await page.addInitScript(() => {
     const w = window as any;
     w.__VOICE_MEDIA__ = [];
-    const invoke = w.__TAURI_INTERNALS__.invoke;
-    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args: any) => {
-      if (cmd === 'start_codex_voice') {
-        w.__CODEX_CALLS__.push({ cmd, args });
-        if (w.__VOICE_ERROR__) throw { code: 'provider', message: w.__VOICE_ERROR__ };
-        const answer = { sessionId: args.input.sessionId, threadId: 'codex-owned-by-ecky-7', sdp: 'answer-sdp' };
-        if (w.__VOICE_PENDING__) return new Promise((resolve) => { w.__VOICE_RESOLVE__ = () => resolve(answer); });
-        return answer;
-      }
-      if (cmd === 'stop_codex_voice') {
-        w.__CODEX_CALLS__.push({ cmd, args });
-        return null;
-      }
-      return invoke(cmd, args);
-    };
-    Object.defineProperty(navigator.mediaDevices, 'getUserMedia', { value: async () => {
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => {
       w.__VOICE_MEDIA__.push('microphone');
       const stream = new MediaStream();
       (stream as any).getTracks = () => [{ stop: () => w.__VOICE_MEDIA__.push('microphone-stop') }];
       return stream;
-    }});
+    } } });
     w.RTCPeerConnection = class {
       localDescription: any;
       connectionState = 'new';
@@ -1627,6 +1668,70 @@ async function installRealtimeMediaMocks(page: Page) {
       close() { w.__VOICE_MEDIA__.push('peer-close'); }
     };
     HTMLMediaElement.prototype.play = async function () { w.__VOICE_MEDIA__.push('play-reply'); };
+  });
+}
+
+test('Given first conversation starts with voice When speech completes Then dialogue updates without any text submission', async ({ page }) => {
+  await installProviderMocks(page, 'happy');
+  await installRealtimeMediaMocks(page);
+  await bootProviderDialogue(page);
+  await page.getByRole('button', { name: 'Start Codex voice conversation' }).click();
+  await expect(page.locator('.voice-status')).toContainText('LISTENING');
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__CODEX_SNAPSHOT__.messages = [
+      { id: 'spoken-user', role: 'user', content: 'Сделай червяка.', status: 'success', timestamp: 1787263400 },
+      { id: 'spoken-answer', role: 'assistant', content: 'Какой длины?', status: 'success', timestamp: 1787263401 },
+    ];
+    w.__EMIT_CODEX_OWNED_EVENT__('history/persisted');
+  });
+  await expect(page.locator('.trail-user').filter({ hasText: 'Сделай червяка.' })).toBeVisible();
+  await expect(page.locator('.trail-assistant').filter({ hasText: 'Какой длины?' })).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'send_codex_takeover_prompt'))).toHaveLength(0);
+});
+
+test('Given no Codex binding When another project emits history Then current dialogue stays unbound', async ({ page }) => {
+  await installProviderMocks(page, 'happy');
+  await bootProviderDialogue(page);
+  const reads = await page.evaluate(() => (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'get_codex_takeover').length);
+  await page.evaluate(() => (window as any).__EMIT_CODEX_OWNED_EVENT__('binding/created', 'other-project', 'other-codex-thread'));
+  await page.waitForTimeout(350);
+  expect(await page.evaluate(() => (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'get_codex_takeover').length)).toBe(reads);
+});
+
+test('Given first voice creates a binding When local history read fails Then raw error remains visible without sending text', async ({ page }) => {
+  await installProviderMocks(page, 'happy');
+  await installRealtimeMediaMocks(page);
+  await bootProviderDialogue(page);
+  await page.evaluate(() => { (window as any).__CODEX_READ_ERROR__ = 'local provider history unavailable (raw database detail)'; });
+  await page.getByRole('button', { name: 'Start Codex voice conversation' }).click();
+  await expect(page.getByText('local provider history unavailable (raw database detail)', { exact: true })).toBeVisible();
+  await expect(page.locator('.voice-status')).toContainText('LISTENING');
+  await expect(page.getByPlaceholder(/Type a question or design change/i)).toBeVisible();
+});
+
+for (const outcome of ['saved', 'cancelled', 'failed'] as const) {
+  test(`Given bundled book source When download is ${outcome} Then workbench stays mounted`, async ({ page }) => {
+    await installProviderMocks(page, 'happy');
+    await page.goto('/');
+    await page.evaluate((outcome) => {
+      (window as any).__CANCEL_DOC_SAVE__ = outcome === 'cancelled';
+      (window as any).__DOC_EXPORT_ERROR__ = outcome === 'failed' ? 'destination denied (raw filesystem error)' : null;
+      (window as any).__WORKBENCH_SENTINEL__ = 'still-mounted';
+    }, outcome);
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Ecky IR docs', exact: true }).click();
+    const docs = page.locator('[data-window-id="docs"]');
+    const link = docs.getByRole('link', { name: 'Download the complete worm', exact: true });
+    const assetPath = await link.getAttribute('href');
+    await link.click();
+    if (outcome === 'failed') await expect(docs.getByRole('alert')).toContainText('destination denied (raw filesystem error)');
+    else await expect.poll(() => page.evaluate(() => (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'safe_save_dialog').length)).toBe(1);
+    expect(new URL(page.url()).pathname).toBe('/');
+    expect(await page.evaluate(() => (window as any).__WORKBENCH_SENTINEL__)).toBe('still-mounted');
+    await expect(page.getByTestId('workbench-bottom-dock')).toBeVisible();
+    const exports = await page.evaluate(() => (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'export_docs_asset'));
+    expect(exports).toHaveLength(outcome === 'cancelled' ? 0 : 1);
+    if (exports.length) expect(exports[0].args).toMatchObject({ assetPath, targetPath: '/tmp/worm.ecky' });
   });
 }
 

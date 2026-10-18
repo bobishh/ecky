@@ -15,14 +15,6 @@ use crate::freecad;
 use crate::models::AppState;
 use crate::services::session::write_last_snapshot;
 
-const ECKY_IR_BOOK_RESOURCE_PATH: &str = "docs/ecky-ir-field-guide.epub";
-const ECKY_IR_BOOK_FALLBACK_PATHS: &[&str] = &[
-    "../target/book/dist/books/ecky-ir-field-guide.epub",
-    "target/book/dist/books/ecky-ir-field-guide.epub",
-    "../dist/docs/ecky-ir-field-guide.epub",
-    "dist/docs/ecky-ir-field-guide.epub",
-];
-
 fn export_part_label(part: &ExportPartInput) -> String {
     let label = part.label.trim();
     if !label.is_empty() {
@@ -1347,25 +1339,6 @@ pub async fn get_mess_stl_path(app: AppHandle) -> AppResult<String> {
 pub async fn export_file(source_path: String, target_path: String) -> AppResult<()> {
     std::fs::copy(&source_path, &target_path).map_err(|err| {
         crate::contracts::AppError::persistence(format!("Failed to export file: {}", err))
-    })?;
-    Ok(())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn export_docs_book_epub(app: AppHandle, target_path: String) -> AppResult<()> {
-    let source_path = freecad::resolve_resource_path(
-        &app,
-        ECKY_IR_BOOK_RESOURCE_PATH,
-        ECKY_IR_BOOK_FALLBACK_PATHS,
-    )?;
-    std::fs::copy(&source_path, &target_path).map_err(|err| {
-        AppError::persistence(format!(
-            "Failed to export docs EPUB from '{}' to '{}': {}",
-            source_path.display(),
-            target_path,
-            err
-        ))
     })?;
     Ok(())
 }

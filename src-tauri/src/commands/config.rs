@@ -58,6 +58,23 @@ fn open_path_in_system_editor(path: &Path) -> std::io::Result<()> {
     }
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn open_external_url(app: AppHandle, url: String) -> AppResult<()> {
+    use tauri_plugin_shell::ShellExt;
+    let parsed =
+        tauri::Url::parse(&url).map_err(|error| AppError::validation(error.to_string()))?;
+    if !matches!(parsed.scheme(), "https" | "http" | "mailto") {
+        return Err(AppError::validation(
+            "External links must use HTTP, HTTPS or mailto.",
+        ));
+    }
+    #[allow(deprecated)]
+    app.shell()
+        .open(parsed.to_string(), None)
+        .map_err(|error| AppError::internal(format!("Failed to open external link: {error}")))
+}
+
 fn open_path_in_default_app(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {

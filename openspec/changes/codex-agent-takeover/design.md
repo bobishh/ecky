@@ -154,7 +154,14 @@ startup while experimental Jev routing is enabled; it never silently bypasses th
 Startup also rejects an active text turn instead of changing its policy.
 
 Completed native `transcriptSegment` items persist under stable native item ids into
-the existing provider timeline and refresh Dialogue. Complete native
+the existing provider timeline and refresh Dialogue. Binding creation and durable
+history notifications carry both the owning Ecky thread id and external cursor id.
+Dialogue routes these updates by the active Ecky thread even when no provider
+snapshot exists yet; first voice use must not depend on a prior text submission.
+Snapshot refresh uses the same token-checked loader as initial dialogue loading,
+discarding results after thread or provider-mode switches. Transient stream updates
+still require an exact loaded external cursor and do not reread history per delta.
+Complete native
 `<realtime_delegation>` user envelopes are internal transport context, not duplicate
 spoken utterances: exclude them during turn projection and durable writes. Public
 history reads exclude legacy envelopes before their limit/cursor calculation while

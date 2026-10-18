@@ -1,9 +1,9 @@
 <script lang="ts">
   import ChaptersReader from './ChaptersReader.svelte';
   import DocsSite from './DocsSite.svelte';
-  import { safeSaveDialog } from './safeSaveDialog';
-  import { exportDocsBookEpub } from './tauri/client';
-  import { ECKY_IR_EPUB_FILENAME, ECKY_IR_EPUB_PATH, hasTauriInvokeBridge, saveBookEpubNative, triggerBrowserDownload } from './docs/downloadBook';
+  import { formatBackendError } from './tauri/client';
+  import { installWorkbenchLinkRouting } from './workbenchLinks';
+  import { downloadDocumentationAsset, ECKY_IR_EPUB_FILENAME, ECKY_IR_EPUB_PATH } from './docs/downloadAsset';
 
   type OpenAttemptPayload = {
     code: string;
@@ -20,24 +20,26 @@
     onOpenAttempt?: (payload: OpenAttemptPayload) => void;
   } = $props();
 
-  async function downloadEpub() {
+  async function downloadAsset(assetPath: string, fileName: string) {
     epubState = 'saving';
     epubError = '';
     try {
-      if (!hasTauriInvokeBridge()) {
-        triggerBrowserDownload(document, ECKY_IR_EPUB_PATH, ECKY_IR_EPUB_FILENAME);
-      } else {
-        await saveBookEpubNative({ saveDialog: safeSaveDialog, exportNativeFile: exportDocsBookEpub });
-      }
+      await downloadDocumentationAsset(assetPath, fileName);
       epubState = 'idle';
     } catch (error) {
-      epubError = error instanceof Error ? error.message : String(error);
+      epubError = formatBackendError(error);
       epubState = 'failed';
     }
   }
+
+  // File-backed documentation shares HTML with the website. Its links are
+  // intents inside the desktop shell; they must never replace the workbench.
+  function documentationLinks(node: HTMLElement) {
+    return { destroy: installWorkbenchLinkRouting(node, error => { epubError = formatBackendError(error); }) };
+  }
 </script>
 
-<div class="docs-hub">
+<div class="docs-hub" use:documentationLinks>
   <header class="docs-hub__header">
     <div>
       <p>Ecky CAD / documentation</p>
@@ -46,9 +48,9 @@
     <nav aria-label="Documentation sections">
       <button type="button" class:docs-hub__tab--active={activeTab === 'chapters'} class="docs-hub__tab" onclick={() => activeTab = 'chapters'}>Chapters</button>
       <button type="button" class:docs-hub__tab--active={activeTab === 'reference'} class="docs-hub__tab" onclick={() => activeTab = 'reference'}>Function Reference</button>
-      <button type="button" class="docs-hub__tab" onclick={() => void downloadEpub()}>{epubState === 'saving' ? 'Saving EPUB…' : 'EPUB'}</button>
+      <button type="button" class="docs-hub__tab" onclick={() => void downloadAsset(ECKY_IR_EPUB_PATH, ECKY_IR_EPUB_FILENAME)}>{epubState === 'saving' ? 'Saving EPUB…' : 'EPUB'}</button>
     </nav>
-    {#if epubError}<p class="docs-hub__error">{epubError}</p>{/if}
+    {#if epubError}<p class="docs-hub__error" role="alert">{epubError}</p>{/if}
   </header>
   <main class="docs-hub__content">
     {#if activeTab === 'chapters'}

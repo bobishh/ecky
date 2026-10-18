@@ -55,3 +55,8 @@ test('renderProviderMarkdown escapes raw HTML and disables unsafe links', () => 
   assert.doesNotMatch(rendered.html, /href="javascript:/);
   assert.match(rendered.html, />unsafe</);
 });
+
+test('Codex links to bundled examples retain the same download intent as book links', () => {
+  const rendered = renderProviderMarkdown('[Worm source](/docs/examples/4189afc54271-01-worm.ecky)');
+  assert.match(rendered.html, /href="\/docs\/examples\/4189afc54271-01-worm\.ecky" download="01-worm\.ecky"/);
+});

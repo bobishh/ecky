@@ -7,6 +7,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         .typ::<crate::contracts::FinalizeStatus>()
         .typ::<crate::contracts::IntentDecision>()
         .typ::<crate::contracts::VisualVerificationResult>()
+        .typ::<crate::contracts::CodexProviderHistoryUpdate>()
         .commands(collect_commands![
         crate::commands::config::get_config,
         crate::commands::boot::get_boot_projection,
@@ -148,7 +149,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::semantic_manifest::apply_semantic_control_value,
         crate::commands::render::get_mess_stl_path,
         crate::commands::render::export_file,
-        crate::commands::render::export_docs_book_epub,
+        crate::commands::docs::export_docs_asset,
+        crate::commands::config::open_external_url,
         crate::commands::render::export_multipart_stl_zip,
         crate::commands::render::export_multipart_3mf,
         crate::commands::dialog::safe_save_dialog,

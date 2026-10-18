@@ -5,6 +5,7 @@ import {
   type ProviderCodeReference,
 } from './providerMessagePresentation';
 import { renderProviderMath } from './providerMath';
+import { docsDownloadFilename } from './docs/eckyIrGuide';
 
 export type ProviderMermaidDiagram = {
   id: string;
@@ -89,6 +90,8 @@ export function renderProviderMarkdown(content: string): ProviderMarkdownRender 
           codeReferences.push(reference);
           return `<button type="button" class="provider-code-reference" data-provider-code-reference="${index}" aria-label="Open ${escapeHtml(reference.label)} at line ${reference.line}"><span>${labelHtml}</span><small>LINE ${reference.line}</small></button>`;
         }
+        const download = docsDownloadFilename(href);
+        if (download) return `<a href="${escapeHtml(href)}" download="${escapeHtml(download)}">${labelHtml}</a>`;
         const safeHref = safeExternalUrl(href);
         if (!safeHref) return labelHtml;
         const titleAttribute = title ? ` title="${escapeHtml(title)}"` : '';

@@ -102,3 +102,4 @@
 - [x] Require explicit native realtime v3 and prove the AVAS-compatible startup payload.
 - [x] Exclude native delegation envelopes from projection, persistence, and legacy history pages while retaining real speech and ordinary messages.
 - [ ] Verify live authenticated audio negotiation and actual microphone/playback on the target desktop.
+- [x] Publish owned binding/history updates and prove first voice use populates Dialogue without a text send.

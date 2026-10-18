@@ -19,6 +19,11 @@ export type DocsRenderOptions = {
   assetBasePath?: string;
 };
 
+export function docsDownloadFilename(href: string): string | null {
+  if (!/^\/docs\/examples\/[a-z\d_.-]+\.ecky$/i.test(href)) return null;
+  return href.split('/').at(-1)!.replace(/^[a-f\d]{12}-/i, '');
+}
+
 const STATUS_SUFFIX = /\s+\[(pending|ready)\]\s*$/i;
 const AGENT_REFERENCE = /<!-- ECKY_AGENT_REFERENCE_START -->[\s\S]*?<!-- ECKY_AGENT_REFERENCE_END -->/g;
 
@@ -241,7 +246,10 @@ function renderInline(text: string): string {
   let output = escapeHtml(text);
   output = output.replace(
     /\[([^\]]+)\]\(((?:https?:\/\/|\/(?!\/)|#)[^\s)]+)\)/g,
-    '<a href="$2">$1</a>',
+    (_match, label: string, href: string) => {
+      const filename = docsDownloadFilename(href);
+      return `<a href="${href}"${filename ? ` download="${filename}"` : ''}>${label}</a>`;
+    },
   );
   output = output.replace(/`([^`]+)`/g, (_match, code) => `<code>${code}</code>`);
   output = output.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');

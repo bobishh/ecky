@@ -116,11 +116,7 @@ function renderChapterMarkdown(markdown: string): string {
     .replace(/^###\s+/gm, '#### ')
     .replace(/^##\s+/gm, '### ');
   return renderMarkdownFragment(normalizedHeadings)
-    .replace(/<h([34]) id="[^"]*">(.*?) \{#([a-z0-9-]+)\}<\/h\1>/g, '<h$1 id="$3">$2</h$1>')
-    .replace(/<a href="([^"]+\.ecky)"([^>]*)>/g, (_, href: string, attributes: string) => {
-      const filename = decodeURIComponent(href.split('/').at(-1) ?? '').replace(/^[a-f\d]{12}-/i, '');
-      return `<a href="${href}"${attributes} download="${escapeHtml(filename)}">`;
-    });
+    .replace(/<h([34]) id="[^"]*">(.*?) \{#([a-z0-9-]+)\}<\/h\1>/g, '<h$1 id="$3">$2</h$1>');
 }
 
 function renderChapterContents(markdown: string): string {

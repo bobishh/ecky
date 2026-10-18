@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { exportDocsBookEpub, formatBackendError } from './client';
+import { exportDocsAsset, formatBackendError } from './client';
 import { commands, type AppError, type Result } from './contracts';
 
 test('formatBackendError includes raw backend details', () => {
@@ -50,19 +50,19 @@ test('formatBackendError prefers diagnosticContext span without duplicating line
   assert.doesNotMatch(message, /lines=3 \| lines=3/);
 });
 
-test('exportDocsBookEpub routes through generated Tauri command wrapper', async () => {
-  const original = commands.exportDocsBookEpub;
-  const calls: string[] = [];
-  commands.exportDocsBookEpub = async (targetPath: string): Promise<Result<null, AppError>> => {
-    calls.push(targetPath);
+test('documentation export routes catalog path and save destination through its generated command', async () => {
+  const original = commands.exportDocsAsset;
+  const calls: string[][] = [];
+  commands.exportDocsAsset = async (assetPath: string, targetPath: string): Promise<Result<null, AppError>> => {
+    calls.push([assetPath, targetPath]);
     return { status: 'ok', data: null };
   };
 
   try {
-    await exportDocsBookEpub('/tmp/ecky-ir.epub');
+    await exportDocsAsset('/docs/ecky-ir-field-guide.epub', '/tmp/ecky-ir.epub');
   } finally {
-    commands.exportDocsBookEpub = original;
+    commands.exportDocsAsset = original;
   }
 
-  assert.deepEqual(calls, ['/tmp/ecky-ir.epub']);
+  assert.deepEqual(calls, [['/docs/ecky-ir-field-guide.epub', '/tmp/ecky-ir.epub']]);
 });

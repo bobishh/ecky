@@ -122,7 +122,7 @@ fn frontend_app_code_does_not_call_tauri_invoke_directly() {
 
     let allowlist = [
         source.join("lib/tauri/contracts.ts"),
-        source.join("lib/docs/downloadBook.test.ts"),
+        source.join("lib/docs/downloadAsset.test.ts"),
     ];
     let mut violations = Vec::new();
     for path in files {

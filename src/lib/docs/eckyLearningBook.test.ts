@@ -35,6 +35,15 @@ test('Given source illustrations When publishing Then every image and download h
   assert.match(reader, /ecky-book\.md\?raw/);
 });
 
+test('Given app chapters When source links render Then every example is an explicit download', () => {
+  const app = parseDocsDocument(fs.readFileSync('public/tutorials/ecky-book.md', 'utf8'));
+  const links = app.sections.flatMap(section => [...section.bodyHtml.matchAll(/<a href="([^\"]+\.ecky)"([^>]*)>/g)]);
+  assert.ok(links.length >= 6);
+  for (const [, href, attributes] of links) {
+    assert.match(attributes, /\bdownload="[^\"]+\.ecky"/, href);
+  }
+});
+
 test('Given committed CAD renders When source changes Then illustration manifests detect drift', () => {
   const assets = 'docs/books/ecky-ir/assets/worm-farm';
   const manifests = fs.readdirSync(assets).filter(file => file.endsWith('.manifest.json'));

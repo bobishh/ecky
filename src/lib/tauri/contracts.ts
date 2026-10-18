@@ -1169,9 +1169,17 @@ async exportFile(sourcePath: string, targetPath: string) : Promise<Result<null, 
     else return { status: "error", error: e  as any };
 }
 },
-async exportDocsBookEpub(targetPath: string) : Promise<Result<null, AppError>> {
+async exportDocsAsset(assetPath: string, targetPath: string) : Promise<Result<null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("export_docs_book_epub", { targetPath }) };
+    return { status: "ok", data: await TAURI_INVOKE("export_docs_asset", { assetPath, targetPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openExternalUrl(url: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_external_url", { url }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1811,6 +1819,10 @@ export type CodexDialogueMessage = { id: string; role: string; content: string; 
 export type CodexMessagePage = { messages: CodexDialogueMessage[]; nextCursor: string | null; backwardsCursor: string | null }
 export type CodexMessagePageInput = { eckyThreadId: string; cursor: string | null; direction: string | null }
 export type CodexPromptInput = { eckyThreadId: string; promptText: string; attachments?: Attachment[] }
+/**
+ * Durable updates route by Ecky ownership even before a UI has loaded its binding.
+ */
+export type CodexProviderHistoryUpdate = { eckyThreadId: string; threadId: string; method: string }
 export type CodexQueuedPrompt = { id: string; eckyThreadId: string; promptText: string; attachments?: Attachment[]; status: string; canCancel?: boolean; error: string | null; createdAt: number; updatedAt: number }
 export type CodexSteerInput = { eckyThreadId: string; promptText: string; expectedTurnId: string; attachments?: Attachment[] }
 export type CodexStopInput = { eckyThreadId: string; turnId: string }

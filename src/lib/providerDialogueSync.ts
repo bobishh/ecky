@@ -1,12 +1,32 @@
 import type {
   AgyProviderBinding,
   CodexDialogueMessage,
+  CodexProviderHistoryUpdate,
   CodexQueuedPrompt,
   CodexTakeoverRuntime,
   ProviderTurnTrace,
 } from './tauri/contracts';
 import type { Message } from './types/domain';
 import { projectProviderTurnMessages } from './providerActivity';
+
+export type CodexProviderUpdateEvent = Omit<CodexProviderHistoryUpdate, 'eckyThreadId'> & {
+  eckyThreadId?: string;
+  liveMessages?: CodexDialogueMessage[];
+  turnTraces?: ProviderTurnTrace[];
+  runtime?: CodexTakeoverRuntime;
+};
+
+export function codexProviderUpdateTarget(
+  event: CodexProviderUpdateEvent,
+  activeThreadId: string | null,
+  connectionType: string | null | undefined,
+  binding: { eckyThreadId: string; codexThreadId: string } | null | undefined,
+): string | null {
+  if (!activeThreadId || connectionType !== 'provider:codex') return null;
+  if (event.eckyThreadId) return event.eckyThreadId === activeThreadId ? activeThreadId : null;
+  return binding?.eckyThreadId === activeThreadId && binding.codexThreadId === event.threadId
+    ? activeThreadId : null;
+}
 
 export type ProviderDialogueSnapshot = {
   providerId: 'codex' | 'agy';

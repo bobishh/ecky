@@ -137,7 +137,8 @@
 } from './lib/agents/state';
   import { resolveRelayPresence } from './lib/agents/relayPresence';
   import { deriveDialogueState, type DialogueState } from './lib/composables/dialogueState';
-  import { applyProviderDialogueAction, createProviderDialogueState, isProviderResultCurrent, mergeProviderPage, mergeProviderSnapshot, projectProviderDialogue, type ProviderDialogueSnapshot } from './lib/providerDialogueSync';
+  import { applyProviderDialogueAction, codexProviderUpdateTarget, createProviderDialogueState, isProviderResultCurrent, mergeProviderPage, mergeProviderSnapshot, projectProviderDialogue, type CodexProviderUpdateEvent, type ProviderDialogueSnapshot } from './lib/providerDialogueSync';
+  import { installWorkbenchLinkRouting } from './lib/workbenchLinks';
   import type { ProviderCodeReference } from './lib/providerMessagePresentation';
 import {
     buildOptimisticQueuedDialogueMessage,
@@ -1165,15 +1166,13 @@ import {
     reduceCodexProvider({ type: 'loadStarted', token });
     try {
       const snapshot = await getCodexTakeover(threadId);
-      if (token !== codexTakeoverLoadToken || get(activeThreadId) !== threadId) return;
+      if (token !== codexTakeoverLoadToken || get(activeThreadId) !== threadId || get(config).connectionType !== 'provider:codex') return;
       if (snapshot) applyCodexTakeoverSnapshot(snapshot, preserveLoadedPages);
       else reduceCodexProvider({ type: 'snapshot', snapshot: null, preserveLoadedPages: false, token });
     } catch (error) {
-      if (token === codexTakeoverLoadToken && get(activeThreadId) === threadId) {
+      if (token === codexTakeoverLoadToken && get(activeThreadId) === threadId && get(config).connectionType === 'provider:codex') {
         reduceCodexProvider({ type: 'error', error: formatBackendError(error) });
       }
-    } finally {
-      if (token === codexTakeoverLoadToken && !codexDialogueState.snapshot) reduceCodexProvider({ type: 'snapshot', snapshot: null, preserveLoadedPages: false, token });
     }
   }
 
@@ -1335,34 +1334,22 @@ import {
     }
   }
 
-  function scheduleCodexTakeoverRefresh(event: {
-    threadId: string;
-    method: string;
-    liveMessages?: CodexTakeoverSnapshot['liveMessages'];
-    turnTraces?: CodexTakeoverSnapshot['turnTraces'];
-    runtime?: CodexTakeoverSnapshot['runtime'];
-  }) {
+  function scheduleCodexTakeoverRefresh(event: CodexProviderUpdateEvent) {
     const snapshot = codexTakeoverSnapshot;
-    if (!snapshot || snapshot.binding.codexThreadId !== event.threadId) return;
+    const eckyThreadId = codexProviderUpdateTarget(event, get(activeThreadId), get(config).connectionType, snapshot?.binding);
+    if (!eckyThreadId) return;
     const terminalEvent = event.method === 'turn/completed'
       || event.method === 'thread/status/changed' && !event.runtime?.activeTurnId;
-    if (event.liveMessages && event.runtime) {
+    if (snapshot?.binding.codexThreadId === event.threadId && event.liveMessages && event.runtime) {
       reduceCodexProvider({ type: 'live', liveMessages: event.liveMessages, turnTraces: event.turnTraces, runtime: event.runtime });
       if (!terminalEvent) return;
     }
     if (codexTakeoverRefreshTimer) clearTimeout(codexTakeoverRefreshTimer);
     codexTakeoverRefreshTimer = setTimeout(() => {
       codexTakeoverRefreshTimer = null;
-      const eckyThreadId = snapshot.binding.eckyThreadId;
-      const refresh = getCodexTakeover(eckyThreadId);
-      void refresh
-        .then((next) => {
-          if (!isProviderResultCurrent(codexTakeoverSnapshot, eckyThreadId)) return;
-          if (next) applyCodexTakeoverSnapshot(next, true);
-          setProviderError(next?.runtime.error ?? null);
-        })
-        .catch((error) => { setProviderError(formatBackendError(error)); });
-    }, terminalEvent ? 40 : 250);
+      if (get(activeThreadId) !== eckyThreadId || get(config).connectionType !== 'provider:codex') return;
+      void loadCodexTakeover(eckyThreadId, true);
+    }, terminalEvent || !snapshot ? 40 : 250);
   }
 
   function scheduleAgyProviderRefresh(event: {
@@ -4231,6 +4218,7 @@ import {
   }
 
   onMount(() => {
+    const removeLinkRouting = installWorkbenchLinkRouting(document, error => session.setError(formatBackendError(error)));
     let recoveryResetTimer: ReturnType<typeof setTimeout> | null = null;
     void connectAgentActivityIngestion(
       { listen, getAgentActivity },
@@ -4507,13 +4495,7 @@ import {
         });
       },
     ) : noopUnlisten;
-    const unlistenCodexTakeover = canListenToTauri ? listen<{
-      threadId: string;
-      method: string;
-      liveMessages?: CodexTakeoverSnapshot['liveMessages'];
-      turnTraces?: CodexTakeoverSnapshot['turnTraces'];
-      runtime?: CodexTakeoverSnapshot['runtime'];
-    }>(
+    const unlistenCodexTakeover = canListenToTauri ? listen<CodexProviderUpdateEvent>(
       'codex-provider-updated',
       (event) => scheduleCodexTakeoverRefresh(event.payload),
     ) : noopUnlisten;
@@ -4555,6 +4537,7 @@ import {
     })();
     return () => {
       teardownWindowStore();
+      removeLinkRouting();
       resetAgentTerminalStore();
       agentNotificationProjectionDisconnect?.();
       agentNotificationProjectionDisconnect = null;
