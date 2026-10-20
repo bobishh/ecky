@@ -16,20 +16,49 @@ function contentTypeFor(filePath: string): string {
   return 'application/octet-stream';
 }
 
+function isOutsideDirectory(directory: string, filePath: string): boolean {
+  const relative = path.relative(directory, filePath);
+  return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+}
+
 function generatedDocsAssetsPlugin() {
   return {
     name: 'generated-docs-assets',
     configureServer(server: import('vite').ViteDevServer) {
       server.middlewares.use('/docs/assets', (req, res, next) => {
-        const requestPath = (req.url ?? '').split('?')[0];
+        let requestPath: string;
+        try {
+          requestPath = decodeURIComponent((req.url ?? '').split('?')[0]);
+        } catch {
+          res.statusCode = 400;
+          res.end('Invalid asset path');
+          return;
+        }
+        if (requestPath.includes('\0') || requestPath.includes('\\')) {
+          res.statusCode = 400;
+          res.end('Invalid asset path');
+          return;
+        }
         const relativePath = requestPath.replace(/^\/+/, '');
-        const filePath = path.join(generatedDocsAssetsDir, relativePath);
+        const filePath = path.resolve(generatedDocsAssetsDir, relativePath);
+        if (isOutsideDirectory(generatedDocsAssetsDir, filePath)) {
+          res.statusCode = 403;
+          res.end('Asset path outside generated documentation');
+          return;
+        }
         if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
           next();
           return;
         }
-        res.setHeader('Content-Type', contentTypeFor(filePath));
-        fs.createReadStream(filePath).pipe(res);
+        const canonicalRoot = fs.realpathSync(generatedDocsAssetsDir);
+        const canonicalFile = fs.realpathSync(filePath);
+        if (isOutsideDirectory(canonicalRoot, canonicalFile)) {
+          res.statusCode = 403;
+          res.end('Asset path outside generated documentation');
+          return;
+        }
+        res.setHeader('Content-Type', contentTypeFor(canonicalFile));
+        fs.createReadStream(canonicalFile).pipe(res);
       });
       server.middlewares.use('/docs/ecky-ir-field-guide.epub', (_req, res, next) => {
         if (!fs.existsSync(generatedDocsEpubFile) || !fs.statSync(generatedDocsEpubFile).isFile()) {
@@ -77,29 +106,19 @@ export default defineConfig({
   },
   build: {
     target: process.env.TAURI_PLATFORM === 'windows' ? 'chrome105' : 'safari13',
-    minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
+    minify: !process.env.TAURI_DEBUG ? 'oxc' : false,
     sourcemap: Boolean(process.env.TAURI_DEBUG),
-    rollupOptions: {
+    rolldownOptions: {
       input: {
         app: resolve(__dirname, 'index.html'),
         eckyIr: resolve(__dirname, 'ecky-ir/index.html'),
       },
       output: {
-        manualChunks: {
-          three: ['three'],
-          editor: [
-            'codemirror',
-            '@codemirror/state',
-            '@codemirror/view',
-            '@codemirror/language',
-            '@codemirror/lang-python',
-            '@codemirror/theme-one-dark',
-          ],
-          vendor: [
-            'svelte',
-            '@tauri-apps/api',
-            '@tauri-apps/plugin-dialog',
-            '@tauri-apps/plugin-fs',
+        codeSplitting: {
+          groups: [
+            { name: 'three', test: /node_modules[\\/]three[\\/]/ },
+            { name: 'editor', test: /node_modules[\\/](?:codemirror|@codemirror)[\\/]/ },
+            { name: 'vendor', test: /node_modules[\\/](?:svelte|@tauri-apps)[\\/]/ },
           ],
         },
       },

@@ -377,6 +377,7 @@ pub struct ExtractedComponent {
     pub header: ComponentHeader,
 }
 
+#[derive(Default)]
 struct ModelScan {
     /// param key -> full source text of its `(kind key default ...)` entry,
     /// in declaration order.
@@ -386,6 +387,9 @@ struct ModelScan {
     /// Lexical bindings in scope at the target part, in binding order
     /// (later entries shadow earlier ones).
     part_scope: Vec<(String, ExprKind)>,
+    /// Original lexical frames, outermost first. Used by automatic capture to
+    /// preserve computed bindings without evaluating or flattening their scope.
+    part_scope_frames: Vec<(String, ExprKind)>,
     /// The matched part clause items.
     part_items: Vec<ExprKind>,
     /// All part/feature keys seen, for the unknown-key error.
@@ -402,6 +406,19 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
     let forms = Parser::parse_without_lowering(&request.source)
         .map_err(|err| AppError::parse(format!("Extraction failed to parse source: {err}")))?;
     let scan = scan_model(&forms, &request.part_key)?;
+    let local_definitions = forms
+        .iter()
+        .filter(|form| {
+            expr_list_items(form, "top-level form")
+                .ok()
+                .and_then(|items| items.first().and_then(expr_head_name))
+                .is_some_and(|head| matches!(head.as_str(), "define" | "define-component"))
+        })
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let definition_names =
+        crate::component_import_runtime::collect_local_binding_names(&local_definitions);
 
     let body = scan.part_items.last().cloned().ok_or_else(|| {
         AppError::validation(format!(
@@ -461,6 +478,7 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
                     "binding `{key}` is not a scalar literal (current value: `{value}`)"
                 )),
             },
+            None if definition_names.contains(key) => {}
             None => blockers.push(format!("unresolved free reference `{key}`")),
         }
     }
@@ -477,7 +495,7 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
         .iter()
         .map(|clause| format!("  {clause}\n"))
         .collect::<String>();
-    let component_source = format!(
+    let mut component_source = format!(
         "(define-component {}\n  ({})\n{}  {})",
         name,
         signature_entries.join("\n   "),
@@ -491,12 +509,21 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
         .filter(|key| scan.relation_keys.contains(key))
         .collect();
 
+    let closed = extract_defined_components(
+        &format!("{local_definitions}\n{component_source}"),
+        request.thread_id.as_deref().unwrap_or_default(),
+        request.message_id.as_deref().unwrap_or_default(),
+    )?
+    .into_iter()
+    .find(|component| component.name == name)
+    .ok_or_else(|| AppError::validation("Extracted component has no reusable definition."))?;
+    component_source = closed.component_source;
     let header = ComponentHeader {
         schema_version: 1,
         name: name.clone(),
         component_id: None,
         revision_digest: None,
-        dependencies: Vec::new(),
+        dependencies: closed.header.dependencies,
         description: request.description.clone(),
         params: header_params,
         tags: request.tags.clone(),
@@ -515,6 +542,122 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
         component_source,
         header,
     })
+}
+
+/// Render capture includes ordinary named parts, preserving per-part diagnostics
+/// instead of letting one unsupported dependency hide the rest of the library.
+pub fn extract_rendered_components(
+    source: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> (Vec<ExtractedComponent>, Vec<String>) {
+    let (mut components, mut diagnostics) =
+        match extract_defined_components(source, thread_id, message_id) {
+            Ok(components) => (components, Vec::new()),
+            Err(error) => (Vec::new(), vec![error.to_string()]),
+        };
+    let Ok(forms) = Parser::parse_without_lowering(source) else {
+        return (components, diagnostics);
+    };
+    let mut scan = ModelScan::default();
+    for form in &forms {
+        let Ok(items) = expr_list_items(form, "top-level form") else {
+            continue;
+        };
+        if items.first().and_then(expr_head_name).as_deref() == Some("model") {
+            if let Err(error) =
+                scan_clauses(&items[1..], &mut Vec::new(), "", &mut scan, &mut false)
+            {
+                diagnostics.push(error.to_string());
+            }
+        }
+    }
+    let defined_names = components
+        .iter()
+        .map(|component| component.name.clone())
+        .collect::<BTreeSet<_>>();
+    for key in scan.part_keys.into_iter().collect::<BTreeSet<_>>() {
+        if defined_names.contains(&key) {
+            continue;
+        }
+        let request = ComponentExtractRequest {
+            source: source.to_string(),
+            part_key: key.clone(),
+            thread_id: Some(thread_id.to_string()),
+            message_id: Some(message_id.to_string()),
+            ..Default::default()
+        };
+        match extract_component(&request).or_else(|original_error| {
+            extract_lexically_closed_part(&request).unwrap_or(Err(original_error))
+        }) {
+            Ok(mut component) => {
+                component.header.component_id = Some(format!(
+                    "local-{:x}",
+                    Sha256::digest(format!("{thread_id}\0part\0{key}").as_bytes())
+                ));
+                component.header.revision_digest = Some(format!(
+                    "sha256:{:x}",
+                    Sha256::digest(component.component_source.as_bytes())
+                ));
+                components.push(component);
+            }
+            Err(error) => diagnostics.push(format!("Part {key}: {error}")),
+        }
+    }
+    (components, diagnostics)
+}
+
+fn extract_lexically_closed_part(
+    request: &ComponentExtractRequest,
+) -> Option<AppResult<ExtractedComponent>> {
+    let forms = Parser::parse_without_lowering(&request.source).ok()?;
+    let scan = scan_model(&forms, &request.part_key).ok()?;
+    if scan.part_scope_frames.is_empty()
+        || scan.part_items.iter().any(|item| {
+            expr_list_items(item, "part clause")
+                .ok()
+                .and_then(|items| items.first().and_then(expr_head_name))
+                .as_deref()
+                == Some("ports")
+        })
+    {
+        return None;
+    }
+    let mut body = scan.part_items.last()?.to_string();
+    for (head, bindings) in scan.part_scope_frames.iter().rev() {
+        body = format!("({head} {bindings} {body})");
+    }
+    let definitions = forms
+        .iter()
+        .filter(|form| {
+            expr_list_items(form, "top-level form")
+                .ok()
+                .and_then(|items| items.first().and_then(expr_head_name))
+                .is_some_and(|head| matches!(head.as_str(), "define" | "define-component"))
+        })
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let parameters = scan
+        .param_entries
+        .iter()
+        .map(|(_, entry)| entry.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(
+        extract_component(&ComponentExtractRequest {
+            source: format!(
+                "{definitions}\n(model (params {parameters}) (part {} {body}))",
+                request.part_key
+            ),
+            ..request.clone()
+        })
+        .map(|mut component| {
+            component.header.provenance.source_digest =
+                format!("sha256:{:x}", Sha256::digest(request.source.as_bytes()));
+            component
+        }),
+    )
 }
 
 fn port_clause_free_variables(clause: &ExprKind) -> AppResult<BTreeSet<String>> {
@@ -663,6 +806,7 @@ fn scan_model(forms: &[ExprKind], part_key: &str) -> AppResult<ModelScan> {
         param_entries: Vec::new(),
         relation_keys: BTreeSet::new(),
         part_scope: Vec::new(),
+        part_scope_frames: Vec::new(),
         part_items: Vec::new(),
         part_keys: Vec::new(),
     };
@@ -717,7 +861,11 @@ fn scan_clauses(
                         }
                     }
                 }
+                let was_found = *found;
                 scan_clauses(&items[2..], &mut nested, part_key, scan, found)?;
+                if !was_found && *found {
+                    scan.part_scope_frames.insert(0, (head, items[1].clone()));
+                }
             }
             "part" | "feature" => {
                 if let Some(key) = items.get(1).and_then(expr_stringish_key) {

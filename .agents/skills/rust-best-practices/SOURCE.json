@@ -1,0 +1,16 @@
+{
+  "repo": "apollographql/skills",
+  "ref": "aafc8944365a766d48cc519ce8b8575f93f953a4",
+  "license": "MIT",
+  "notes": [
+    "Two illustrative ADR links are placeholders, not runtime dependencies. Rust MSRV/API and test recommendations must follow project versions. Cargo build/test may execute project build scripts; do not infer sandbox permission from allowed-tools."
+  ],
+  "path": "skills/rust-best-practices",
+  "local_patches": [
+    "Append repository safety and host integration rules to SKILL.md.",
+    "Correct chapter_09 reference/Box/Arc Send and Sync bounds using Rust std docs and a rustc trait assertion probe.",
+    "Clarify all remaining Send/Sync table bounds, including synchronization wrappers and initializer types; use Rust std trait implementations as authority."
+  ],
+  "review_date": "2026-10-19",
+  "upstream_url": "https://github.com/apollographql/skills/tree/aafc8944365a766d48cc519ce8b8575f93f953a4/skills/rust-best-practices"
+}

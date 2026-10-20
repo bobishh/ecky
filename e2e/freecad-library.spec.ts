@@ -134,7 +134,7 @@ async function installFreecadLibraryMocks(page: Page, mode: FreecadLibraryMockMo
       connectionType: 'api_key',
       defaultEngineKind: 'ecky',
       defaultSourceLanguage: 'ecky',
-      defaultGeometryBackend: 'mesh',
+      defaultGeometryBackend: 'freecad',
       maxGenerationAttempts: 1,
       maxVerifyAttempts: 0,
     };

@@ -62,9 +62,8 @@ pub struct ComponentGetToolRequest {
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComponentImportToolRequest {
-    pub package_id: String,
-    pub version: String,
-    pub component_id: String,
+    #[serde(flatten)]
+    pub component: crate::component_import_runtime::LibraryComponentSelection,
     pub source: String,
 }
 
@@ -143,13 +142,5 @@ pub fn handle_component_import(
     app: &dyn PathResolver,
     req: ComponentImportToolRequest,
 ) -> AppResult<crate::component_import_runtime::CopyInlineComponentImportResponse> {
-    crate::component_import_runtime::copy_inline_component_import(
-        crate::component_import_runtime::CopyInlineComponentImportRequest {
-            package_id: req.package_id,
-            version: req.version,
-            component_id: req.component_id,
-            authored_source: req.source,
-        },
-        &crate::component_import_runtime::InstalledLibraryComponentResolver { app },
-    )
+    crate::component_import_runtime::copy_inline_library_component(app, req.component, req.source)
 }

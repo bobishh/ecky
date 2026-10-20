@@ -1,0 +1,14 @@
+{
+  "repo": "antfu/skills",
+  "ref": "feb0f3aba6566426f12230e7fc7a10d97c1293bb",
+  "license": "MIT",
+  "notes": [
+    "Vite 8.3.1/Vitest 5.0.1 guidance; verify installed versions. Examples of coverage autoUpdate and snapshot update are not acceptance evidence."
+  ],
+  "path": "skills/vitest",
+  "local_patches": [
+    "Append repository safety and host integration rules to SKILL.md."
+  ],
+  "review_date": "2026-10-19",
+  "upstream_url": "https://github.com/antfu/skills/tree/feb0f3aba6566426f12230e7fc7a10d97c1293bb/skills/vitest"
+}

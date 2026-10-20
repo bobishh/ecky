@@ -257,7 +257,8 @@ import {
     capabilityForAuthoringContext,
     resolveActiveAuthoringContext,
   } from './lib/runtimeCapabilities';
-  import { isRenderableVersionTimelineMessage } from './lib/threadTimeline';
+  import { isRenderableVersionTimelineMessage, isVersionTimelineMessage } from './lib/threadTimeline';
+  import { versionDiagnosticForDisplay } from './lib/versionDiagnostic';
   import {
     applyCaptureGuideDraftEdit,
     createCaptureGuideDraftHistory,
@@ -359,6 +360,7 @@ import {
     SurfaceTrimRegionPreviewResponse,
     ReopenedCaptureRun,
     FreecadLibraryItem,
+    LibraryComponentSelection,
     SketchDocument,
     SketchDraftSource,
   } from './lib/tauri/contracts';
@@ -1409,6 +1411,12 @@ import {
       ) ?? null
     );
   });
+  const selectedVersionHistoryMessage = $derived.by<Message | null>(() => {
+    if (!activeThread) return null;
+    return activeThread.messages.find((message) =>
+      message.id === $activeVersionId && isVersionTimelineMessage(message),
+    ) ?? null;
+  });
   let cameraStateByTarget = $state<Record<string, ViewportCameraState>>({});
   type PendingAgentPrompt = {
     requestId: string;
@@ -1585,6 +1593,14 @@ import {
   const effectiveViewerStlUrl = $derived.by<string | null>(() =>
     hasSketchPreview ? sketchPreviewStlUrl : ($activeThreadId ? stlUrl : null),
   );
+  const selectedVersionDiagnostic = $derived(selectedVersionHistoryMessage?.status === 'error'
+    ? versionDiagnosticForDisplay(
+      selectedVersionHistoryMessage.content || selectedVersionHistoryMessage.output?.response || errorText,
+    )
+    : null);
+  const selectedVersionHasNoModel = $derived(Boolean(
+    selectedVersionHistoryMessage?.status === 'error' && !hasSketchPreview && !$activeThreadVersionLoading && !stlUrl,
+  ));
   const effectiveViewerAssets = $derived.by<ViewerAsset[]>(() =>
     hasSketchPreview ? sketchPreviewViewerAssets : viewerAssets,
   );
@@ -5383,12 +5399,7 @@ import {
     }
   }
 
-  async function handleApplyComponentImport(input: {
-    packageId: string;
-    version: string;
-    componentId: string;
-    label: string;
-  }) {
+  async function handleApplyComponentImport(input: LibraryComponentSelection & { label: string }) {
     const threadId = get(activeThreadId);
     const baseMessageId = get(activeVersionId);
     const expectedSourceDigest =
@@ -5398,13 +5409,12 @@ import {
     }
 
     session.setStatus(`Copy-inlining component: ${input.label}...`);
+    const { label: _label, ...selection } = input;
     const result = await applyInlineComponentImport({
       threadId,
       baseMessageId,
       expectedSourceDigest,
-      packageId: input.packageId,
-      version: input.version,
-      componentId: input.componentId,
+      ...selection,
     });
     const imported = result.version;
     if (
@@ -5510,6 +5520,12 @@ import {
                 busyText={viewerBusyText}
                 topologyMode={viewerTopologyMode}
               />
+              {#if selectedVersionHasNoModel}
+                <section class="viewport-version-error" role="alert" aria-label="Selected version has no model">
+                  <strong>Selected version has no model</strong>
+                  <p>{selectedVersionDiagnostic ?? 'This version has no saved model because rendering did not complete.'}</p>
+                </section>
+              {/if}
               {#if sketchPreviewStatus}
                 <section class="sketch-preview-status" aria-label="Sketch preview status">
                   <div class="sketch-preview-status__head">
@@ -5763,6 +5779,7 @@ import {
 
     {#snippet libraryContent()}
       <LibraryPanel
+        freecadEnabled={activeAuthoringContext.geometryBackend === 'freecad'}
         onImportFreecadLibraryPart={handleImportFreecadLibraryPart}
         onApplyComponentImport={handleApplyComponentImport}
       />
@@ -6141,6 +6158,22 @@ import {
   .campaign-project-page { height: 100%; min-height: 0; padding: 14px; overflow: hidden; }
   .main-workbench { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
   .viewport-area { flex: 1; min-height: 100px; background: #0b0f1a; position: relative; overflow: hidden; }
+  .viewport-version-error {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: min(560px, calc(100% - 32px));
+    max-height: calc(100% - 32px);
+    overflow: auto;
+    transform: translate(-50%, -50%);
+    border: 1px solid var(--danger);
+    background: var(--bg-100);
+    color: var(--text);
+    padding: 14px 16px;
+    z-index: 20;
+  }
+  .viewport-version-error strong { color: var(--danger); }
+  .viewport-version-error p { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-dim); }
   .viewer-shell {
     position: absolute;
     inset: 0;

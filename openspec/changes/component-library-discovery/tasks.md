@@ -15,3 +15,10 @@
   backfill successful history before MCP component_search.
 - [x] Restrict package chooser to ZIP while retaining legacy backend archive
   compatibility.
+
+- [x] Extend acceptance coverage for rendered named parts, pinned reuse, repeated
+  insertion, source conflicts, pending/errors, and engine-specific foreign catalog.
+- [x] Capture ordinary parts with transitive local helpers and per-part diagnostics.
+- [x] Skip unchanged history with durable capture cursors; search header metadata.
+- [x] Wire native card insertion and MCP reuse to the shared Rust source operation.
+- [x] Verify focused Rust, browser, contract generation, and frontend type checks.

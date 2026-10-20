@@ -1,0 +1,14 @@
+{
+  "repo": "trailofbits/skills",
+  "ref": "5c99c03fb8a9ea568432ecbcba5d86e9f4ac2bf0",
+  "license": "CC-BY-SA-4.0",
+  "notes": [
+    "Differential review baseline example git checkout is unsafe in dirty user checkout; use git show/blame with explicit ref or isolated checkout. Namespaced optional agents outside skill dirs are not registered by copying content. cargo-fuzz/toolchain install executes external code and creates fuzz/ files; enable only when requested. Preserve CC-BY-SA attribution/license. Bad command examples are vulnerability demonstrations, not instructions to execute."
+  ],
+  "path": "plugins/property-based-testing/skills/property-based-testing",
+  "local_patches": [
+    "Append repository safety and host integration rules to SKILL.md."
+  ],
+  "review_date": "2026-10-19",
+  "upstream_url": "https://github.com/trailofbits/skills/tree/5c99c03fb8a9ea568432ecbcba5d86e9f4ac2bf0/plugins/property-based-testing/skills/property-based-testing"
+}

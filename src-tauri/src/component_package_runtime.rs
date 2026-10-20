@@ -1997,9 +1997,27 @@ pub fn capture_defined_components(
     message_id: &str,
     source: &str,
 ) -> AppResult<()> {
-    for component in
-        crate::component_extract::extract_defined_components(source, thread_id, message_id)?
-    {
+    let diagnostics = capture_rendered_components(app, thread_id, message_id, source)?;
+    report_capture_diagnostics(diagnostics)
+}
+
+fn report_capture_diagnostics(diagnostics: Vec<String>) -> AppResult<()> {
+    if diagnostics.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::validation(diagnostics.join("\n")))
+    }
+}
+
+fn capture_rendered_components(
+    app: &dyn PathResolver,
+    thread_id: &str,
+    message_id: &str,
+    source: &str,
+) -> AppResult<Vec<String>> {
+    let (components, diagnostics) =
+        crate::component_extract::extract_rendered_components(source, thread_id, message_id);
+    for component in components {
         let component_id = component.header.component_id.as_deref().ok_or_else(|| {
             AppError::internal("Automatic component capture has no stable component ID.")
         })?;
@@ -2045,7 +2063,42 @@ pub fn capture_defined_components(
             write_atomic(&latest_path, &pointer)?;
         }
     }
-    Ok(())
+    Ok(diagnostics)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ComponentCaptureCursor {
+    schema_version: u32,
+    message_id: String,
+    diagnostics: Vec<String>,
+}
+
+fn capture_cursor_path(app: &dyn PathResolver, thread_id: &str) -> AppResult<PathBuf> {
+    Ok(extracted_component_library_root(app)?
+        .join("capture-cursors")
+        .join(format!("{:x}.json", Sha256::digest(thread_id.as_bytes()))))
+}
+
+/// A persisted cursor avoids rereading/reparsing already indexed model history
+/// on every Library open and MCP search. Bump schema when capture rules change.
+pub fn component_capture_diagnostics(
+    app: &dyn PathResolver,
+    thread_id: &str,
+    message_id: &str,
+) -> AppResult<Option<Vec<String>>> {
+    let path = capture_cursor_path(app, thread_id)?;
+    match fs::read_to_string(&path) {
+        Ok(raw) => Ok(serde_json::from_str::<ComponentCaptureCursor>(&raw)
+            .ok()
+            .filter(|cursor| cursor.schema_version == 2 && cursor.message_id == message_id)
+            .map(|cursor| cursor.diagnostics)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AppError::persistence(format!(
+            "Failed to read component capture cursor '{}': {error}",
+            path.display()
+        ))),
+    }
 }
 
 /// Publish only when this successful version is still latest for its thread.
@@ -2064,7 +2117,18 @@ pub fn capture_latest_successful_components(
         .iter()
         .any(|target| target.thread_id == thread_id && target.message_id == message_id)
     {
-        capture_defined_components(app, thread_id, message_id, source)?;
+        if let Some(diagnostics) = component_capture_diagnostics(app, thread_id, message_id)? {
+            return report_capture_diagnostics(diagnostics);
+        }
+        let diagnostics = capture_rendered_components(app, thread_id, message_id, source)?;
+        let cursor = serde_json::to_vec(&ComponentCaptureCursor {
+            schema_version: 2,
+            message_id: message_id.to_string(),
+            diagnostics: diagnostics.clone(),
+        })
+        .map_err(|error| AppError::internal(error.to_string()))?;
+        write_atomic(&capture_cursor_path(app, thread_id)?, &cursor)?;
+        report_capture_diagnostics(diagnostics)?;
     }
     Ok(())
 }
@@ -2106,10 +2170,11 @@ pub fn search_extracted_components(
     let needle = query.trim().to_lowercase();
     for component in BUILTIN_STDLIB {
         let haystack = format!(
-            "{} {} {}",
+            "{} {} {} {}",
             component.name,
             component.one_liner,
-            component.tags.join(" ")
+            component.tags.join(" "),
+            component.params.join(" ")
         )
         .to_lowercase();
         if !needle.is_empty() && !haystack.contains(&needle) {
@@ -2169,10 +2234,22 @@ pub fn search_extracted_components(
             continue;
         };
         let haystack = format!(
-            "{} {} {}",
+            "{} {} {} {} {}",
             header.name,
             header.description.clone().unwrap_or_default(),
-            header.tags.join(" ")
+            header.tags.join(" "),
+            header
+                .params
+                .iter()
+                .map(|param| param.key.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            header
+                .ports
+                .iter()
+                .flat_map(|port| [port.port_id.as_str(), port.type_id.as_str()])
+                .collect::<Vec<_>>()
+                .join(" ")
         )
         .to_lowercase();
         if !needle.is_empty() && !haystack.contains(&needle) {
@@ -3442,7 +3519,7 @@ mod package_payload_store_tests {
         let first = search_extracted_components(&resolver, "bracket", 50)
             .unwrap()
             .into_iter()
-            .find(|component| component.origin == "local")
+            .find(|component| component.origin == "local" && component.name == "bracket")
             .unwrap();
         let component_id = first.component_id.clone().unwrap();
         let first_digest = first.revision_digest.clone().unwrap();
@@ -3477,7 +3554,7 @@ mod package_payload_store_tests {
         let identities = search_extracted_components(&resolver, "bracket", 50)
             .unwrap()
             .into_iter()
-            .filter(|component| component.origin == "local")
+            .filter(|component| component.origin == "local" && component.name == "bracket")
             .filter_map(|component| component.component_id)
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(identities.len(), 2);

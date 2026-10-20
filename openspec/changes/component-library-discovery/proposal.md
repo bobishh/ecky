@@ -10,7 +10,10 @@ absent from the workbench, so a populated component library appears empty.
 - Show shipped and saved components alongside installed packages.
 - Search component names, descriptions, parameters, tags, and port identifiers.
 - Allow explicit refresh after components are saved externally.
-- Index authored `define-component` declarations after successful version renders,
+- Insert built-in, extracted, and revision-pinned local components into the active
+  model through the existing Rust source/version/render service.
+- Keep the foreign FreeCAD catalog available for the FreeCAD engine only.
+- Index authored named parts and `define-component` declarations after successful version renders,
   preserving immutable thread-scoped revisions and complete local dependencies.
 - Read a local component by stable identity and exact revision digest so future
   local tooling can vendor reproducible source without registry infrastructure.

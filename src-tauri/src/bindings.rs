@@ -8,6 +8,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         .typ::<crate::contracts::IntentDecision>()
         .typ::<crate::contracts::VisualVerificationResult>()
         .typ::<crate::contracts::CodexProviderHistoryUpdate>()
+        .typ::<crate::component_import_runtime::LibraryComponentSelection>()
         .commands(collect_commands![
         crate::commands::config::get_config,
         crate::commands::boot::get_boot_projection,

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-function installVersionTimelineMocks(options?: { includeFailedHead?: boolean; compactSelectedVersion?: boolean }) {
+function installVersionTimelineMocks(options?: { includeFailedHead?: boolean; includePendingHead?: boolean; includeCurrentAfterFailed?: boolean; compactSelectedVersion?: boolean }) {
   const thread = {
     id: 'thread-verify',
     title: 'Verify Timeline Thread',
@@ -210,6 +210,34 @@ function installVersionTimelineMocks(options?: { includeFailedHead?: boolean; co
     thread.updatedAt += 1;
   }
 
+  if (options?.includeCurrentAfterFailed) {
+    const current = structuredClone(thread.messages[0]) as any;
+    current.id = 'msg-current-after-failure';
+    current.content = 'Current bracket ready.';
+    current.timestamp = Date.UTC(2026, 5, 13) / 1000 + 2;
+    current.output.versionName = 'V3';
+    current.output.title = 'Current bracket';
+    thread.messages.push(current);
+    thread.versionCount = 3;
+    thread.updatedAt += 1;
+  }
+
+  if (options?.includePendingHead) {
+    const pending = structuredClone(thread.messages[0]) as any;
+    pending.id = 'msg-pending-head';
+    pending.content = 'Building bracket.';
+    pending.status = 'pending';
+    pending.timestamp = Date.UTC(2026, 5, 13) / 1000 + 1;
+    pending.output.versionName = 'V2';
+    pending.output.title = 'Pending bracket';
+    pending.output.response = 'Building bracket.';
+    pending.artifactBundle = null;
+    pending.modelManifest = null;
+    thread.messages.push(pending);
+    thread.versionCount = 2;
+    thread.updatedAt += 1;
+  }
+
   // Real workspace pages retain lightweight identity after full version payloads are evicted.
   for (const message of thread.messages) {
     const output = message.output as { title: string; versionName: string };
@@ -334,6 +362,22 @@ endsolid mock
             observedBytes: 4096,
             truncatedFields: [],
             availableSections: ['core', 'denseTopology'],
+          };
+        }
+        if (cmd === 'delete_version_intent') {
+          const input = args?.input as { messageId?: string } | undefined;
+          const deletedIndex = thread.messages.findIndex((message) => message.id === input?.messageId);
+          if (deletedIndex >= 0) thread.messages.splice(deletedIndex, 1);
+          const selectedVersion = thread.messages.at(-1) ?? null;
+          return {
+            threadId: thread.id,
+            workspace: {
+              thread: { ...structuredClone(thread), messages: [] },
+              selectedVersion: selectedVersion ? structuredClone(selectedVersion) : null,
+              messagesPage: { messages: structuredClone(thread.messages), hasMore: false, nextBefore: null, observedBytes: 0, truncatedFields: [] },
+              requestedMessageFound: false,
+            },
+            threadRemoved: false,
           };
         }
         if (cmd === 'get_dense_topology_page') {
@@ -464,8 +508,52 @@ test('Given a failed artifact-less draft is newest When opening its thread Then 
   await expect(page.locator('.version-title')).toHaveText('Broken bracket draft');
   await expect(page.locator('.trail-active-version')).toContainText('line 17: unexpected closing parenthesis');
   await expect(page.locator('.trail-active-version .trail-status')).toHaveText('ERROR');
+  await expect(page.locator('.version-selected-status')).toHaveText('BROKEN VERSION');
   expect(await page.locator('.trail-active-version .trail-status').evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(10);
+  await expect(page.getByRole('alert', { name: 'Selected version has no model' }))
+    .toContainText('line 17: unexpected closing parenthesis');
 
+  await page.getByRole('button', { name: 'SET CURRENT' }).click();
+  await expect(page.getByRole('alert', { name: 'Selected version has no model' })).toHaveCount(0);
+  await expect(page.locator('.version-selected-status')).toHaveCount(0);
+  await expect.poll(() => page.locator('.viewer-shell').getAttribute('data-stl-url'))
+    .toContain('/mock/model-runtime/model.stl');
+
+});
+
+test('Given a pending version has no artifact When opening it Then viewport does not call it broken', async ({ page }) => {
+  await installVersionTimelineMocks({ includePendingHead: true })({ page });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'PROJECTS' }).click();
+  await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'COMPLETED' }).click();
+  await page.locator('.project-card', { hasText: 'Verify Timeline Thread' }).getByRole('button', { name: 'VIEW' }).click();
+  await page.getByRole('button', { name: 'DIALOGUE' }).click();
+
+  await expect(page.locator('.version-counter')).toHaveText(/V 2 OF 2/);
+  await expect(page.locator('.version-title')).toHaveText('Pending bracket');
+  await expect(page.locator('.trail-active-version .trail-status')).toHaveText('PENDING');
+  await expect(page.locator('.trail-active-version')).toContainText('Building bracket.');
+  await expect(page.locator('.version-selected-status')).toHaveCount(0);
+  await expect(page.getByRole('alert', { name: 'Selected version has no model' })).toHaveCount(0);
+});
+
+test('Given current and previous broken versions When deleting current Then broken previous is selected with its error', async ({ page }) => {
+  await installVersionTimelineMocks({ includeFailedHead: true, includeCurrentAfterFailed: true })({ page });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'PROJECTS' }).click();
+  await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'COMPLETED' }).click();
+  await page.locator('.project-card', { hasText: 'Verify Timeline Thread' }).getByRole('button', { name: 'VIEW' }).click();
+  await page.getByRole('button', { name: 'DIALOGUE' }).click();
+  await expect(page.locator('.version-title')).toHaveText('Current bracket');
+  await page.locator('.version-nav__actions .delete-btn').click();
+  await page.getByRole('button', { name: 'REMOVE' }).click();
+
+  await expect(page.locator('.version-title')).toHaveText('Broken bracket draft');
+  await expect(page.locator('.version-selected-status')).toHaveText('BROKEN VERSION');
+  await expect(page.getByRole('alert', { name: 'Selected version has no model' }))
+    .toContainText('line 17: unexpected closing parenthesis');
 });
 
 test('Given version authoring controls When editing code or parameters Then Apply is the only version action', async ({ page }) => {

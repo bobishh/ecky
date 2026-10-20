@@ -10,6 +10,7 @@ const bindingsSource = readFileSync(
 const clientSource = readFileSync(new URL('./tauri/client.ts', import.meta.url), 'utf8');
 
 test('LibraryPanel submits tagged identity/path intents and projects backend-owned catalogs', () => {
+  assert.match(panelSource, /\{#if freecadEnabled\}/);
   assert.match(panelSource, /libraryPanelIntent\(\{[\s\S]{0,80}kind: 'loadFreecad'/);
   assert.match(panelSource, /libraryPanelIntent\(\{[\s\S]{0,80}kind: 'setFreecadRoot'/);
   assert.match(panelSource, /libraryPanelIntent\(\{[\s\S]{0,80}kind: 'installPackage'/);

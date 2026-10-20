@@ -64,7 +64,7 @@ Arguments: `group` (required)
 
 ## freecad_library_search
 
-Search configured local FreeCAD-library folders for reusable FCStd/STEP/STL parts. Architecture folders are excluded unless includeArchitecture is true.
+FreeCAD-engine catalog only. For native Ecky components use component_search. Search configured local FreeCAD-library folders for reusable FCStd/STEP/STL parts. Architecture folders are excluded unless includeArchitecture is true.
 
 Arguments: `query` (required), `roots`, `limit`, `includeArchitecture`
 
@@ -88,7 +88,7 @@ Arguments: `source` (required), `partKey` (required), `name`, `description`, `ta
 
 ## component_search
 
-Search built-ins, manually extracted components, and latest successful local definitions by compact header (name, params, tags and ports). Backfills latest successful history before returning and includes local source provenance; use component_get for source.
+Search built-ins, manually extracted components, and rendered local parts and component definitions by compact header (name, params, tags and ports). Indexes successful renders and incrementally backfills history before returning and includes local source provenance; use component_get for source.
 
 Arguments: `query`, `limit`
 
@@ -100,9 +100,9 @@ Arguments: `name`, `componentId`, `revisionDigest`
 
 ## component_import
 
-Copy-inline an installed package component into active Ecky model source and add one instantiated part. Returns self-contained authored source; never emits import-component or a dependency lock.
+Insert a local component at its exact revision, a built-in/extracted component by name, or an installed package component into Ecky source with one instantiated part. Returns self-contained source; apply it through normal source editing and render. Identical existing definitions are reused; conflicting definitions fail.
 
-Arguments: `packageId` (required), `version` (required), `componentId` (required), `source` (required)
+Arguments: `packageId`, `version`, `componentId`, `revisionDigest`, `name`, `source` (required)
 
 ## freecad_library_import
 

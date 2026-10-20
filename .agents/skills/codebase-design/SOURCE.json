@@ -1,0 +1,14 @@
+{
+  "repo": "mattpocock/skills",
+  "ref": "49dd158d1076134a641b33efb035946536778336",
+  "license": "MIT",
+  "notes": [
+    "Only codebase-design approved as optional architecture reference. DEEPENING asks deleting old tests; preserve meaningful coverage. DESIGN-IT-TWICE spawns 3+ agents; explicit scope and slot policy apply. Full tdd/improve-codebase-architecture plugins not recommended: mandatory confirmations, related skills, report CDN dependencies, inline glossary writes."
+  ],
+  "path": "skills/engineering/codebase-design",
+  "local_patches": [
+    "Append repository safety and host integration rules to SKILL.md."
+  ],
+  "review_date": "2026-10-19",
+  "upstream_url": "https://github.com/mattpocock/skills/tree/49dd158d1076134a641b33efb035946536778336/skills/engineering/codebase-design"
+}

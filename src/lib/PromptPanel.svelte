@@ -1241,6 +1241,9 @@
         {/if}
         {#if activeVersion}
           <div class="version-engine">{modelEngineLabel(activeVersion)}</div>
+          {#if activeVersion.status === 'error'}
+            <div class="version-selected-status" role="status">BROKEN VERSION</div>
+          {/if}
         {/if}
       </div>
       {#if activeVersion}
@@ -2360,6 +2363,12 @@
   .trail-status--error {
     border-color: var(--danger);
     color: var(--danger);
+  }
+
+  .version-selected-status {
+    color: var(--danger);
+    font-size: var(--ui-font-caption);
+    letter-spacing: 0.05em;
   }
 
   .trail-time {

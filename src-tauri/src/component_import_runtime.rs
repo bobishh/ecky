@@ -195,6 +195,65 @@ pub struct CopyInlineComponentImportResponse {
     pub part_key: String,
 }
 
+/// Exact library selection shared by UI and MCP. Local insertions always pin a
+/// revision; legacy name lookup remains available for extracted/built-in source.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, specta::Type, PartialEq, Eq)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum LibraryComponentSelection {
+    #[serde(rename_all = "camelCase")]
+    #[specta(rename_all = "camelCase")]
+    Package {
+        package_id: String,
+        version: String,
+        component_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[specta(rename_all = "camelCase")]
+    Revision {
+        component_id: String,
+        revision_digest: String,
+    },
+    Named {
+        name: String,
+    },
+}
+
+pub fn copy_inline_library_component(
+    app: &dyn PathResolver,
+    selection: LibraryComponentSelection,
+    authored_source: String,
+) -> AppResult<CopyInlineComponentImportResponse> {
+    let record = match selection {
+        LibraryComponentSelection::Package {
+            package_id,
+            version,
+            component_id,
+        } => {
+            return copy_inline_component_import(
+                CopyInlineComponentImportRequest {
+                    package_id,
+                    version,
+                    component_id,
+                    authored_source,
+                },
+                &InstalledLibraryComponentResolver { app },
+            );
+        }
+        LibraryComponentSelection::Revision {
+            component_id,
+            revision_digest,
+        } => crate::component_package_runtime::read_component_by_id(
+            app,
+            &component_id,
+            Some(&revision_digest),
+        )?,
+        LibraryComponentSelection::Named { name } => {
+            crate::component_package_runtime::read_extracted_component(app, &name)?
+        }
+    };
+    insert_inline_component_source(&authored_source, &record.source, &record.name, &record.name)
+}
+
 /// Materialize an installed source component into authored source.
 ///
 /// Deliberately no `import-component` form, registry coordinate, or dependency
@@ -217,29 +276,65 @@ pub fn copy_inline_component_import(
             coordinate.canonical_identity(),
         )));
     }
-    inspect_package_source(&component.source, &component.entry_symbol)?;
+    insert_inline_component_source(
+        &request.authored_source,
+        &component.source,
+        &component.entry_symbol,
+        &coordinate.component_id,
+    )
+}
 
-    let package_names = collect_local_binding_names(&component.source);
-    let local_names = collect_local_binding_names(&request.authored_source);
-    if let Some(name) = package_names.intersection(&local_names).next() {
-        return Err(AppError::validation(format!(
-            "Cannot copy-inline '{}' because definition '{}' already exists in the active model.",
-            coordinate.canonical_identity(),
-            name
-        )));
+fn insert_inline_component_source(
+    source: &str,
+    component_source: &str,
+    entry_symbol: &str,
+    part_name: &str,
+) -> AppResult<CopyInlineComponentImportResponse> {
+    inspect_package_source(component_source, entry_symbol)?;
+    let definitions = |text: &str| -> AppResult<BTreeMap<String, String>> {
+        let forms = Parser::parse_without_lowering(text)
+            .map_err(|error| AppError::parse(error.to_string()))?;
+        Ok(forms
+            .into_iter()
+            .filter_map(|form| {
+                let names = collect_local_binding_names(&form.to_string());
+                names
+                    .into_iter()
+                    .next()
+                    .map(|name| (name, form.to_string()))
+            })
+            .collect())
+    };
+    let existing = definitions(source)?;
+    let mut missing = Vec::new();
+    for (name, form) in definitions(component_source)? {
+        match existing.get(&name) {
+            Some(local) if local == &form => {},
+            Some(_) => return Err(AppError::conflict(format!(
+                "Cannot insert component '{entry_symbol}': definition '{name}' already exists with different source. Rename that definition or choose another target model."
+            ))),
+            None => missing.push((name, form)),
+        }
     }
-
-    let model_end = top_level_model_end(&request.authored_source)?;
-    let part_key = next_copy_inline_part_key(&request.authored_source, &coordinate.component_id);
-    let instance = format!("\n  (part {part_key} ({}))", component.entry_symbol);
-    let mut authored_source = String::with_capacity(
-        request.authored_source.len() + component.source.len() + instance.len() + 4,
-    );
-    authored_source.push_str(component.source.trim());
+    // Preserve dependency order from the original component, not name order.
+    let forms = Parser::parse_without_lowering(component_source)
+        .map_err(|error| AppError::parse(error.to_string()))?;
+    let prefix = forms
+        .iter()
+        .map(ToString::to_string)
+        .filter(|form| missing.iter().any(|(_, missing)| missing == form))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let model_end = top_level_model_end(source)?;
+    let part_key = next_copy_inline_part_key(source, part_name);
+    let instance = format!("\n  (part {part_key} ({entry_symbol}))");
+    let mut authored_source =
+        String::with_capacity(source.len() + prefix.len() + instance.len() + 4);
+    authored_source.push_str(&prefix);
     authored_source.push('\n');
-    authored_source.push_str(&request.authored_source[..model_end]);
+    authored_source.push_str(&source[..model_end]);
     authored_source.push_str(&instance);
-    authored_source.push_str(&request.authored_source[model_end..]);
+    authored_source.push_str(&source[model_end..]);
 
     // Guard the persisted boundary, not merely the source package.
     if source_has_live_component_import(&authored_source) {
@@ -250,8 +345,8 @@ pub fn copy_inline_component_import(
     }
     Ok(CopyInlineComponentImportResponse {
         authored_source,
-        component_source: component.source,
-        entry_symbol: component.entry_symbol,
+        component_source: component_source.to_string(),
+        entry_symbol: entry_symbol.to_string(),
         part_key,
     })
 }
@@ -1030,7 +1125,7 @@ fn validate_alias(alias: &str) -> AppResult<()> {
 
 /// Top-level local define / define-component names in authored source (for
 /// alias collision detection).
-fn collect_local_binding_names(source: &str) -> BTreeSet<String> {
+pub(crate) fn collect_local_binding_names(source: &str) -> BTreeSet<String> {
     let Ok(forms) = Parser::parse_without_lowering(source) else {
         return BTreeSet::new();
     };
@@ -1039,7 +1134,7 @@ fn collect_local_binding_names(source: &str) -> BTreeSet<String> {
         let Ok(items) = expr_list_items(form, "top-level form") else {
             continue;
         };
-        let Some(head) = items.first().and_then(expr_identifier) else {
+        let Some(head) = items.first().and_then(expr_head_name) else {
             continue;
         };
         if head == "define-component" {

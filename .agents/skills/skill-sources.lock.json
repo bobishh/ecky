@@ -1,0 +1,272 @@
+{
+  "schema_version": 1,
+  "installed_at": "2026-10-19",
+  "scope": "repository",
+  "skills": [
+    {
+      "name": "property-based-testing",
+      "repo": "trailofbits/skills",
+      "ref": "5c99c03fb8a9ea568432ecbcba5d86e9f4ac2bf0",
+      "license": "CC-BY-SA-4.0",
+      "notes": [
+        "Differential review baseline example git checkout is unsafe in dirty user checkout; use git show/blame with explicit ref or isolated checkout. Namespaced optional agents outside skill dirs are not registered by copying content. cargo-fuzz/toolchain install executes external code and creates fuzz/ files; enable only when requested. Preserve CC-BY-SA attribution/license. Bad command examples are vulnerability demonstrations, not instructions to execute."
+      ],
+      "path": "plugins/property-based-testing/skills/property-based-testing",
+      "local_patches": [
+        "Append repository safety and host integration rules to SKILL.md."
+      ],
+      "review_date": "2026-10-19",
+      "upstream_url": "https://github.com/trailofbits/skills/tree/5c99c03fb8a9ea568432ecbcba5d86e9f4ac2bf0/plugins/property-based-testing/skills/property-based-testing",
+      "installed_sha256": {
+        "README.md": "ffbe30eec09cc64fb1eae836b07ca1d82939bda3f1e6f0dceadcdd78793a3112",
+        "SKILL.md": "e6bb304d35ea2a9ef9060d260860a3398ff05f7e39a30cb6bbb3c0ff3c39b077",
+        "SOURCE.json": "45226773c4d42b845bc48b5a2cf13c83256ae791126ab3a11fb44841c7f35f00",
+        "UPSTREAM-LICENSE": "7abe19ec9bb73b36141b999b861d24ad855e808bafe0f81e84cce28556f6c297",
+        "agents/openai.yaml": "51d635deefa254d8cdf6dc56450851b6ec9545cd37f88a4eb4035cf3f2262fff",
+        "assets/trail-of-bits-mark.svg": "4bf74c789b38dcf6ad762c136b6832363d27ae19fbaa9a18ec18d66ecce6ca05",
+        "references/generating.md": "c0e72dfc89babe3c32de718b81b94044362c85e776d7475e950dfeaab78bb58e",
+        "references/interpreting-failures.md": "dbae7db8773712ba03268a3d56ea5aa6720af0650a5189580bfd88aa2edc3f9a",
+        "references/libraries.md": "f7218acf8e668130ef3048983472579d04e12030c5401926f666363e5f69c686",
+        "references/refactoring.md": "6eb5c206f575704791f089608bb06e41d6eed91b9d3c7fb27912f969aed07a18",
+        "references/reviewing.md": "110b08118a1e7b1a2566def6e9d2a0bf43fc2deefce857d2ce3b4382b07bc774"
+      }
+    },
+    {
+      "name": "differential-review",
+      "repo": "trailofbits/skills",
+      "ref": "5c99c03fb8a9ea568432ecbcba5d86e9f4ac2bf0",
+      "license": "CC-BY-SA-4.0",
+      "notes": [
+        "Differential review baseline example git checkout is unsafe in dirty user checkout; use git show/blame with explicit ref or isolated checkout. Namespaced optional agents outside skill dirs are not registered by copying content. cargo-fuzz/toolchain install executes external code and creates fuzz/ files; enable only when requested. Preserve CC-BY-SA attribution/license. Bad command examples are vulnerability demonstrations, not instructions to execute."
+      ],
+      "path": "plugins/differential-review/skills/differential-review",
+      "local_patches": [
+        "Append repository safety and host integration rules to SKILL.md.",
+        "Replace baseline checkout instructions with read-only git show and isolated-execution guidance."
+      ],
+      "review_date": "2026-10-19",
+      "upstream_url": "https://github.com/trailofbits/skills/tree/5c99c03fb8a9ea568432ecbcba5d86e9f4ac2bf0/plugins/differential-review/skills/differential-review",
+      "installed_sha256": {
+        "SKILL.md": "bb6be42691fa43bc4e84200de78769e2e7891a6ccc7a4224353047c7af695de0",
+        "SOURCE.json": "e6c3dff7acec4e9c8d398e21b4d0ec99eca47c0c6f3a8cda83ed22b386f968e8",
+        "UPSTREAM-LICENSE": "7abe19ec9bb73b36141b999b861d24ad855e808bafe0f81e84cce28556f6c297",
+        "adversarial.md": "3cb823f38c6e551cbcf5f72325d2bb219dacdad774072519c31d50d92db19800",
+        "agents/openai.yaml": "0279d56f88dc1a04d4b1941a25fa7672912a3ceb0557b13c38d069908b30ae61",
+        "assets/trail-of-bits-mark.svg": "4bf74c789b38dcf6ad762c136b6832363d27ae19fbaa9a18ec18d66ecce6ca05",
+        "methodology.md": "795206ab1f71c382f399f0a009e9ccc1c89ff9428db44cbc36dbf83580906f64",
+        "patterns.md": "52abb18abbc73502a3d3b2f36a7a035adc1db40fd812d1d5424cf065036a06e9",
+        "reporting.md": "0016876dc6f158e926448bff1b6f634796757c7afe09dff177cfe30250724fc4"
+      }
+    },
+    {
+      "name": "sharp-edges",
+      "repo": "trailofbits/skills",
+      "ref": "5c99c03fb8a9ea568432ecbcba5d86e9f4ac2bf0",
+      "license": "CC-BY-SA-4.0",
+      "notes": [
+        "Differential review baseline example git checkout is unsafe in dirty user checkout; use git show/blame with explicit ref or isolated checkout. Namespaced optional agents outside skill dirs are not registered by copying content. cargo-fuzz/toolchain install executes external code and creates fuzz/ files; enable only when requested. Preserve CC-BY-SA attribution/license. Bad command examples are vulnerability demonstrations, not instructions to execute."
+      ],
+      "path": "plugins/sharp-edges/skills/sharp-edges",
+      "local_patches": [
+        "Append repository safety and host integration rules to SKILL.md."
+      ],
+      "review_date": "2026-10-19",
+      "upstream_url": "https://github.com/trailofbits/skills/tree/5c99c03fb8a9ea568432ecbcba5d86e9f4ac2bf0/plugins/sharp-edges/skills/sharp-edges",
+      "installed_sha256": {
+        "SKILL.md": "918da594530dbfd0d6bb190b3656fc9d34ffe590b437a3f7f8e2b33a1d796154",
+        "SOURCE.json": "cb04c2338cd07980cb4dd81aa53da7b6adb802d14dff17942c5434cf9ee238a7",
+        "UPSTREAM-LICENSE": "7abe19ec9bb73b36141b999b861d24ad855e808bafe0f81e84cce28556f6c297",
+        "agents/openai.yaml": "d18c31ffb600df69db714161add9a1fe1dca38011b52a0c8926d4d4d3fb1ea4f",
+        "assets/trail-of-bits-mark.svg": "4bf74c789b38dcf6ad762c136b6832363d27ae19fbaa9a18ec18d66ecce6ca05",
+        "references/auth-patterns.md": "1fbf526ca1db7204f9ebb1bf4eb3c48c544676623d23e5d28e01f6f63c355be2",
+        "references/case-studies.md": "2e81a320728b4597bf84c490176d5bf212f1e6ba6f87aafba61ad1734de35332",
+        "references/config-patterns.md": "1d99f2716f7bef18efe71015ce0c56e0f4961c042faa503d796d6d4d1626fdc6",
+        "references/crypto-apis.md": "8baddc83a1f964d6d8b15678d60a37c93029c18dc162bd7c00895e585ff1a825",
+        "references/lang-c.md": "d077d711c73749c924eae81c06018b14bbf1ec9b93d71723c472b43df5d7d5ae",
+        "references/lang-csharp.md": "8fa9e93d36c0e1397b7ca81307163370fc43cf700215b7c6d7aa1b09fdb91fb4",
+        "references/lang-go.md": "839c0e7b4e3fa2f3b37c651e926aa59d69d20bfef5e67f569eedacf11354844d",
+        "references/lang-java.md": "3b93b6049f7e0e356a1ffebc0b4642f3cef315d90be45b63e15c8c4814f9ebeb",
+        "references/lang-javascript.md": "cf72f55d31318666942a8d1d64340befc3c4e7223afc2ca196e6a776ffa4c895",
+        "references/lang-kotlin.md": "c891148c10a4941c3396416a10ac64512eb3a9e13ea5eeaec3902da4b51501dd",
+        "references/lang-php.md": "7960d9773874cf06c5b470a5ca3ab406d896e66b71e713d809bc1ecfcab63485",
+        "references/lang-python.md": "36543becc25b4e3f41eaedcab62e9b204657e6742b8ac95e405bcd040d33bf03",
+        "references/lang-ruby.md": "d9ba749caaccb8a3bb39e2199b2062c0957cf48739218ba8022d49be5cba2088",
+        "references/lang-rust.md": "3d14993ea70b2b2df3fc0f388cbd1631470895c27ccbd9d764296d1da8f5b6ee",
+        "references/lang-swift.md": "a64ab8692db0f3e43526088c63c7fdcb7354d1b24e6fe7ca759aea3260890e04",
+        "references/language-specific.md": "4522b4a37cfd7d3aa689209dfd4569f3b39074bd1f5987a36a6e819f501141b6"
+      }
+    },
+    {
+      "name": "codebase-design",
+      "repo": "mattpocock/skills",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "license": "MIT",
+      "notes": [
+        "Only codebase-design approved as optional architecture reference. DEEPENING asks deleting old tests; preserve meaningful coverage. DESIGN-IT-TWICE spawns 3+ agents; explicit scope and slot policy apply. Full tdd/improve-codebase-architecture plugins not recommended: mandatory confirmations, related skills, report CDN dependencies, inline glossary writes."
+      ],
+      "path": "skills/engineering/codebase-design",
+      "local_patches": [
+        "Append repository safety and host integration rules to SKILL.md."
+      ],
+      "review_date": "2026-10-19",
+      "upstream_url": "https://github.com/mattpocock/skills/tree/49dd158d1076134a641b33efb035946536778336/skills/engineering/codebase-design",
+      "installed_sha256": {
+        "DEEPENING.md": "f3dd099ce99289bd213914d8ee3e2429b78309c3957ca4583f7659551b1d53c1",
+        "DESIGN-IT-TWICE.md": "52b52e75655a27aea59c6966b410bac82448968ad46ef1ebb9f07c274e3ae010",
+        "SKILL.md": "b4f299055eae9e00c2d5a49547cee13644b0ae5b48e6ff6358e82bb67e4f7465",
+        "SOURCE.json": "0aabf473e7249408229a650a19be1d108d45e9ac5e08dce249c81b1edc0b5cec",
+        "UPSTREAM-LICENSE": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
+        "agents/openai.yaml": "edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f"
+      }
+    },
+    {
+      "name": "rust-best-practices",
+      "repo": "apollographql/skills",
+      "ref": "aafc8944365a766d48cc519ce8b8575f93f953a4",
+      "license": "MIT",
+      "notes": [
+        "Two illustrative ADR links are placeholders, not runtime dependencies. Rust MSRV/API and test recommendations must follow project versions. Cargo build/test may execute project build scripts; do not infer sandbox permission from allowed-tools."
+      ],
+      "path": "skills/rust-best-practices",
+      "local_patches": [
+        "Append repository safety and host integration rules to SKILL.md.",
+        "Correct chapter_09 reference/Box/Arc Send and Sync bounds using Rust std docs and a rustc trait assertion probe.",
+        "Clarify all remaining Send/Sync table bounds, including synchronization wrappers and initializer types; use Rust std trait implementations as authority."
+      ],
+      "review_date": "2026-10-19",
+      "upstream_url": "https://github.com/apollographql/skills/tree/aafc8944365a766d48cc519ce8b8575f93f953a4/skills/rust-best-practices",
+      "installed_sha256": {
+        "SKILL.md": "aec838e45f54174997cd207590179246a1d197a0ba60b065abde5e4b40e7c5a2",
+        "SOURCE.json": "f341bbca364b75201d16b48ed4abd6282c90c178bc2cc3f69e17a3b4fdbe91aa",
+        "UPSTREAM-LICENSE": "37fe5c19dc6b3904a11dc50b4ac4a2463625ace4d2aa3b8c417c58bd58cfb361",
+        "references/chapter_01.md": "def0d5dc6ad2c8e143aed03c888c3f55b7f2b8f245c563e970f8fa951f7d7b52",
+        "references/chapter_02.md": "3b5d4ad26ce444770a05d91f737cc48417cb5bac94b2ab1587fc8de536bdcbb9",
+        "references/chapter_03.md": "fd673405cc1b5094d44d59eac4634e35525d7103d34b43178ee37277f392e15f",
+        "references/chapter_04.md": "5189a1118c41c25426357a14ad4e651e931443f1aefc241ea79689cb694175bf",
+        "references/chapter_05.md": "fb753a7515e11c1bc84d853d8b6d3442dd810d607f2b153595248d57232b8d38",
+        "references/chapter_06.md": "cff0a6826a23a9c4337700757cc67f4741aa4be81cd56925601b110752d38534",
+        "references/chapter_07.md": "be71105ee9123fe2dff6673d85fc854eafd281fbfa6e8778216d3f3a8d0ffaad",
+        "references/chapter_08.md": "54c1548a28586ebb373fe508ce0d885d78bc83e579aabd89836d2a53f7129a8b",
+        "references/chapter_09.md": "91848cf9be8902d8ed2a883f7b96719e8562374859215fc285717aa494f9fed3"
+      }
+    },
+    {
+      "name": "vite",
+      "repo": "antfu/skills",
+      "ref": "feb0f3aba6566426f12230e7fc7a10d97c1293bb",
+      "license": "MIT",
+      "notes": [
+        "Vite 8.3.1/Vitest 5.0.1 guidance; verify installed versions. Examples of coverage autoUpdate and snapshot update are not acceptance evidence."
+      ],
+      "path": "skills/vite",
+      "local_patches": [
+        "Append repository safety and host integration rules to SKILL.md."
+      ],
+      "review_date": "2026-10-19",
+      "upstream_url": "https://github.com/antfu/skills/tree/feb0f3aba6566426f12230e7fc7a10d97c1293bb/skills/vite",
+      "installed_sha256": {
+        "GENERATION.md": "83634e80f21a3b7ba3a9d89a81b59dca6d76b99fe0e4e6bf5962e1ea0a74f10a",
+        "SKILL.md": "90f0420824197288aa1e1401aeb54aadf8e987ec16906d0f5984e90b7c352780",
+        "SOURCE.json": "ab51f6b82bd0838b5b1540692256ce5a9fa9cd0de3a11a57f806dd3f3fe9195e",
+        "UPSTREAM-LICENSE": "2a596f697b619094b6f4067936e0f385027a393bce32211383db0478774c1cb2",
+        "references/build-and-ssr.md": "9beb8b4b7b42a0e7aa729375045f9dcc9a4cbab3158abe3e6ddc9451762f59d3",
+        "references/core-config.md": "818fbba3a9842052bf8ee06213bd74fded5330e5af8b72bf7457cf22666efe87",
+        "references/core-features.md": "cf849bb529f26d250147bdec2502fb3edbea331af9048b9d8fec4217d969cb65",
+        "references/core-plugin-api.md": "879d8fa47b76250f0eaed501754f98db4af9d13b56c9c26c42e8118658c3501f",
+        "references/environment-api.md": "3685282c3d95c3ded6c2f550135b615d441e2c914a5b3189af8c0eac608e9d2c",
+        "references/rolldown-migration.md": "3e4618be20c99ad5919f7d319429052174dbb391217cfb4d7829bde2472ccfb1"
+      }
+    },
+    {
+      "name": "vitest",
+      "repo": "antfu/skills",
+      "ref": "feb0f3aba6566426f12230e7fc7a10d97c1293bb",
+      "license": "MIT",
+      "notes": [
+        "Vite 8.3.1/Vitest 5.0.1 guidance; verify installed versions. Examples of coverage autoUpdate and snapshot update are not acceptance evidence."
+      ],
+      "path": "skills/vitest",
+      "local_patches": [
+        "Append repository safety and host integration rules to SKILL.md."
+      ],
+      "review_date": "2026-10-19",
+      "upstream_url": "https://github.com/antfu/skills/tree/feb0f3aba6566426f12230e7fc7a10d97c1293bb/skills/vitest",
+      "installed_sha256": {
+        "GENERATION.md": "23311c1ba3ed0422e7ba071e2dc800f7fd9800c2290292e2fc0079eb0ba02026",
+        "SKILL.md": "9ddffc34311ec715f1c677709d1c01d1099b5944e72fc46bab8fc99452cd1e4a",
+        "SOURCE.json": "9f47d01db2b2f3486407e9a2d317a69e2738b2256220b159296f6976d2de5a33",
+        "UPSTREAM-LICENSE": "2a596f697b619094b6f4067936e0f385027a393bce32211383db0478774c1cb2",
+        "references/advanced-environments.md": "845c872d9f0d4fccf9b09b20e98a7528869477c3f40273b0b587f51c7ac66429",
+        "references/advanced-projects.md": "a91fe2033feb5336c18d154c661fa9f417962a3673de9cc468e6dec933891ae2",
+        "references/advanced-type-testing.md": "88a5c36d3510200e1ebb5181520b4dcf87939d0d49ac58ead30588689340829c",
+        "references/advanced-vi.md": "48b29696590615ddff5bcf439bdf50f434182e57bb9d1ec83cfca58d344610fc",
+        "references/core-cli.md": "9b91797f4e74e70ded6934b35de9ee525acc4e0ab251bd30f935e87eb1e8f00e",
+        "references/core-config.md": "60fd084b93f2c398236c55031070a85c549711234df1eb2faefeaa7312b8576c",
+        "references/core-describe.md": "0c99cd75e7808b0abaaf06eb9ad3ba6046fff0054d1624c8983dfae87d1e0827",
+        "references/core-expect.md": "d1f59f28e56825a676259dcb7fe46f71079dd16b1191bb01ec12eb3f69ee4d45",
+        "references/core-hooks.md": "2ff9b1700579a8e734ceb1ec783b01d0bd90837094f729bc65e63d5596a172d4",
+        "references/core-test-api.md": "0529b5cffcdf08fed41e84fa7cb94c1e47eb102a659621b4c81dbea129678ff7",
+        "references/features-benchmarking.md": "05dcfd9ec2fa2b4cac77bb2ab3dcd09e1f22d99041d51554cb78ea0ed43b0f86",
+        "references/features-concurrency.md": "c4ee8b0994270ebd97fa903bb8430faea5a823896bbda1a965dbcf93fc48810a",
+        "references/features-context.md": "9cf4a1f51af7379055f30bc4b9dde72ce2d8d07037a24835d8803774bb456be8",
+        "references/features-coverage.md": "6c4562fb5f32fe5671dbe593ca8188e9188244650d0d58400587748393006696",
+        "references/features-filtering.md": "87cf40827574f359b140c18923d812232c77c54badf2f015a90fe626e685deaa",
+        "references/features-mocking.md": "08a0f7345144c428720523428dd56609f32efcc1c1a573702b4659715a2c40fb",
+        "references/features-reporters.md": "62bbec975ef89f0172e0c6fc39182240c8c5bc2ba3c0f209a1e6ca0432bd326a",
+        "references/features-snapshots.md": "906f5b111b747a7d1396eef82725c23a590e2ecd4c7d4889679a72f40adcc051",
+        "references/features-test-tags.md": "6e39db1a7b622b0f325a5cec0fca1e78aab4ed14b8e1a8dbe0eb396e7a0f642d"
+      }
+    },
+    {
+      "name": "svelte-code-writer",
+      "repo": "sveltejs/ai-tools",
+      "ref": "4c2a71459ef019081c35c4f4cdf4cdf8ffa4b21d",
+      "license": "MIT",
+      "notes": [
+        "External npx @sveltejs/mcp dependency is unpinned; pin reviewed CLI version. Double-quoted $state/$derived example expands shell variables; single-quoted inline example includes an unnecessary literal backslash. Prefer literal-safe arguments or file path. svelte-file-editor is optional and not auto-registered by content-only install."
+      ],
+      "path": "tools/skills/svelte-code-writer",
+      "local_patches": [
+        "Append repository safety and host integration rules to SKILL.md.",
+        "Pin official Svelte MCP CLI to npm version 0.1.26; correct dollar-sign shell quoting. CLI runtime not audited or executed by this installation.",
+        "Correct svelte-autofixer --svelte-version to major 4 or 5, verified against pinned CLI 0.1.26."
+      ],
+      "review_date": "2026-10-19",
+      "upstream_url": "https://github.com/sveltejs/ai-tools/tree/4c2a71459ef019081c35c4f4cdf4cdf8ffa4b21d/tools/skills/svelte-code-writer",
+      "installed_sha256": {
+        "SKILL.md": "7f5b4440361f2d2c57797805e271aeeec2f81433470168b69a3ffd478f8043b9",
+        "SOURCE.json": "96572b03f50266af6157c4a9ba130c061bd202c18b4318cb5d6220b662f1d918",
+        "UPSTREAM-LICENSE": "b94e2313723c4920d2919417a85261d02123a9ee3a0deb79a43c2cd960d5dd1d"
+      }
+    },
+    {
+      "name": "svelte-core-bestpractices",
+      "repo": "sveltejs/ai-tools",
+      "ref": "4c2a71459ef019081c35c4f4cdf4cdf8ffa4b21d",
+      "license": "MIT",
+      "notes": [
+        "External npx @sveltejs/mcp dependency is unpinned; pin reviewed CLI version. Double-quoted $state/$derived example expands shell variables; single-quoted inline example includes an unnecessary literal backslash. Prefer literal-safe arguments or file path. svelte-file-editor is optional and not auto-registered by content-only install."
+      ],
+      "path": "tools/skills/svelte-core-bestpractices",
+      "local_patches": [
+        "Append repository safety and host integration rules to SKILL.md."
+      ],
+      "review_date": "2026-10-19",
+      "upstream_url": "https://github.com/sveltejs/ai-tools/tree/4c2a71459ef019081c35c4f4cdf4cdf8ffa4b21d/tools/skills/svelte-core-bestpractices",
+      "installed_sha256": {
+        "SKILL.md": "fb5cdc9f55d8807ae2431aaf53255eddd9785d162830e3b0b56fd68add84dc91",
+        "SOURCE.json": "cffb8e210c9d6d09d03265e1acd80f53e46acacce19b4eb59c2250010abb386f",
+        "UPSTREAM-LICENSE": "b94e2313723c4920d2919417a85261d02123a9ee3a0deb79a43c2cd960d5dd1d",
+        "references/attach.md": "3c38d00f0274bda6e869fd53c111ab9929a603c58e6dc86641bdc3762a7abc01",
+        "references/await-expressions.md": "ec1790bdf4519c1b7216d8a47938bb63b65bdb5dbe18f537941711f4bf7581fc",
+        "references/bind.md": "5ced04c7951c6b11bbc4beedd4887e58569f460147aaa348aa83da1ea574c8af",
+        "references/each.md": "5ba456d6a1655e361cb37de1575a56e2f04af7be61023e309747ec8a2e1b2c3e",
+        "references/hydratable.md": "23b7c39345461671ef5ef2568b37f7bd56c354cb96e5ca20f34480edcd4ff2e6",
+        "references/inspect.md": "935945566e3a7d12ca1db345ff8bfc478ae984f5995dd0d34bb9289f12d8e475",
+        "references/render.md": "372f1ca7ee3205d7d9e4aaa687b1d4a5e71bcc5937e1cce7f3c98a51d8b1f746",
+        "references/snippet.md": "b7924dc1babe16e5f938ce257041636e21a0eb585015bde3561aabd1bec3d52b",
+        "references/svelte-reactivity.md": "962d86eca94fc2377b8ffddbe35c556e23a5b3e941ec04d6320e85828c727487"
+      }
+    }
+  ]
+}

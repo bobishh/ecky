@@ -1,13 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
 
-type PackageLibraryMockMode = 'ok' | 'discovery' | 'error' | 'empty' | 'installError' | 'componentImportError' | 'componentImportPending';
+type PackageLibraryMockMode = 'ok' | 'discovery' | 'error' | 'empty' | 'installError' | 'componentImportError' | 'componentImportPending' | 'discoveryError' | 'discoveryPending';
 
 async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMode) {
   await page.route(/\/mock\/.*\.stl(\?.*)?$/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'model/stl',
-      body: 'solid component\nendsolid component',
+      body: 'solid component\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid component',
     });
   });
   await page.addInitScript((mockMode) => {
@@ -276,9 +276,9 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
               details: 'raw package index missing',
             };
           }
-          return { kind: 'componentPackages', packageHeaders: mockWindow.__PACKAGE_HEADERS__, components: mockMode === 'discovery' ? [
-            { name: 'hex-bolt', version: '1.0.0', oneLiner: 'Parametric threaded bolt', paramKeys: ['d', 'length'], tags: ['fastener'], ports: [] },
-            { name: 'bottle-cage', oneLiner: 'Saved bicycle bottle cage', paramKeys: ['bottleDiameter'], tags: ['bike'], ports: [] },
+          return { kind: 'componentPackages', packageHeaders: mockWindow.__PACKAGE_HEADERS__, components: mockMode.startsWith('discovery') ? [
+            { name: 'hex-bolt', origin: 'builtin', version: '1.0.0', oneLiner: 'Parametric threaded bolt', paramKeys: ['d', 'length'], tags: ['fastener'], ports: [] },
+            { name: 'bottle-cage', origin: 'local', componentId: 'local-' + 'a'.repeat(64), revisionDigest: 'sha256:' + 'b'.repeat(64), oneLiner: 'Saved bicycle bottle cage', paramKeys: ['bottleDiameter'], tags: ['bike'], ports: [] },
           ] : [] };
         }
         if (intent?.kind === 'installPackage') {
@@ -301,14 +301,14 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
       }
       if (cmd === 'apply_inline_component_import') {
         mockWindow.__LAST_COMPONENT_IMPORT__ = args?.input ?? null;
-        if (mockMode === 'componentImportError') {
+        if (['componentImportError', 'discoveryError'].includes(mockMode)) {
           throw {
             code: 'validation',
             message: 'component import failed',
             details: 'raw package source has unresolved dependency',
           };
         }
-        if (mockMode === 'componentImportPending') {
+        if (['componentImportPending', 'discoveryPending'].includes(mockMode)) {
           return new Promise((resolve) => {
             mockWindow.__RESOLVE_COMPONENT_IMPORT__ = () => resolve(importedResult);
           });
@@ -325,6 +325,54 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
 }
 
 test.describe('Component package library', () => {
+  test('Given a rendered local component When inserted Then exact revision is submitted without FreeCAD catalog', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'discovery');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await expect(page.getByRole('button', { name: 'FREECAD PARTS', exact: true })).toHaveCount(0);
+    await page.getByPlaceholder('Search library...').fill('bottleDiameter');
+    const loads = await page.evaluate(() => (window as any).__LIBRARY_LOAD_COUNT__);
+    await page.getByRole('button', { name: 'INSERT bottle-cage', exact: true }).click();
+    await expect(page.evaluate(() => (window as any).__LAST_COMPONENT_IMPORT__)).resolves.toMatchObject({
+      threadId: 'component-thread-1', baseMessageId: 'component-message-1',
+      expectedSourceDigest: 'sha256:source-1', componentId: 'local-' + 'a'.repeat(64),
+      revisionDigest: 'sha256:' + 'b'.repeat(64),
+    });
+    await expect(page.evaluate(() => (window as any).__LIBRARY_LOAD_COUNT__)).resolves.toBe(loads);
+  });
+
+  test('Given builtin component When inserted Then name selects shipped source', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'discovery');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'INSERT hex-bolt', exact: true }).click();
+    await expect(page.evaluate(() => (window as any).__LAST_COMPONENT_IMPORT__)).resolves.toMatchObject({ name: 'hex-bolt' });
+  });
+
+  test('Given local insertion pending When clicked Then duplicate inserts disabled', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'discoveryPending');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'INSERT bottle-cage', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'INSERTING bottle-cage', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'INSERT hex-bolt', exact: true })).toBeDisabled();
+    await page.evaluate(() => (window as any).__RESOLVE_COMPONENT_IMPORT__?.());
+  });
+
+  test('Given local insertion fails When clicked Then backend detail and retry remain available', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'discoveryError');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'INSERT bottle-cage', exact: true }).click();
+    await expect(page.getByText('raw package source has unresolved dependency')).toBeVisible();
+    await page.getByRole('button', { name: 'RETRY', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'INSERT bottle-cage', exact: true })).toBeEnabled();
+  });
+
   test('Given saved and builtin components without packages When Components opens Then both appear and search finds their metadata', async ({ page }) => {
     await installProjectLibraryMocks(page, 'discovery');
     await page.goto('/');

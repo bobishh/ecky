@@ -10,20 +10,18 @@
     ExtractedComponentSearchResult,
     FreecadLibraryItem,
     LibraryPanelProjection,
+    LibraryComponentSelection,
   } from './tauri/contracts';
   import { config as sharedConfig } from './stores/domainState';
 
   let {
     onImportFreecadLibraryPart,
     onApplyComponentImport,
+    freecadEnabled = false,
   }: {
     onImportFreecadLibraryPart?: (item: FreecadLibraryItem) => Promise<void> | void;
-    onApplyComponentImport?: (input: {
-      packageId: string;
-      version: string;
-      componentId: string;
-      label: string;
-    }) => Promise<void> | void;
+    onApplyComponentImport?: (input: LibraryComponentSelection & { label: string }) => Promise<void> | void;
+    freecadEnabled?: boolean;
   } = $props();
 
   type LibraryTab = 'components' | 'freecad';
@@ -76,6 +74,7 @@
   }
 
   $effect(() => {
+    if (!freecadEnabled && activeTab === 'freecad') activeTab = 'components';
     void loadActiveTab();
   });
 
@@ -90,9 +89,8 @@
     ),
   );
 
-  const filteredComponents = $derived(
-    availableComponents.filter((component) =>
-      [
+  const componentSearchIndex = $derived(
+    availableComponents.map((component) => ({ component, text: [
         component.name,
         component.oneLiner,
         ...(component.paramKeys ?? []),
@@ -100,9 +98,11 @@
         ...(component.ports ?? []).flatMap((port) => [port.portId, port.typeId]),
         component.threadId ?? '',
         component.threadTitle ?? '',
-      ].join(' ').toLowerCase().includes(searchQuery.toLowerCase()),
-    ),
+      ].join(' ').toLowerCase() })),
   );
+  const filteredComponents = $derived(componentSearchIndex
+    .filter(({ text }) => text.includes(searchQuery.trim().toLowerCase()))
+    .map(({ component }) => component));
 
   const filteredFreecadResults = $derived(
     freecadLibraryResults.filter((item) =>
@@ -160,6 +160,25 @@
         componentId: component.componentId,
         label: component.displayName,
       });
+    } catch (error) {
+      loadError = formatBackendError(error);
+    } finally {
+      importingComponentId = null;
+    }
+  }
+
+  async function insertAvailableComponent(component: ExtractedComponentSearchResult) {
+    if (importingComponentId || !onApplyComponentImport) return;
+    importingComponentId = component.componentId ?? `${component.origin}:${component.name}`;
+    loadError = null;
+    try {
+      if (component.componentId && !component.revisionDigest) {
+        throw new Error('Component has no pinned revision. Refresh the library before inserting.');
+      }
+      const selection: LibraryComponentSelection = component.componentId && component.revisionDigest
+        ? { componentId: component.componentId, revisionDigest: component.revisionDigest }
+        : { name: component.name };
+      await onApplyComponentImport({ ...selection, label: component.name });
     } catch (error) {
       loadError = formatBackendError(error);
     } finally {
@@ -261,9 +280,11 @@
       <button class:active={activeTab === 'components'} onclick={() => activeTab = 'components'}>
         COMPONENTS
       </button>
-      <button class:active={activeTab === 'freecad'} onclick={() => activeTab = 'freecad'}>
-        FREECAD PARTS
-      </button>
+      {#if freecadEnabled}
+        <button class:active={activeTab === 'freecad'} onclick={() => activeTab = 'freecad'}>
+          FREECAD PARTS
+        </button>
+      {/if}
     </nav>
     <div class="library-tools">
       <input class="search-input" type="search" placeholder="Search library..." bind:value={searchQuery} />
@@ -324,6 +345,14 @@
               {#if component.tags.length}
                 <div class="tag-list">{#each component.tags as tag}<span>{tag}</span>{/each}</div>
               {/if}
+              <button
+                class="primary-action"
+                aria-label={`${importingComponentId === (component.componentId ?? `${component.origin}:${component.name}`) ? 'INSERTING' : 'INSERT'} ${component.name}`}
+                onclick={() => insertAvailableComponent(component)}
+                disabled={Boolean(importingComponentId) || !onApplyComponentImport}
+              >
+                {importingComponentId === (component.componentId ?? `${component.origin}:${component.name}`) ? 'INSERTING...' : 'INSERT INTO CODE'}
+              </button>
             </article>
           {/each}
           {#each filteredPackages as pkg (pkg.packageId + pkg.version)}

@@ -84,22 +84,25 @@ pub async fn backfill_latest_component_sources(
     let targets = crate::db::latest_successful_component_capture_targets(&conn)
         .map_err(|error| AppError::persistence(error.to_string()))?;
     for target in targets {
+        if let Some(title) = crate::db::get_thread_title(&conn, &target.thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+        {
+            report.thread_titles.insert(target.thread_id.clone(), title);
+        }
+        if let Some(diagnostics) = component_package_runtime::component_capture_diagnostics(
+            app,
+            &target.thread_id,
+            &target.message_id,
+        )? {
+            report.diagnostics.extend(
+                diagnostics
+                    .into_iter()
+                    .map(|detail| format!("Version {}: {detail}", target.message_id)),
+            );
+            continue;
+        }
         match crate::db::get_thread_message_version(&conn, &target.thread_id, &target.message_id) {
             Ok(Some(message)) => {
-                match crate::db::get_thread_title(&conn, &target.thread_id) {
-                    Ok(Some(title)) => {
-                        report.thread_titles.insert(target.thread_id.clone(), title);
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        let detail = format!(
-                            "Thread {}: failed to read project title: {error}",
-                            target.thread_id
-                        );
-                        state.push_log(format!("Component library backfill failed: {detail}"));
-                        report.diagnostics.push(detail);
-                    }
-                }
                 if let (Some(design), true) = (message.output, message.artifact_bundle.is_some()) {
                     if let Err(error) =
                         component_package_runtime::capture_latest_successful_components(
@@ -361,6 +364,31 @@ mod tests {
             .iter()
             .any(|component| component.name == "clip" && component.origin == "local"));
         assert!(!components.iter().any(|component| component.name == "ghost"));
+        // An indexed immutable version must not be decoded on later searches.
+        // Poison only this isolated test's stored payload to prove the boundary.
+        state
+            .db
+            .lock()
+            .await
+            .execute(
+                "UPDATE messages SET output = 'unavailable' WHERE id = 'success'",
+                [],
+            )
+            .unwrap();
+        let repeated = load_component_packages_for_state(&resolver, &state)
+            .await
+            .unwrap();
+        let LibraryPanelProjection::ComponentPackages {
+            indexing_diagnostics,
+            ..
+        } = repeated
+        else {
+            panic!("component projection")
+        };
+        assert!(
+            indexing_diagnostics.is_empty(),
+            "indexed history was decoded again"
+        );
         let conn = state.db.lock().await;
         assert_eq!(
             crate::db::get_thread_latest_version(&conn, "thread-backfill")

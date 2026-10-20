@@ -1,6 +1,4 @@
-use crate::component_import_runtime::{
-    CopyInlineComponentImportRequest, InstalledLibraryComponentResolver,
-};
+use crate::component_import_runtime::LibraryComponentSelection;
 use crate::contracts::{AppError, AppResult, DesignOutput, Message};
 use crate::models::{AppState, PathResolver};
 use crate::services::manual_code::{ManualCodeApplyRequest, ManualCodeApplyResponse};
@@ -9,14 +7,13 @@ use specta::Type;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ApplyInlineComponentImportInput {
     pub thread_id: String,
     pub base_message_id: String,
     pub expected_source_digest: String,
-    pub package_id: String,
-    pub version: String,
-    pub component_id: String,
+    #[serde(flatten)]
+    pub component: LibraryComponentSelection,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -46,9 +43,6 @@ pub async fn apply_inline_component_import(
         &input.expected_source_digest,
         "Component import expected source digest",
     )?;
-    let package_id = require_id(&input.package_id, "Component import package id")?;
-    let version = require_id(&input.version, "Component import package version")?;
-    let component_id = require_id(&input.component_id, "Component import component id")?;
     let context = load_context(&thread_id, &base_message_id, state).await?;
     let actual_source_digest =
         crate::services::render_snapshot::canonical_source_digest(&context.source);
@@ -59,14 +53,10 @@ pub async fn apply_inline_component_import(
         )));
     }
 
-    let imported = crate::component_import_runtime::copy_inline_component_import(
-        CopyInlineComponentImportRequest {
-            package_id,
-            version,
-            component_id,
-            authored_source: context.source.clone(),
-        },
-        &InstalledLibraryComponentResolver { app },
+    let imported = crate::component_import_runtime::copy_inline_library_component(
+        app,
+        input.component,
+        context.source.clone(),
     )?;
     let request = manual_code_request(&thread_id, &context, imported.authored_source);
     let version = crate::services::manual_code::apply_manual_code(request, state, app).await?;

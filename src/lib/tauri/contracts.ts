@@ -1658,7 +1658,7 @@ export type ApplyCapturePreviewInput = { runId: string }
 export type ApplyCapturePreviewResult = { source: string; draft: ManualCodeApplyResponse }
 export type ApplyExternalShapeEditInput = { threadId: string; baseMessageId?: string | null; expectedSourceDigest: string; edit: ExternalShapeEditIntent }
 export type ApplyExternalShapeEditResult = { version: ManualCodeApplyResponse; sourceDigest: string; externalSources: ExternalShapeSource[] }
-export type ApplyInlineComponentImportInput = { threadId: string; baseMessageId: string; expectedSourceDigest: string; packageId: string; version: string; componentId: string }
+export type ApplyInlineComponentImportInput = ({ packageId: string; version: string; componentId: string } | { componentId: string; revisionDigest: string } | { name: string }) & { threadId: string; baseMessageId: string; expectedSourceDigest: string }
 export type ApplyInlineComponentImportResult = { version: ManualCodeApplyResponse; sourceDigest: string; entrySymbol: string; partKey: string }
 export type ApplySemanticControlValueInput = { threadId: string; targetMessageId: string; primitiveId: string; value: ParamValue }
 export type ApplySemanticControlValueResult = { parameterPatch: Partial<{ [key in string]: ParamValue }>; changedParameterKeys: string[]; appliedPrimitiveIds: string[] }
@@ -2097,6 +2097,11 @@ export type InteractionMode = "design" | "question" | "tune"
 export type JevClassifierConfig = { enabled?: boolean; apiKey?: string }
 export type KeepoutVolumeKind = "box" | "cylinder" | "sphere" | "custom"
 export type LastDesignSnapshot = { design?: DesignOutput | null; threadId?: string | null; messageId?: string | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; selectedPartId?: string | null; targetRef?: AuthoringTargetRef | null }
+/**
+ * Exact library selection shared by UI and MCP. Local insertions always pin a
+ * revision; legacy name lookup remains available for extracted/built-in source.
+ */
+export type LibraryComponentSelection = { packageId: string; version: string; componentId: string } | { componentId: string; revisionDigest: string } | { name: string }
 export type LibraryPanelIntent = { kind: "loadComponents" } | { kind: "installPackage"; archivePath: string } | { kind: "loadFreecad"; query: string; page: number } | { kind: "setFreecadRoot"; root: string; query: string }
 export type LibraryPanelProjection = { kind: "componentPackages"; packageHeaders: ComponentPackageHeader[]; components: ExtractedComponentSearchResult[]; indexingDiagnostics: string[] } | { kind: "freecadLibrary"; freecadLibraryRoots: string[]; items: FreecadLibraryItem[]; page: number; hasMore: boolean }
 export type LithophaneAttachment = { id: string; enabled?: boolean; source: LithophaneAttachmentSource; targetPartId?: string; placement?: LithophanePlacement; relief?: LithophaneRelief; color?: LithophaneColor }

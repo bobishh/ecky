@@ -3282,7 +3282,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "freecad_library_search",
-            "description": "Search configured local FreeCAD-library folders for reusable FCStd/STEP/STL parts. Architecture folders are excluded unless includeArchitecture is true.",
+            "description": "FreeCAD-engine catalog only. For native Ecky components use component_search. Search configured local FreeCAD-library folders for reusable FCStd/STEP/STL parts. Architecture folders are excluded unless includeArchitecture is true.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3337,7 +3337,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "component_search",
-            "description": "Search built-ins, manually extracted components, and latest successful local definitions by compact header (name, params, tags and ports). Backfills latest successful history before returning and includes local source provenance; use component_get for source.",
+            "description": "Search built-ins, manually extracted components, and rendered local parts and component definitions by compact header (name, params, tags and ports). Indexes successful renders and incrementally backfills history before returning and includes local source provenance; use component_get for source.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3370,16 +3370,23 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "component_import",
-            "description": "Copy-inline an installed package component into active Ecky model source and add one instantiated part. Returns self-contained authored source; never emits import-component or a dependency lock.",
+            "description": "Insert a local component at its exact revision, a built-in/extracted component by name, or an installed package component into Ecky source with one instantiated part. Returns self-contained source; apply it through normal source editing and render. Identical existing definitions are reused; conflicting definitions fail.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "packageId": { "type": "string" },
                     "version": { "type": "string" },
                     "componentId": { "type": "string" },
+                    "revisionDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                    "name": { "type": "string", "description": "Built-in or manually extracted component name." },
                     "source": { "type": "string", "description": "Current active `(model ...)` source." }
                 },
-                "required": ["packageId", "version", "componentId", "source"]
+                "required": ["source"],
+                "oneOf": [
+                    { "required": ["packageId", "version", "componentId"], "not": { "anyOf": [{ "required": ["name"] }, { "required": ["revisionDigest"] }] } },
+                    { "required": ["componentId", "revisionDigest"], "not": { "anyOf": [{ "required": ["name"] }, { "required": ["packageId"] }, { "required": ["version"] }] } },
+                    { "required": ["name"], "not": { "anyOf": [{ "required": ["componentId"] }, { "required": ["revisionDigest"] }, { "required": ["packageId"] }, { "required": ["version"] }] } }
+                ]
             }
         }),
         json!({

@@ -184,9 +184,11 @@ fn input(fixture: &Fixture) -> ApplyInlineComponentImportInput {
         thread_id: "thread-1".to_string(),
         base_message_id: fixture.base_message_id.clone(),
         expected_source_digest: fixture.source_digest.clone(),
-        package_id: "test.library".to_string(),
-        version: "1.0.0".to_string(),
-        component_id: "peg".to_string(),
+        component: ecky_cad_lib::component_import_runtime::LibraryComponentSelection::Package {
+            package_id: "test.library".to_string(),
+            version: "1.0.0".to_string(),
+            component_id: "peg".to_string(),
+        },
     }
 }
 
@@ -308,9 +310,11 @@ fn inline_component_import_contract_serializes_camel_case() {
         thread_id: "thread-1".to_string(),
         base_message_id: "message-1".to_string(),
         expected_source_digest: "sha256:source".to_string(),
-        package_id: "test.library".to_string(),
-        version: "1.0.0".to_string(),
-        component_id: "peg".to_string(),
+        component: ecky_cad_lib::component_import_runtime::LibraryComponentSelection::Package {
+            package_id: "test.library".to_string(),
+            version: "1.0.0".to_string(),
+            component_id: "peg".to_string(),
+        },
     })
     .expect("serialize contract");
     assert_eq!(value["threadId"], "thread-1");
@@ -319,4 +323,51 @@ fn inline_component_import_contract_serializes_camel_case() {
     assert_eq!(value["packageId"], "test.library");
     assert_eq!(value["componentId"], "peg");
     assert!(value.get("thread_id").is_none());
+}
+
+#[tokio::test]
+async fn pinned_local_component_insertion_uses_bound_source_and_renders_one_version() {
+    use ecky_cad_lib::component_import_runtime::LibraryComponentSelection;
+    use ecky_cad_lib::component_package_runtime as library;
+    let fixture = fixture("").await;
+    library::capture_defined_components(
+        &fixture.resolver,
+        "donor",
+        "donor-v1",
+        "(model (part clip (box 3 2 1)))",
+    )
+    .unwrap();
+    let component = library::search_extracted_components(&fixture.resolver, "clip", 100)
+        .unwrap()
+        .into_iter()
+        .find(|component| component.thread_id.as_deref() == Some("donor"))
+        .unwrap();
+    let mut request = input(&fixture);
+    request.component = LibraryComponentSelection::Revision {
+        component_id: component.component_id.unwrap(),
+        revision_digest: component.revision_digest.unwrap(),
+    };
+    let result = apply_inline_component_import(request.clone(), &fixture.state, &fixture.resolver)
+        .await
+        .unwrap();
+    assert_eq!(result.version.status, MessageStatus::Success);
+    assert!(result.version.artifact_bundle.is_some());
+    assert!(result
+        .version
+        .design_output
+        .macro_code
+        .contains("(part clip (clip))"));
+    let error = apply_inline_component_import(request, &fixture.state, &fixture.resolver)
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("changed before component import"));
+    let conn = fixture.state.db.lock().await;
+    assert_eq!(
+        ecky_cad_lib::db::get_thread_latest_version(&conn, "thread-1")
+            .unwrap()
+            .unwrap()
+            .id,
+        result.version.message_id.unwrap()
+    );
+    std::fs::remove_dir_all(fixture.root).unwrap();
 }

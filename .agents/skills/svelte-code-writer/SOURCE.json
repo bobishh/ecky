@@ -1,0 +1,16 @@
+{
+  "repo": "sveltejs/ai-tools",
+  "ref": "4c2a71459ef019081c35c4f4cdf4cdf8ffa4b21d",
+  "license": "MIT",
+  "notes": [
+    "External npx @sveltejs/mcp dependency is unpinned; pin reviewed CLI version. Double-quoted $state/$derived example expands shell variables; single-quoted inline example includes an unnecessary literal backslash. Prefer literal-safe arguments or file path. svelte-file-editor is optional and not auto-registered by content-only install."
+  ],
+  "path": "tools/skills/svelte-code-writer",
+  "local_patches": [
+    "Append repository safety and host integration rules to SKILL.md.",
+    "Pin official Svelte MCP CLI to npm version 0.1.26; correct dollar-sign shell quoting. CLI runtime not audited or executed by this installation.",
+    "Correct svelte-autofixer --svelte-version to major 4 or 5, verified against pinned CLI 0.1.26."
+  ],
+  "review_date": "2026-10-19",
+  "upstream_url": "https://github.com/sveltejs/ai-tools/tree/4c2a71459ef019081c35c4f4cdf4cdf8ffa4b21d/tools/skills/svelte-code-writer"
+}

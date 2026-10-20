@@ -30,9 +30,9 @@ installation for extracted components.
 ### Requirement: Successful versions capture authored reusable components
 
 The Rust-owned successful version persistence path SHALL discover authored
-top-level `define-component` forms after a successful render. Capture SHALL store
+top-level `define-component` forms and named model parts after a successful render. Capture SHALL store
 complete local dependency closure as immutable source revisions. It SHALL NOT
-promote ordinary parts, mutate model source, append model versions, or delete
+mutate model source, append model versions during indexing, or delete
 saved components when a source definition disappears.
 
 #### Scenario: Repeated identical definition
@@ -56,7 +56,9 @@ saved components when a source definition disappears.
 - **WHEN** a render fails
 - **THEN** no component capture occurs from that failed version
 - **WHEN** a successful source contains only an ordinary `part`
-- **THEN** no component is created
+- **THEN** each independently extractable named part becomes a closed reusable
+  component with stable thread/part identity and semantic revision digest
+- **AND** unsupported parts report diagnostics without hiding valid siblings
 
 #### Scenario: Existing successful source and unresolved dependency
 
@@ -81,3 +83,52 @@ explicit atomically updated pointer, never filename ordering or guessed hashes.
 - **WHEN** a caller reads by `componentId` and an older exact `revisionDigest`
 - **THEN** the matching source and provenance are returned even after latest moves
 - **AND** altered or mismatched identity/digest data is rejected
+
+### Requirement: Native components can be inserted from UI and MCP
+
+Workbench SHALL provide insertion for every discovered Ecky component. Local
+insertions SHALL identify an exact immutable revision. Rust SHALL validate the
+bound source digest before mutation and use the existing source/version/render
+service. MCP component_import SHALL accept the same library selections as UI.
+
+#### Scenario: Exact local revision and repeated insertion
+
+- **GIVEN** a rendered part with multiple captured revisions
+- **WHEN** UI or MCP selects an older exact revision
+- **THEN** its closed source and one instance are inserted
+- **AND** inserting again reuses identical definitions and adds another part key
+- **AND** conflicting definitions or source drift fail with actionable details
+
+#### Scenario: Pending and failed insertion
+
+- **WHEN** insertion is pending
+- **THEN** duplicate insertion is disabled
+- **WHEN** insertion fails
+- **THEN** backend error details and a recovery action are visible
+
+### Requirement: Search does not repeat extraction for unchanged history
+
+Capture SHALL persist an indexing cursor after writing successful component
+revisions. Unchanged Library loads/MCP search SHALL reuse headers and retained
+diagnostics without reading or extracting already indexed model source. UI
+search input SHALL filter prepared header text without backend requests.
+
+#### Scenario: Search after indexing
+
+- **GIVEN** the latest successful version is already indexed
+- **WHEN** Library loads or MCP searches again
+- **THEN** its model source is not loaded or extracted again
+- **AND** saved indexing diagnostics remain visible
+
+### Requirement: Foreign catalog follows the active engine
+
+The FreeCAD catalog SHALL remain available for the FreeCAD authoring backend.
+Native Ecky Library SHALL default to its own reusable components and SHALL NOT
+show the FreeCAD Parts tab. MCP descriptions SHALL distinguish these catalogs.
+
+#### Scenario: Native and FreeCAD authoring contexts
+
+- **WHEN** the active backend is native Ecky
+- **THEN** the library shows Ecky components without a FreeCAD Parts tab
+- **WHEN** the active backend is FreeCAD
+- **THEN** its foreign catalog, search, and import remain available
