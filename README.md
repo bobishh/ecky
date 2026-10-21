@@ -127,7 +127,7 @@ source-bound native render PNGs live under `docs/books/ecky-ir/assets/worm-farm/
 - [Language reference source](docs/books/ecky-ir/ecky-ir-corpus.md) — precise syntax and extra engineering exercises.
 - [MCP tool reference](skills/ecky-mcp/reference/tools.md) — external-agent integration.
 - [VS Code extension](editors/vscode/README.md) and [Emacs mode](editors/emacs/README.md).
-- [Contributor protocol](AGENTS.md) and [OpenSpec changes](openspec/changes/).
+- [Contributor protocol](AGENTS.md).
 
 `npm run build:farm-assets` refreshes the six actual CAD illustrations, using a
 current CLI and prepared OCCT runtime. `npm run build:book` synchronizes sources

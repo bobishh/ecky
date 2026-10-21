@@ -1,12 +1,6 @@
 <script lang="ts">
-  // ViewportWorkspace — presentational seam for the workbench viewport action
-  // strip (decomposition Slice 1, docs/app-svelte-decomposition-plan.md).
-  //
-  // This is the test seam: a pure-presentational shell that renders the code,
-  // fork, and export viewport actions and their prop-driven disabled states.
-  // State and handlers stay in the caller (App.svelte) per the plan; the
-  // "extract per plan" task wires this component into App.svelte and removes
-  // the inline markup.
+  // Viewport actions and their prop-driven disabled states.
+  // State and handlers belong to the caller.
   //
   // Disabled-state logic mirrors App.svelte's inline action strip verbatim:
   //   fork   -> disabled while the viewport busy mask is up

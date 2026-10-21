@@ -1,4 +1,4 @@
-//! Persistent per-thread source binding (openspec `thread-source-binding`).
+//! Persistent per-thread source binding.
 //!
 //! This module is a thin SQLite **binding index** layered over the existing
 //! `project_mirror` service. `filesystem-project-mirror` already owns the
@@ -22,8 +22,6 @@
 //!   - `ThreadAdvanced`     -> informational head movement. A dirty file is
 //!     preserved and can be appended as the next head.
 //!   - `Conflict`           -> informational only; no version-write refusal.
-//!
-//! See `openspec/changes/thread-source-binding`.
 
 use std::path::{Path, PathBuf};
 

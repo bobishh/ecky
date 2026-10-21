@@ -1,3 +1,0 @@
-schema: spec-driven
-created: 2026-07-31
-goal: Improve shared Direct OCCT STL tessellation quality for small curved print geometry without changing analytic STEP output.

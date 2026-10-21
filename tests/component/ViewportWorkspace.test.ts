@@ -2,23 +2,6 @@ import { describe, it, expect, vi } from 'vitest';
 import { render } from '@testing-library/svelte';
 import ViewportWorkspace from '../../src/lib/workbench/ViewportWorkspace.svelte';
 
-// T2 / Slice 1 — BDD outer loop for the ViewportWorkspace seam.
-//
-// The decomposition plan (docs/app-svelte-decomposition-plan.md, Slice 1) says
-// ViewportWorkspace owns the viewport action strip with the code, fork, and
-// export actions. This test pins that presentational contract down BEFORE the
-// "extract per plan" task wires the component into App.svelte: it mounts the
-// real component in isolation and asserts action presence + the required
-// prop-driven disabled states.
-//
-// Disabled-state logic is mirrored verbatim from App.svelte's inline markup:
-//   FORK   -> disabled when the viewport busy mask is up
-//   EXPORT -> visible only when an artifact bundle exists (showExport);
-//             disabled when !canExport || busy || hasSketchPreview
-//   CODE   -> disabled when the viewport busy mask is up
-//
-// The component is intentionally presentational: state and handlers stay in the
-// caller (App.svelte) per the plan; only the action strip contract lives here.
 function actionEl(container: HTMLElement, action: string): HTMLElement | null {
   return container.querySelector(`[data-viewport-action="${action}"]`);
 }

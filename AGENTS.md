@@ -9,8 +9,6 @@ Read [README.md](README.md). Global working agreements cover BDD, browser consen
 - Rust owns generation/exploration orchestration: PLAN -> BUILD -> VERIFY -> DECIDE, provider/render retries, budgets, ASK suspension, cancellation, latest-wins scheduling, restart recovery, and terminal decisions.
 - Svelte may submit intent, answer, stop, provide requested viewport evidence, subscribe, and project backend state. Do not add frontend generation/retry/session state machines.
 - API, MCP, watchers, and workbench converge on the same Rust controller and immutable version services. Callers must not manufacture lifecycle facts; owning Rust operations perform or validate them.
-- Before architecture/lifecycle changes, read the applicable active OpenSpec proposal, design, normative specs, and tasks under `openspec/changes/`; update them with implementation.
-- Until archived, `openspec/changes/exploration-build-cycle/` is authoritative for exploration. Read `proposal.md`, `design.md`, `specs/**/*.md`, and `tasks.md` before exploration changes. Superseded four-step, attempt/promotion, frontend-orchestrator, and caller-authored flows are historical.
 
 ## UI
 

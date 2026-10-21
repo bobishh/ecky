@@ -1,4 +1,0 @@
-schema: spec-driven
-created: 2026-07-29
-goal: Allow Ecky source to reference installed reusable components without
-  copy-inline drift while preserving deterministic builds.

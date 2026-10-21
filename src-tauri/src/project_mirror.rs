@@ -1,7 +1,7 @@
 //! Filesystem project mirror: exposes one thread's active macro as a plain
 //! folder (`model.ecky` + `ecky-project.edn`) so external editors and LLM
 //! file skills can author source directly, while threads/versions remain the
-//! canonical record. See `openspec/changes/filesystem-project-mirror`.
+//! canonical record.
 //!
 //! The folder is a mirror, never an alternate database: edits re-enter the
 //! app only through compile -> preview -> commit (wired in `mcp::handlers`).
