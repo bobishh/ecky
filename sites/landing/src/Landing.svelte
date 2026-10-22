@@ -37,7 +37,7 @@
       <span class="kicker">EXPERIMENTAL DESKTOP CAD · V0.0.1</span>
       <h1 class="hero-title">Parametric parts from code.</h1>
       <p class="hero-lede">Ecky is a desktop CAD app for parts you want to 3D print. Write a model in a small Lisp-style language, adjust its dimensions, and export the geometry. There is optional AI assistance for writing and changing the source.</p>
-      <p class="hero-summary">I bought a 3D printer and started writing FreeCAD macros. That grew into a language and a desktop app. Ecky is still a personal experiment: build from source; expect bugs and breaking changes.</p>
+      <p class="hero-summary">Keep model source, dimensions, previews, and revisions together. Ecky is experimental software: build from source; expect bugs and breaking changes.</p>
       <div class="hero-cta">
         <a class="btn btn-primary" href={chaptersUrl}>Read the chapters</a>
         <a class="btn" href="#models">Inspect working models</a>

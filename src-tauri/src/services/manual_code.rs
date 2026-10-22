@@ -66,6 +66,26 @@ fn non_empty(value: Option<&str>, fallback: &str) -> String {
         .to_string()
 }
 
+fn manual_title(requested: Option<&str>, thread_title: Option<&str>) -> String {
+    non_empty(
+        requested,
+        thread_title
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or("Untitled model"),
+    )
+}
+
+fn manual_version_name(requested: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> String {
+    let fallback = format!("Manual edit {}", now.format("%Y-%m-%d %H:%M:%S UTC"));
+    let requested = requested.map(str::trim).filter(|value| {
+        !value.is_empty()
+            && !value.eq_ignore_ascii_case("v-manual")
+            && !value.eq_ignore_ascii_case("v manual")
+            && !value.eq_ignore_ascii_case("manual edit")
+    });
+    non_empty(requested, &fallback)
+}
+
 const DRAFT_LITHOPHANE_ID_PREFIX: &str = "draft-litho-";
 
 fn canonicalize_manual_post_processing(
@@ -260,6 +280,7 @@ fn requested_design(
     request: &ManualCodeApplyRequest,
     ui_spec: UiSpec,
     parameters: DesignParams,
+    thread_title: Option<&str>,
 ) -> DesignOutput {
     let macro_dialect = infer_macro_dialect_from_code(&request.source);
     let (engine_kind, source_language, geometry_backend) =
@@ -274,9 +295,10 @@ fn requested_design(
         &parameters,
         post_processing.as_ref(),
     );
+    let version_name = manual_version_name(request.version_name.as_deref(), chrono::Utc::now());
     DesignOutput {
-        title: non_empty(request.title.as_deref(), "Manual Edit"),
-        version_name: non_empty(request.version_name.as_deref(), "V-manual"),
+        title: manual_title(request.title.as_deref(), thread_title),
+        version_name,
         response: "Manual code draft pending validation.".to_string(),
         interaction_mode: InteractionMode::Design,
         macro_code: request.source.clone(),
@@ -293,7 +315,10 @@ fn requested_design(
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{canonicalize_manual_post_processing, DRAFT_LITHOPHANE_ID_PREFIX};
+    use super::{
+        canonicalize_manual_post_processing, manual_title, manual_version_name,
+        DRAFT_LITHOPHANE_ID_PREFIX,
+    };
     use crate::contracts::PostProcessingSpec;
 
     #[test]
@@ -322,6 +347,33 @@ mod tests {
             .id
             .starts_with(DRAFT_LITHOPHANE_ID_PREFIX));
         assert_eq!(canonical.lithophane_attachments[1].id, "litho-existing");
+    }
+
+    #[test]
+    fn manual_edit_defaults_preserve_project_title_and_identify_new_version() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-20T12:34:56Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc);
+
+        assert_eq!(manual_title(None, Some("Hydrant cap")), "Hydrant cap");
+        assert_eq!(
+            manual_title(Some("  Explicit title  "), Some("Hydrant cap")),
+            "Explicit title"
+        );
+        assert_eq!(manual_title(None, None), "Untitled model");
+        assert_eq!(
+            manual_version_name(None, now),
+            "Manual edit 2026-10-20 12:34:56 UTC"
+        );
+        assert_eq!(manual_version_name(Some("V2 · fit"), now), "V2 · fit");
+        assert_eq!(
+            manual_version_name(Some("V Manual"), now),
+            "Manual edit 2026-10-20 12:34:56 UTC"
+        );
+        assert_eq!(
+            manual_version_name(Some("Manual edit"), now),
+            "Manual edit 2026-10-20 12:34:56 UTC"
+        );
     }
 }
 
@@ -621,7 +673,12 @@ pub async fn apply_manual_code(
 ) -> AppResult<ManualCodeApplyResponse> {
     let (ui_spec, parameters, parser_matched) =
         reconcile_controls(&request.source, &request.ui_spec, &request.parameters);
-    let mut design = requested_design(&request, ui_spec, parameters);
+    let thread_title = {
+        let conn = state.db.lock().await;
+        crate::db::get_thread_title(&conn, &request.thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+    };
+    let mut design = requested_design(&request, ui_spec, parameters, thread_title.as_deref());
 
     if request.persist {
         if let Some(response) =

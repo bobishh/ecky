@@ -43,7 +43,6 @@ const BASE_CONTROLS: readonly DockControl[] = [
   { id: 'docs', group: 'persistent', accessibleName: 'Ecky IR docs', shortLabel: 'DOCS', iconId: 'docs' },
   { id: 'library', group: 'persistent', accessibleName: 'Reusable component library', shortLabel: 'LIB', iconId: 'library' },
   { id: 'capture', group: 'persistent', accessibleName: 'Work with external shapes', shortLabel: 'EXT', iconId: 'capture' },
-  { id: 'analysis', group: 'persistent', accessibleName: 'Structural analysis', shortLabel: 'FEM', iconId: 'analysis' },
   { id: 'draw', group: 'utility', accessibleName: 'Draw annotations', shortLabel: 'DRAW', iconId: 'draw' },
   { id: 'settings', group: 'utility', accessibleName: 'Settings', shortLabel: 'SET', iconId: 'settings' },
 ];

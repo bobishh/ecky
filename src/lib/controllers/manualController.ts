@@ -31,6 +31,7 @@ import type { WorkingCopyState } from '../stores/workingCopy';
 import { pendingImageGeometry, pendingImageGeometryStatus } from '../imageGeometryPending';
 import { LatestTaskGate } from './latestTaskGate';
 import { activeRenderSnapshot, hydrateActiveRenderSnapshot } from '../stores/activeRenderSnapshot';
+import { manualVersionLabel } from '../manualVersionLabels';
 
 const latestParamRenderGate = new LatestTaskGate();
 const manualApplyBusy = writable(false);
@@ -545,8 +546,8 @@ export async function applyManualCodeDraft(editedCode: string) {
   const wc = get(workingCopy);
   return commitManualVersion({
     code: editedCode,
-    title: wc.title || 'Manual Edit',
-    versionName: wc.versionName || 'Manual edit',
+    title: wc.title || null,
+    versionName: manualVersionLabel(wc.versionName),
   });
 }
 
@@ -563,8 +564,8 @@ export async function commitManualVersion(
   const inputVersionName =
     typeof editedCodeOrInput === 'string' ? options.versionName : editedCodeOrInput.versionName ?? options.versionName;
   const previousThreadId = get(activeThreadId);
-  const committedTitle = inputTitle || wc.title || "Manual Edit";
-  const committedVersionName = inputVersionName?.trim() || wc.versionName || "V-manual";
+  const committedTitle = inputTitle?.trim() || wc.title?.trim() || null;
+  const committedVersionName = manualVersionLabel(inputVersionName || wc.versionName);
 
   if (!previousThreadId) {
     session.setStatus('Creating a thread for the manual version...');
@@ -572,7 +573,7 @@ export async function commitManualVersion(
     try {
       const created = await createDesignThreadIntent({
         mode: 'macro',
-        title: committedTitle,
+        title: committedTitle || 'Untitled model',
         source: editedCode,
       });
       await activateWorkspaceProjection(created.workspace);
@@ -638,7 +639,7 @@ export async function commitManualVersion(
     }
     const newMsgId = result.messageId;
     const committedDesign = result.designOutput;
-    rememberCommittedVersionMessage(snapshotThreadId, committedTitle, {
+    rememberCommittedVersionMessage(snapshotThreadId, committedTitle || committedDesign.title, {
       id: newMsgId,
       role: 'assistant',
       content: committedDesign.response,
@@ -746,8 +747,8 @@ export async function forkManualVersion(
   const wc = get(workingCopy);
   const label =
     typeof editedCodeOrInput === 'string'
-      ? titleOverride || wc.title || 'Manual Edit'
-      : editedCodeOrInput.title || titleOverride || wc.title || 'Manual Edit';
+      ? titleOverride || wc.title || 'Untitled model'
+      : editedCodeOrInput.title || titleOverride || wc.title || 'Untitled model';
   const confirmed = await confirmAction(`Fork "${label}" into a new thread with this code?`);
   if (!confirmed) return;
 

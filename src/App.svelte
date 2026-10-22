@@ -173,6 +173,7 @@ import {
   } from './lib/agents/workspaceCapture';
   import { codeInspectorTitle } from './lib/modelEngineLabel';
   import { buildFailedDraftSeed } from './lib/manualDraftSeed';
+  import { manualModelTitle } from './lib/manualVersionLabels';
   import { buildCodeWindowTranspilePrompt } from './lib/cadTranspile';
   import type { TopologyMode } from './lib/viewerDisplayMode';
   import {
@@ -658,7 +659,7 @@ import {
       codeModalDraftScopeKey = `draft:no-thread:${codeModalDraftSerial}`;
       selectedCode.set(seed?.code ?? '');
       selectedTitle.set(codeInspectorTitle(
-        seed?.title ?? 'Manual Edit',
+        seed?.title ?? manualModelTitle(null, null, null),
         codeModalSourceLanguage,
         seed?.geometryBackend ?? $config.defaultGeometryBackend,
       ));
@@ -684,7 +685,11 @@ import {
     const current = get(workingCopy);
     const versionManifest = activeVersionMessage?.modelManifest ?? activeModelManifest ?? null;
     const foreignEvidenceMode = !seed?.expectedSourcePath && isForeignCadEvidence(versionManifest);
-    const nextTitle = seed?.title ?? (current.title || 'Manual Edit');
+    const nextTitle = seed?.title ?? manualModelTitle(
+      current.title,
+      activeThread?.title,
+      activeVersionMessage?.output?.title,
+    );
     const currentHasSource = current.macroCode.trim().length > 0;
     const nextSourceLanguage = seed?.sourceLanguage ?? (
       currentHasSource ? current.sourceLanguage : $config.defaultSourceLanguage
@@ -829,13 +834,17 @@ import {
   async function refreshOpenCodeModalHead(threadId: string): Promise<void> {
     if (!$windowStore.code.visible || codeModalMode !== 'version') return;
     if (threadId !== get(activeThreadId)) return;
-    if (codeModalSourceAuthority !== 'bound' || codeModalSourceMessageId !== null) return;
+    if (codeModalSourceMessageId !== null) return;
+
+    const current = get(workingCopy);
+    const editorSource = get(selectedCode);
+    const draftIsClean = editorSource === current.macroCode;
+    if (codeModalSourceAuthority !== 'bound' && !draftIsClean) return;
 
     try {
       const head = await getProjectSource(threadId);
       if (threadId !== get(activeThreadId) || !$windowStore.code.visible) return;
 
-      const current = get(workingCopy);
       const sourceLanguage: SourceLanguage = head.file.toLowerCase().endsWith('.ecky')
         ? 'ecky'
         : current.sourceLanguage;
@@ -847,7 +856,11 @@ import {
       codeModalSourceThreadId = head.threadId;
       codeModalSourceLanguage = sourceLanguage;
       selectedCode.set(head.source);
-      selectedTitle.set(codeInspectorTitle(current.title || 'Manual Edit', sourceLanguage, geometryBackend));
+      selectedTitle.set(codeInspectorTitle(
+        manualModelTitle(current.title, activeThread?.title, activeVersionMessage?.output?.title),
+        sourceLanguage,
+        geometryBackend,
+      ));
       workingCopy.patch({
         macroCode: head.source,
         sourceLanguage,
@@ -6123,8 +6136,8 @@ import {
       macroDiffView={sessionCodeDiffView}
       title={$selectedTitle}
       draftScopeKey={codeModalDraftScopeKey}
-      defaultTitle={$workingCopy.title}
-      defaultVersionName={$workingCopy.versionName || 'V-manual'}
+      defaultTitle={manualModelTitle($workingCopy.title, activeThread?.title, activeVersionMessage?.output?.title)}
+      defaultVersionName={$workingCopy.versionName}
       sourceThreadId={codeModalSourceThreadId}
       sourceMessageId={codeModalSourceMessageId ?? $activeVersionId}
       sourceAuthority={codeModalSourceAuthority}

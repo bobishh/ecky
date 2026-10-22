@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-type PackageLibraryMockMode = 'ok' | 'discovery' | 'error' | 'empty' | 'installError' | 'componentImportError' | 'componentImportPending' | 'discoveryError' | 'discoveryPending';
+type PackageLibraryMockMode = 'ok' | 'discovery' | 'discoveryCards' | 'error' | 'empty' | 'installError' | 'componentImportError' | 'componentImportPending' | 'discoveryError' | 'discoveryPending';
 
 async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMode) {
   await page.route(/\/mock\/.*\.stl(\?.*)?$/, async (route) => {
@@ -276,7 +276,11 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
               details: 'raw package index missing',
             };
           }
-          return { kind: 'componentPackages', packageHeaders: mockWindow.__PACKAGE_HEADERS__, components: mockMode.startsWith('discovery') ? [
+          return { kind: 'componentPackages', packageHeaders: mockWindow.__PACKAGE_HEADERS__, components: mockMode === 'discoveryCards' ? [
+            { name: 'rail-clip', origin: 'local', componentId: 'rail-clip-id', revisionDigest: 'sha256:rail-clip-revision', oneLiner: 'Clips securely onto a 20 mm support rail.', paramKeys: ['support_rail_width', 'clip_depth'], tags: ['fixture'], ports: [], threadId: 'rail-project-id', threadTitle: 'Hydrant cap project' },
+            { name: 'undocumented-bracket', origin: 'local', componentId: 'undocumented-id', revisionDigest: 'sha256:undocumented-revision', oneLiner: '', paramKeys: ['exceptionally_long_parameter_name_for_narrow_cards'], tags: [], ports: [], threadId: 'orphan-source-id', threadTitle: null },
+            { name: 'builtin-washer', origin: 'builtin', version: '1.0.0', oneLiner: 'Standard washer.', paramKeys: ['diameter'], tags: [], ports: [] },
+          ] : mockMode.startsWith('discovery') ? [
             { name: 'hex-bolt', origin: 'builtin', version: '1.0.0', oneLiner: 'Parametric threaded bolt', paramKeys: ['d', 'length'], tags: ['fastener'], ports: [] },
             { name: 'bottle-cage', origin: 'local', componentId: 'local-' + 'a'.repeat(64), revisionDigest: 'sha256:' + 'b'.repeat(64), oneLiner: 'Saved bicycle bottle cage', paramKeys: ['bottleDiameter'], tags: ['bike'], ports: [] },
           ] : [] };
@@ -390,6 +394,33 @@ test.describe('Component package library', () => {
     await page.getByRole('button', { name: 'REFRESH' }).click();
     await expect.poll(() => page.evaluate(() => (window as any).__LIBRARY_LOAD_COUNT__)).toBeGreaterThan(1);
     await expect(page.getByRole('heading', { name: 'hex-bolt', exact: true })).toBeVisible();
+  });
+
+  test('Given component descriptions and incomplete provenance When cards render in a narrow pane Then metadata stays readable and separated', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'discoveryCards');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Reusable component library' }).click();
+
+    const railCard = page.locator('.available-component-card').filter({ has: page.getByRole('heading', { name: 'rail-clip' }) });
+    await expect(railCard.getByText('Clips securely onto a 20 mm support rail.')).toBeVisible();
+    await expect(railCard.getByText('Hydrant cap project')).toBeVisible();
+    await expect(railCard.getByText('support_rail_width / clip_depth')).toBeVisible();
+    await expect(railCard.getByText('sha256:rail-clip-re')).toBeVisible();
+    await expect(railCard.getByText('ID rail-project-id')).toBeVisible();
+
+    const undocumentedCard = page.locator('.available-component-card').filter({ has: page.getByRole('heading', { name: 'undocumented-bracket' }) });
+    await expect(undocumentedCard.getByText('No description available.')).toBeVisible();
+    await expect(undocumentedCard.getByText('SOURCE THREAD UNAVAILABLE')).toBeVisible();
+    await expect(undocumentedCard.getByText('ID orphan-source-id')).toBeVisible();
+    await expect(undocumentedCard.getByText('orphan-source-id', { exact: true })).toHaveCount(0);
+    const builtinCard = page.locator('.available-component-card').filter({ has: page.getByRole('heading', { name: 'builtin-washer' }) });
+    await expect(builtinCard.getByText('Built-in library')).toBeVisible();
+    await expect(builtinCard.getByText('SOURCE THREAD UNAVAILABLE')).toHaveCount(0);
+
+    const libraryWindow = page.locator('[data-window-id="library"]');
+    await libraryWindow.evaluate((element) => { (element as HTMLElement).style.width = '320px'; });
+    await expect.poll(() => undocumentedCard.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   });
   test('Given installed packages When Library opens Then concise package facts are visible', async ({ page }) => {
     await installProjectLibraryMocks(page, 'ok');

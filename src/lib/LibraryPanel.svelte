@@ -329,19 +329,24 @@
                 <h3>{component.name}</h3>
                 <span>{component.origin}</span>
               </div>
-              <p>{component.oneLiner}</p>
+              <p class="component-description">
+                <strong>DESCRIPTION</strong>
+                <span>{component.oneLiner.trim() || 'No description available.'}</span>
+              </p>
               {#if component.paramKeys.length}
-                <div class="card-stats">PARAMETERS {component.paramKeys.join(' / ')}</div>
+                <div class="card-stats component-parameters"><strong>PARAMETERS</strong><span>{component.paramKeys.join(' / ')}</span></div>
               {/if}
               {#if component.revisionDigest}
-                <div class="card-stats">REVISION {component.revisionDigest.slice(0, 19)}</div>
+                <div class="card-stats component-revision"><strong>REVISION</strong><code>{component.revisionDigest.slice(0, 19)}</code></div>
               {/if}
               {#if component.version}
-                <div class="card-stats">VERSION {component.version}</div>
+                <div class="card-stats component-revision"><strong>VERSION</strong><span>{component.version}</span></div>
               {/if}
-              {#if component.threadId}
-                <div class="card-stats">SOURCE {component.threadTitle ?? component.threadId} / {component.threadId}</div>
-              {/if}
+              <div class="card-stats component-source">
+                <strong>SOURCE THREAD</strong>
+                <span>{component.origin === 'builtin' ? 'Built-in library' : component.threadTitle?.trim() || 'SOURCE THREAD UNAVAILABLE'}</span>
+                {#if component.origin !== 'builtin' && component.threadId}<small>ID {component.threadId}</small>{/if}
+              </div>
               {#if component.tags.length}
                 <div class="tag-list">{#each component.tags as tag}<span>{tag}</span>{/each}</div>
               {/if}
@@ -482,7 +487,7 @@
     background: var(--bg-300);
     color: var(--text);
     font-family: var(--font-mono);
-    font-size: 0.64rem;
+    font-size: 0.68rem;
     font-weight: 700;
     letter-spacing: 0.06em;
     padding: 6px 9px;
@@ -595,6 +600,41 @@
     color: var(--text-dim);
     font-size: 0.68rem;
     line-height: 1.4;
+  }
+
+  .component-description,
+  .component-parameters,
+  .component-revision,
+  .component-source {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .component-description strong,
+  .component-parameters strong,
+  .component-revision strong,
+  .component-source strong {
+    color: var(--primary);
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+  }
+
+  .component-description span,
+  .component-parameters span,
+  .component-revision span,
+  .component-source span,
+  .component-source small {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .component-revision code,
+  .component-source small {
+    color: var(--text-dim);
+    font-size: 0.64rem;
   }
 
   .card-title span {

@@ -2260,10 +2260,7 @@ pub fn search_extracted_components(
             .iter()
             .map(|param| param.key.clone())
             .collect();
-        let one_liner = header
-            .description
-            .clone()
-            .unwrap_or_else(|| format!("component {} ({})", header.name, param_keys.join(" ")));
+        let one_liner = header.description.clone().unwrap_or_default();
         results.push(ExtractedComponentSearchResult {
             name: header.name,
             version: None,
@@ -2370,10 +2367,7 @@ pub fn search_extracted_components(
                 .iter()
                 .map(|param| param.key.clone())
                 .collect::<Vec<_>>();
-            let one_liner = header
-                .description
-                .clone()
-                .unwrap_or_else(|| format!("component {} ({})", header.name, param_keys.join(" ")));
+            let one_liner = header.description.clone().unwrap_or_default();
             results.push(ExtractedComponentSearchResult {
                 name: header.name,
                 version: None,
@@ -2843,6 +2837,19 @@ mod extracted_component_library_tests {
         let record = read_extracted_component(&resolver, "bracket").expect("get");
         assert!(record.source.contains("(define-component bracket"));
         assert_eq!(record.header.name, "bracket");
+    }
+
+    #[test]
+    fn search_keeps_missing_description_empty_instead_of_synthesizing_parameter_text() {
+        let resolver = temp_resolver("missing-description");
+        let mut extracted = sample_extracted("undocumented");
+        extracted.header.description = None;
+        save_extracted_component(&resolver, &extracted).expect("save");
+
+        let results = search_extracted_components(&resolver, "undocumented", 10).expect("search");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].one_liner, "");
+        assert_eq!(results[0].param_keys, vec!["width"]);
     }
 
     #[test]

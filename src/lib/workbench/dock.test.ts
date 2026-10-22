@@ -12,12 +12,11 @@ test('dock metadata preserves work sequence, groups, stable names, short labels,
 
   assert.deepEqual(
     controls.map(({ id }) => id),
-    ['projects', 'params', 'dialogue', 'code', 'docs', 'library', 'capture', 'analysis', 'draw', 'settings'],
+    ['projects', 'params', 'dialogue', 'code', 'docs', 'library', 'capture', 'draw', 'settings'],
   );
   assert.deepEqual(
     controls.map(({ group }) => group),
     [
-      'persistent',
       'persistent',
       'persistent',
       'persistent',
@@ -39,11 +38,12 @@ test('dock metadata preserves work sequence, groups, stable names, short labels,
       'Ecky IR docs',
       'Reusable component library',
       'Work with external shapes',
-      'Structural analysis',
       'Draw annotations',
       'Settings',
     ],
   );
+  assert.ok(controls.some(({ id }) => id === 'docs'), 'documentation entry remains available');
+  assert.ok(!controls.some(({ id }) => id === 'analysis'), 'FEM entry stays hidden from the main panel');
   assert.ok(controls.every(({ shortLabel, iconId }) => shortLabel.length > 0 && iconId.length > 0));
 });
 

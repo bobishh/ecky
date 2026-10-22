@@ -12,13 +12,9 @@ The project is at **0.0.1** and under active development. Expect to build from s
 
 *The desktop workbench: projects, source, model preview, and conversation share a rearrangeable window layout.*
 
-## How it started
+## A code-first CAD workspace
 
-I bought a 3D printer, and making parts gradually turned into building the software to model them. The first version of Ecky asked an LLM to write FreeCAD Python macros, ran them, and displayed the result. It was a way to try a description, see what came out, and make another attempt.
-
-That experiment kept acquiring tools around it: parameter controls, editable source, screenshots for feedback, version history, and design forks. Eventually, the model description became a project of its own. Ecky gained a Lisp-style language, a compiler, explicit geometry operations, and checks written alongside the model. The rendering path evolved too, through work with FreeCAD and Build123d to direct OCCT execution.
-
-So a printer purchase ended up involving a desktop application, a small programming language, and a CAD runtime. Each of those now brings its own problems to work on. That is where the project stands: an ongoing personal experiment whose scope has grown well beyond its starting point. The everyday loop remains simple — describe or write a part, inspect it, change it, and try again.
+Ecky keeps a model's source, parameters, preview, and revision history in one workspace. Models use the `.ecky` language and compile to native geometry; AI assistance is optional. Edit a part, inspect the result, adjust its dimensions, and export it when ready.
 
 ## Working with a model
 

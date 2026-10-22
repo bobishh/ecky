@@ -27,6 +27,8 @@ describe('WorkbenchWindows', () => {
     expect(getByRole('button', { name: /projects/i })).not.toBeNull();
     expect(getByRole('button', { name: /dialogue/i })).not.toBeNull();
     expect(getByRole('button', { name: /code inspector/i })).not.toBeNull();
+    expect(getByRole('button', { name: /ecky ir docs/i })).not.toBeNull();
+    expect(document.querySelector('[data-dock-id="analysis"]')).toBeNull();
     await fireEvent.click(getByRole('button', { name: /parameters/i }));
     expect(onActivateWindow).toHaveBeenCalledWith('params', 'open');
   });

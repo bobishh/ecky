@@ -23,6 +23,7 @@ test('Given app opens When workbench loads Then bottom icon dock controls are av
   await expect(dock.getByRole('button', { name: 'Dialogue', exact: true })).toBeVisible();
   await expect(dock.getByRole('button', { name: 'Ecky IR docs', exact: true })).toBeVisible();
   await expect(dock.getByRole('button', { name: 'Code inspector', exact: true })).toBeVisible();
+  await expect(dock.getByRole('button', { name: 'Structural analysis', exact: true })).toHaveCount(0);
   await expect(dock.getByRole('button', { name: 'Sketch Workspace', exact: true })).toHaveCount(0);
   await expect(dock.getByRole('button', { name: /AUDIO ON|AUDIO OFF/i })).toHaveCount(0);
   await expect(dock.getByRole('button', { name: 'Draw annotations', exact: true })).toBeVisible();
@@ -83,6 +84,7 @@ test('Given workbench When Ecky is clicked once Then Projects opens for model wo
   await page.getByRole('button', { name: 'Poke Ecky' }).click();
 
   await expect(projectsWindow).toBeVisible();
+  await expect(page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Structural analysis', exact: true })).toHaveCount(0);
 });
 
 test('Given workbench dock When focused Code repeats Then inspector closes and reopens', async ({ page }) => {

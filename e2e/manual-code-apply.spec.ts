@@ -12,6 +12,9 @@ declare global {
       historyCallCount: number;
       draftPreviewCalls: Array<{ threadId: string; previewId: string }>;
       latestThreadId: string | null;
+      workspaceProjectionCalls: number;
+      lifecycleCalls: string[];
+      projectFolderSyncListenerReady: boolean;
     };
     __manualCodeApplyMockConfig?: {
       stallHistoryAfterCommit?: boolean;
@@ -20,12 +23,19 @@ declare global {
       sourceLanguage?: 'legacyPython' | 'ecky';
       macroCode?: string;
       reuseArtifactIdentity?: boolean;
+      blankWorkingTitle?: boolean;
+      versionName?: string;
+      threadTitle?: string;
     };
     __emitTauriEvent?: (event: string, payload: unknown) => void;
   }
 }
 
-function manualCodeApplyMockScript() {
+function manualCodeApplyMockScript(config: Window['__manualCodeApplyMockConfig'] = {}) {
+  window.__manualCodeApplyMockConfig = {
+    ...window.__manualCodeApplyMockConfig,
+    ...config,
+  };
   window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
   const eventHandlers = new Map<string, number[]>();
   let nextCallbackId = 1;
@@ -52,26 +62,72 @@ function manualCodeApplyMockScript() {
     historyCallCount: 0,
     draftPreviewCalls: [],
     latestThreadId: null,
+    workspaceProjectionCalls: 0,
+    lifecycleCalls: [],
+    projectFolderSyncListenerReady: false,
   };
 
   const historyThread = {
     id: 'mock-thread-1',
-    title: 'Bracket',
+    title: config.threadTitle ?? 'Bracket',
     updatedAt: Date.now() / 1000,
     versionCount: 1,
     pendingCount: 0,
     queuedCount: 0,
     errorCount: 0,
-    status: 'ready',
+    status: 'active',
     summary: '',
     messages: [],
   };
+  const persistedVersions: Array<Record<string, any>> = [];
+  let projectFinalized = false;
+  const versionSummary = (message: Record<string, any>) => ({
+    title: message.output?.title ?? null,
+    versionName: message.output?.versionName ?? null,
+    modelId: message.artifactBundle?.modelId ?? null,
+    hasOutput: Boolean(message.output),
+    hasRuntime: Boolean(message.artifactBundle),
+    hasManifest: Boolean(message.modelManifest),
+  });
+  const timelineRow = (message: Record<string, any>, index: number) => ({
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    contentTruncated: false,
+    contentObservedBytes: 0,
+    contentAllowedBytes: 8192,
+    status: message.status,
+    agentOrigin: null,
+    timestamp: message.timestamp,
+    timelineOrder: index,
+    versionSummary: message.versionSummary ?? versionSummary(message),
+    hasImage: false,
+    attachmentCount: 0,
+    visualKind: null,
+  });
+  const workspaceProjection = (preferredMessageId?: string | null) => {
+    const messages = persistedVersions.map(timelineRow);
+    const selectedVersion = preferredMessageId
+      ? persistedVersions.find((message) => message.id === preferredMessageId) ?? null
+      : persistedVersions.at(-1) ?? null;
+    return {
+      thread: { ...historyThread, status: projectFinalized ? 'finalized' : 'active', versionCount: persistedVersions.length },
+      messagesPage: { messages, nextBefore: null, hasMore: false, observedBytes: 0, truncatedFields: [] },
+      selectedVersion,
+      requestedMessageFound: Boolean(preferredMessageId && selectedVersion),
+    };
+  };
+  const lifecycleProjection = () => ({
+    threadId: historyThread.id,
+    history: [{ ...historyThread, status: projectFinalized ? 'finalized' : 'active', versionCount: persistedVersions.length }],
+  });
   let canonicalSource = window.__manualCodeApplyMockConfig?.macroCode ?? 'print("base bracket")';
 
   window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
     if (cmd === 'plugin:event|listen') {
       const event = String(args?.event ?? '');
       eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), Number(args?.handler)]);
+      if (event === 'project-folder-sync') window.__manualCodeApplyMock!.projectFolderSyncListenerReady = true;
       return Number(args?.handler);
     }
     if (cmd === 'plugin:event|unlisten') return null;
@@ -103,7 +159,31 @@ function manualCodeApplyMockScript() {
       ) {
         return new Promise(() => {});
       }
-      return [historyThread];
+      return [{ ...historyThread, status: projectFinalized ? 'finalized' : 'active', versionCount: persistedVersions.length || 1 }];
+    }
+    if (cmd === 'get_workspace_projection') {
+      window.__manualCodeApplyMock!.workspaceProjectionCalls += 1;
+      return workspaceProjection(args?.preferredMessageId as string | null | undefined);
+    }
+    if (cmd === 'get_version_detail') return null;
+    if (cmd === 'get_thread_message_version') {
+      const messageId = String(args?.messageId ?? '');
+      return persistedVersions.find((message) => message.id === messageId) ?? null;
+    }
+    if (cmd === 'finalize_thread_intent') {
+      projectFinalized = true;
+      window.__manualCodeApplyMock!.lifecycleCalls.push('finalize');
+      return lifecycleProjection();
+    }
+    if (cmd === 'reopen_thread_intent') {
+      projectFinalized = false;
+      window.__manualCodeApplyMock!.lifecycleCalls.push('reopen');
+      return lifecycleProjection();
+    }
+    if (cmd === 'get_inventory') {
+      return projectFinalized
+        ? [{ ...historyThread, status: 'finalized', versionCount: persistedVersions.length || 1, finalizedAt: Date.now() / 1000 }]
+        : [];
     }
     if (cmd === 'get_last_design') return null;
     if (cmd === 'get_agent_draft_preview') {
@@ -208,6 +288,13 @@ function manualCodeApplyMockScript() {
       const modelManifest = await window.__TAURI_INTERNALS__.invoke('get_model_manifest', {
         modelId: artifactBundle.modelId,
       });
+      const message = {
+        id: generated.messageId, role: 'assistant', content: generated.design.response ?? '', status: 'success',
+        timestamp: Date.now() / 1000, output: generated.design, artifactBundle, modelManifest,
+        versionSummary: versionSummary({ output: generated.design, artifactBundle, modelManifest }),
+      };
+      persistedVersions.push(message);
+      historyThread.versionCount = persistedVersions.length;
       return {
         run: {
           requestId: input.requestId,
@@ -223,10 +310,7 @@ function manualCodeApplyMockScript() {
           rawError: null,
           publicationAllowed: true,
         },
-        message: {
-          id: generated.messageId, role: 'assistant', content: generated.design.response ?? '', status: 'success',
-          timestamp: Date.now(), output: generated.design, artifactBundle, modelManifest,
-        },
+        message,
         snapshotId: `snapshot-${generated.messageId}`,
       };
     }
@@ -249,8 +333,8 @@ function manualCodeApplyMockScript() {
         messageId: 'mock-msg-1',
         usage: null,
         design: {
-          title: 'Bracket',
-          versionName: 'V1',
+          title: window.__manualCodeApplyMockConfig?.blankWorkingTitle ? '' : 'Bracket',
+          versionName: window.__manualCodeApplyMockConfig?.versionName ?? 'V1',
           interactionMode: 'design',
           macroCode,
           sourceLanguage,
@@ -354,6 +438,26 @@ function manualCodeApplyMockScript() {
       const write = { threadId: String(input.threadId), source: String(input.source) };
       window.__manualCodeApplyMock!.saveProjectSourceCalls.push(write);
       canonicalSource = write.source;
+      const message: Record<string, any> = {
+        id: messageId,
+        role: 'assistant',
+        content: 'Manual edit appended as new version.',
+        status: 'success',
+        timestamp: Date.now() / 1000,
+        output: {
+          title: input.title, versionName: input.versionName,
+          response: 'Manual edit appended as new version.', interactionMode: 'design', macroCode: input.source,
+          sourceLanguage, geometryBackend, engineKind, uiSpec: input.uiSpec, initialParams: input.parameters,
+          postProcessing: input.postProcessing ?? null,
+        },
+        artifactBundle,
+        modelManifest,
+      };
+      if (persist) {
+        message.versionSummary = versionSummary(message);
+        persistedVersions.push(message);
+        historyThread.versionCount = persistedVersions.length;
+      }
       return {
         threadId: input.threadId,
         baseMessageId: input.baseMessageId ?? null,
@@ -508,7 +612,10 @@ function manualCodeApplyMockScript() {
   };
 }
 
-async function bootManualCodeFlow(page: Page) {
+async function bootManualCodeFlow(
+  page: Page,
+  config: NonNullable<Window['__manualCodeApplyMockConfig']> = {},
+) {
   let stlRequestCount = 0;
   await page.route(/\/mock-\d+\.stl(?:\?.*)?$/, async (route) => {
     stlRequestCount += 1;
@@ -527,7 +634,7 @@ endsolid mock
 `,
     });
   });
-  await page.addInitScript(manualCodeApplyMockScript);
+  await page.addInitScript(manualCodeApplyMockScript, config);
   await page.goto('/');
   await expect(page.locator('.boot-overlay')).toHaveCount(0);
   await page.getByRole('button', { name: 'DIALOGUE' }).click();
@@ -648,6 +755,9 @@ test.describe('Manual code apply/version coverage', () => {
     await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i }).click();
     const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
     await expect(modal.locator('.cm-content')).toContainText('(part old');
+    await expect.poll(() => page.evaluate(
+      () => window.__manualCodeApplyMock?.projectFolderSyncListenerReady ?? false,
+    )).toBe(true);
 
     const renderedSource = '(model (part stamp (box 60 45 3)))';
     await page.evaluate(async (source) => {
@@ -762,6 +872,49 @@ test.describe('Manual code apply/version coverage', () => {
     await expect(modal).toBeHidden();
     await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i }).click();
     await expect(page.locator('.cm-content').first()).toContainText('print("draft bracket")');
+  });
+
+  test('Given blank legacy model title and V Manual label When manual edit is reopened Then project title and identifiable version label persist', async ({ page }) => {
+    await bootManualCodeFlow(page, {
+      blankWorkingTitle: true,
+      versionName: 'V Manual',
+      threadTitle: 'Hydrant cap project',
+    });
+
+    await page.locator('.param-panel').getByRole('button', { name: 'CODE' }).click();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(modal.getByLabel('Version title')).toHaveValue('Hydrant cap project');
+    await expect(modal.getByLabel('Version name')).toHaveValue(/^Manual edit .* UTC$/);
+    await modal.getByRole('button', { name: 'APPLY', exact: true }).click();
+
+    await expect.poll(() => page.evaluate(() => window.__manualCodeApplyMock?.applyManualCodeCalls.length ?? 0)).toBe(1);
+    await expect(modal).toBeHidden();
+    const projectButton = page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'PROJECTS' });
+    await projectButton.click();
+    const projectWindow = page.locator('[data-window-id="projects"]');
+    const activeCard = projectWindow.locator('.project-card').filter({ hasText: 'Hydrant cap project' });
+    await expect(activeCard).toBeVisible();
+    await activeCard.getByRole('button', { name: 'COMPLETE' }).click();
+    await expect.poll(() => page.evaluate(() => window.__manualCodeApplyMock?.lifecycleCalls.join(',') ?? '')).toBe('finalize');
+    await projectWindow.getByRole('button', { name: 'COMPLETED' }).click();
+    const completedCard = projectWindow.locator('.project-card').filter({ hasText: 'Hydrant cap project' });
+    await expect(completedCard.getByRole('button', { name: 'REOPEN' })).toBeVisible();
+    await completedCard.getByRole('button', { name: 'REOPEN' }).click();
+    await expect.poll(() => page.evaluate(() => window.__manualCodeApplyMock?.lifecycleCalls.join(',') ?? '')).toBe('finalize,reopen');
+    await projectWindow.getByRole('button', { name: 'ACTIVE' }).click();
+    const reopenedCard = projectWindow.locator('.project-card').filter({ hasText: 'Hydrant cap project' });
+    await reopenedCard.getByRole('button', { name: 'OPEN' }).click();
+    await expect.poll(() => page.evaluate(() => window.__manualCodeApplyMock?.workspaceProjectionCalls ?? 0)).toBeGreaterThan(0);
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'DIALOGUE' }).click();
+    await expect(page.locator('.version-counter')).toHaveText('V 2 OF 2');
+    await page.locator('.version-counter-group').getByRole('button').first().click();
+    await expect(page.locator('.version-counter')).toHaveText('V 1 OF 2');
+    await page.locator('.version-counter-group').getByRole('button').last().click();
+    await expect(page.locator('.version-counter')).toHaveText('V 2 OF 2');
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i }).click();
+    const reopened = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(reopened.getByLabel('Version title')).toHaveValue('Hydrant cap project');
+    await expect(reopened.getByLabel('Version name')).toHaveValue(/^Manual edit .* UTC$/);
   });
 
   test('Given Apply reuses backend artifact identity When draft renders Then viewport reloads the STL', async ({ page }) => {
@@ -1059,7 +1212,7 @@ test.describe('Manual code apply/version coverage', () => {
     ).toHaveCount(0);
   });
 
-  test('Given first render fails When closing and reopening from viewport code button Then failed draft stays editable without a successful model', async ({
+  test('Given first render fails When opening code from viewport button Then failed draft stays editable without a successful model', async ({
     page,
   }) => {
     await page.addInitScript(() => {
@@ -1091,17 +1244,7 @@ endsolid mock
     await page.fill('textarea.prompt-input', 'make broken bracket');
     await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await expect(page.getByText(/MACRO INSPECTOR:/i)).toBeVisible();
-    await expect(page.locator('.cm-content').first()).toContainText('print("base bracket")');
-    await expect(page.locator('.error-banner')).toHaveCount(0);
     await expect(page.locator('.agent-notification-center')).toContainText('mock render exploded');
-
-    await page
-      .locator('[role="dialog"]')
-      .filter({ hasText: 'MACRO INSPECTOR:' })
-      .locator('.window-close')
-      .click();
-
     const viewportCodeButton = page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i });
     await expect(viewportCodeButton).toBeVisible();
     await expect(viewportCodeButton).toBeEnabled();
@@ -1110,6 +1253,7 @@ endsolid mock
 
     await expect(page.getByText(/MACRO INSPECTOR:/i)).toBeVisible();
     await expect(page.locator('.cm-content').first()).toContainText('print("base bracket")');
+    await expect(page.locator('.error-banner')).toHaveCount(0);
   });
 
   test('Given a Core IR authoring error When generation render fails Then Ecky keeps raw text with layer and fix', async ({

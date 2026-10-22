@@ -7,6 +7,7 @@
     seedCodeModalDraftField,
     shouldReseedCodeModalDraftFields,
   } from './codeModalDraftFields';
+  import { manualVersionLabel } from './manualVersionLabels';
   import { composeMacroDiffPanelModel } from './macroDiffPanel';
   import type { SessionCodeDiffView } from './sessionActivity';
   import {
@@ -138,7 +139,7 @@
   $effect(() => {
     if (!shouldReseedCodeModalDraftFields(seededDraftScopeKey, effectiveDraftScopeKey, commitState)) return;
     draftTitle = seedCodeModalDraftField(defaultTitle, title);
-    draftVersionName = seedCodeModalDraftField(defaultVersionName, 'V-manual');
+    draftVersionName = manualVersionLabel(defaultVersionName);
     seededDraftScopeKey = effectiveDraftScopeKey;
     commitError = '';
     commitAuthoringError = null;
@@ -162,8 +163,8 @@
   function applyPayload(): CodeModalApplyPayload {
     return {
       code,
-      title: draftTitle.trim() || defaultTitle || title || 'Manual Edit',
-      versionName: draftVersionName.trim() || defaultVersionName || 'V-manual',
+      title: draftTitle.trim() || defaultTitle || title || 'Untitled model',
+      versionName: manualVersionLabel(draftVersionName || defaultVersionName),
     };
   }
 
