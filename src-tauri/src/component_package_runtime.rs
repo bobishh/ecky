@@ -331,46 +331,92 @@ pub fn read_decoded_package_payload(archive_path: &Path) -> AppResult<Vec<u8>> {
 /// mutation, leaving existing content intact.
 pub fn install_component_package_to_store(
     app: &dyn PathResolver,
-    archive_path: &Path,
+    archive: &Path,
 ) -> AppResult<InstalledStorePackage> {
-    let header = read_component_package_header_from_archive(archive_path)?;
-    let payload_bytes = read_decoded_package_payload(archive_path)?;
-    let validated = validate_payload_archive(&payload_bytes)?;
-    let payload_package = read_component_package_from_payload(&payload_bytes, archive_path)?;
-    if payload_package.package_id != header.package_id || payload_package.version != header.version
-    {
-        return Err(AppError::validation(format!(
-            "Package envelope coordinate '{}@{}' does not match payload coordinate '{}@{}'.",
-            header.package_id, header.version, payload_package.package_id, payload_package.version
-        )));
-    }
-    let (package_digest, inventory) = compute_package_payload_digest(&validated);
-    let _lock = acquire_component_store_mutation_lock(app)?;
+    install_component_package_archives_to_store(app, &[archive.to_path_buf()])?
+        .pop()
+        .ok_or_else(|| AppError::internal("No installed package result"))
+}
 
-    if let Some(existing) = read_coordinate_index(app, &header.package_id, &header.version)? {
-        if existing.package_digest != package_digest {
-            return Err(AppError::validation(format!(
-                "Package coordinate '{}@{}' is already installed with payload digest '{}'; refusing to overwrite with differing digest '{}'.",
-                header.package_id, header.version, existing.package_digest, package_digest
-            )));
+/// Validate the complete batch before writing. Publish discovery metadata in one transaction.
+/// Interrupted filesystem publication cannot change an existing immutable coordinate or model lock.
+pub fn install_component_package_archives_to_store(
+    app: &dyn PathResolver,
+    archives: &[PathBuf],
+) -> AppResult<Vec<InstalledStorePackage>> {
+    let index = open_component_index(app)?;
+    let mut prepared = Vec::new();
+    let mut coordinates = BTreeMap::new();
+    for archive in archives {
+        let header = read_component_package_header_from_archive(archive)?;
+        let payload = read_decoded_package_payload(archive)?;
+        let validated = validate_payload_archive(&payload)?;
+        let package = read_component_package_from_payload(&payload, archive)?;
+        if package.package_id != header.package_id || package.version != header.version {
+            return Err(AppError::validation(
+                "Package envelope/payload coordinate mismatch",
+            ));
         }
+        let (digest, inventory) = compute_package_payload_digest(&validated);
+        if coordinates
+            .insert(
+                (package.package_id.clone(), package.version.clone()),
+                digest.clone(),
+            )
+            .is_some()
+        {
+            return Err(AppError::validation(
+                "Duplicate coordinate in package installation batch",
+            ));
+        }
+        prepared.push((package, validated, digest, inventory));
     }
-    enforce_immutable_coordinate_locked(app, &header.package_id, &header.version, &package_digest)?;
-
-    let store_dir = publish_validated_payload_locked(app, &validated, &package_digest, inventory)?;
-    write_immutable_coordinate_record_locked(
-        app,
-        &header.package_id,
-        &header.version,
-        &package_digest,
-    )?;
-    write_coordinate_index_locked(app, &header.package_id, &header.version, &package_digest)?;
-    Ok(InstalledStorePackage {
-        package_id: header.package_id.clone(),
-        version: header.version.clone(),
-        package_digest,
-        store_dir,
-    })
+    let _lock = acquire_component_store_mutation_lock(app)?;
+    for (package, _, digest, _) in &prepared {
+        if read_coordinate_index(app, &package.package_id, &package.version)?
+            .is_some_and(|entry| entry.package_digest != *digest)
+        {
+            return Err(AppError::validation(format!("Package coordinate '{}@{}' is already installed with a different payload digest; refusing to overwrite",package.package_id,package.version)));
+        }
+        enforce_immutable_coordinate_locked(app, &package.package_id, &package.version, digest)?;
+    }
+    let mut installed = Vec::new();
+    let mut packages = Vec::new();
+    for (package, validated, digest, inventory) in prepared {
+        let store_dir = publish_validated_payload_locked(app, &validated, &digest, inventory)?;
+        installed.push(InstalledStorePackage {
+            package_id: package.package_id.clone(),
+            version: package.version.clone(),
+            package_digest: digest.clone(),
+            store_dir,
+        });
+        packages.push(package);
+    }
+    for package in &installed {
+        write_immutable_coordinate_record_locked(
+            app,
+            &package.package_id,
+            &package.version,
+            &package.package_digest,
+        )?;
+        write_coordinate_index_locked(
+            app,
+            &package.package_id,
+            &package.version,
+            &package.package_digest,
+        )?;
+    }
+    let transaction = index
+        .connection()
+        .unchecked_transaction()
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    for (package, installed) in packages.iter().zip(&installed) {
+        crate::catalog::cache_package(&transaction, package, &installed.package_digest)?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    Ok(installed)
 }
 
 pub fn list_installed_component_package_headers(
@@ -1734,6 +1780,7 @@ pub fn remove_coordinate_index(
     version: &str,
 ) -> AppResult<bool> {
     let _lock = acquire_component_store_mutation_lock(app)?;
+    let index = open_component_index(app)?;
     let path = coordinate_index_path(app, package_id, version)?;
     if !path.is_file() {
         return Ok(false);
@@ -1747,6 +1794,18 @@ pub fn remove_coordinate_index(
     if let Some(parent) = path.parent() {
         sync_directory(parent)?;
     }
+    let tx = index
+        .connection()
+        .unchecked_transaction()
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    tx.execute(
+        "DELETE FROM installed_package_headers WHERE package_id=?1 AND version=?2",
+        rusqlite::params![package_id, version],
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))?;
+    tx.execute("DELETE FROM catalog_documents WHERE json_extract(body,'$.reference.packageId')=?1 AND json_extract(body,'$.reference.version')=?2",rusqlite::params![package_id,version]).map_err(|error|AppError::persistence(error.to_string()))?;
+    tx.commit()
+        .map_err(|error| AppError::persistence(error.to_string()))?;
     Ok(true)
 }
 
@@ -1911,7 +1970,7 @@ struct AutoComponentLatest {
     revision_digest: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize, specta::Type)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractedComponentSearchResult {
     pub name: String,
@@ -1934,7 +1993,7 @@ pub struct ExtractedComponentSearchResult {
     pub origin: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq, specta::Type)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractedComponentPortSummary {
     pub port_id: String,
@@ -1986,6 +2045,10 @@ pub fn save_extracted_component(
             err
         ))
     })?;
+    open_component_index(app)?.upsert(
+        &component_search_header(&extracted.header),
+        &extracted.header.dependencies.join(" "),
+    )?;
     Ok(dir)
 }
 
@@ -1997,8 +2060,8 @@ pub fn capture_defined_components(
     message_id: &str,
     source: &str,
 ) -> AppResult<()> {
-    let diagnostics = capture_rendered_components(app, thread_id, message_id, source)?;
-    report_capture_diagnostics(diagnostics)
+    let capture = prepare_component_capture(app, thread_id, message_id, source)?;
+    publish_component_capture(app, thread_id, message_id, capture)
 }
 
 fn report_capture_diagnostics(diagnostics: Vec<String>) -> AppResult<()> {
@@ -2009,15 +2072,66 @@ fn report_capture_diagnostics(diagnostics: Vec<String>) -> AppResult<()> {
     }
 }
 
-fn capture_rendered_components(
+pub(crate) struct PreparedComponentCapture {
+    model_document: crate::catalog::CatalogDocument,
+    components: Vec<crate::component_extract::ExtractedComponent>,
+    diagnostics: Vec<String>,
+}
+
+pub(crate) fn prepare_component_capture(
     app: &dyn PathResolver,
     thread_id: &str,
     message_id: &str,
     source: &str,
-) -> AppResult<Vec<String>> {
-    let (components, diagnostics) =
-        crate::component_extract::extract_rendered_components(source, thread_id, message_id);
-    for component in components {
+) -> AppResult<PreparedComponentCapture> {
+    prepare_component_capture_with_lock(
+        app,
+        thread_id,
+        message_id,
+        source,
+        None,
+        crate::contracts::SourceLanguage::EckyIrV0,
+        crate::contracts::GeometryBackend::EckyRust,
+    )
+}
+
+pub(crate) fn prepare_component_capture_with_lock(
+    app: &dyn PathResolver,
+    thread_id: &str,
+    message_id: &str,
+    source: &str,
+    expected_lock: Option<&crate::contracts::ComponentDependencyLock>,
+    source_language: crate::contracts::SourceLanguage,
+    geometry_backend: crate::contracts::GeometryBackend,
+) -> AppResult<PreparedComponentCapture> {
+    let (components, diagnostics) = if source_language
+        == crate::contracts::SourceLanguage::LegacyPython
+    {
+        (Vec::new(), Vec::new())
+    } else {
+        let resolved = crate::component_import_runtime::resolve_authoring_source(
+            crate::component_import_runtime::ResolveAuthoringSourceRequest {
+                authored_source: source,
+                expected_lock,
+            },
+            &crate::component_import_runtime::InstalledLibraryComponentResolver { app },
+        )?;
+        let (mut components, diagnostics) = crate::component_extract::extract_rendered_components(
+            &resolved.compiler_source,
+            thread_id,
+            message_id,
+        );
+        for component in &mut components {
+            component.header.provenance.source_digest =
+                format!("sha256:{:x}", Sha256::digest(source.as_bytes()));
+            if !resolved.dependency_lock.dependencies.is_empty() {
+                component.header.provenance.dependency_lock =
+                    Some(resolved.dependency_lock.clone());
+            }
+        }
+        (components, diagnostics)
+    };
+    for component in &components {
         let component_id = component.header.component_id.as_deref().ok_or_else(|| {
             AppError::internal("Automatic component capture has no stable component ID.")
         })?;
@@ -2045,6 +2159,107 @@ fn capture_rendered_components(
             write_atomic(&header_path, &header)?;
         }
         read_component_revision(app, component_id, digest)?;
+    }
+    let model_document = crate::catalog::CatalogDocument {
+        id: format!("model:{thread_id}:{message_id}"),
+        kind: "model".into(),
+        name: thread_id.into(),
+        description: components
+            .iter()
+            .map(|component| component.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        tags: Vec::new(),
+        params: components
+            .iter()
+            .flat_map(|component| {
+                component
+                    .header
+                    .params
+                    .iter()
+                    .map(|param| param.key.clone())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        ports: components
+            .iter()
+            .flat_map(|component| {
+                component
+                    .header
+                    .ports
+                    .iter()
+                    .map(|port| port.type_id.clone())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        backend: geometry_backend.as_str().into(),
+        source_language: source_language.as_str().into(),
+        license: None,
+        reference: serde_json::json!({"threadId":thread_id,"messageId":message_id,"sourceDigest":format!("sha256:{:x}",Sha256::digest(source.as_bytes()))}),
+    };
+    Ok(PreparedComponentCapture {
+        components,
+        diagnostics,
+        model_document,
+    })
+}
+
+fn component_search_header(
+    header: &crate::component_extract::ComponentHeader,
+) -> ExtractedComponentSearchResult {
+    ExtractedComponentSearchResult {
+        name: header.name.clone(),
+        version: None,
+        one_liner: header.description.clone().unwrap_or_default(),
+        param_keys: header
+            .params
+            .iter()
+            .map(|param| param.key.clone())
+            .collect(),
+        tags: header.tags.clone(),
+        ports: header
+            .ports
+            .iter()
+            .map(|port| ExtractedComponentPortSummary {
+                port_id: port.port_id.clone(),
+                type_id: port.type_id.clone(),
+            })
+            .collect(),
+        component_id: header.component_id.clone(),
+        revision_digest: header.revision_digest.clone(),
+        thread_id: header.provenance.thread_id.clone(),
+        thread_title: None,
+        origin: if header.component_id.is_some() {
+            "local"
+        } else {
+            "extracted"
+        }
+        .to_string(),
+    }
+}
+
+fn publish_component_capture(
+    app: &dyn PathResolver,
+    thread_id: &str,
+    message_id: &str,
+    capture: PreparedComponentCapture,
+) -> AppResult<()> {
+    for component in &capture.components {
+        let component_id = component
+            .header
+            .component_id
+            .as_deref()
+            .ok_or_else(|| AppError::internal("Missing component identity"))?;
+        let digest = component
+            .header
+            .revision_digest
+            .as_deref()
+            .ok_or_else(|| AppError::internal("Missing component revision"))?;
+        let identity_dir = extracted_component_library_root(app)?
+            .join(AUTO_COMPONENT_LIBRARY_DIR_NAME)
+            .join(component_id);
         let latest_path = identity_dir.join(AUTO_COMPONENT_LATEST_FILE_NAME);
         let same_latest = fs::read_to_string(&latest_path)
             .ok()
@@ -2063,47 +2278,89 @@ fn capture_rendered_components(
             write_atomic(&latest_path, &pointer)?;
         }
     }
-    Ok(diagnostics)
+    let entries = capture
+        .components
+        .iter()
+        .map(|component| {
+            (
+                component_search_header(&component.header),
+                component.header.dependencies.join(" "),
+            )
+        })
+        .collect::<Vec<_>>();
+    open_component_index(app)?.publish_capture(
+        thread_id,
+        message_id,
+        &entries,
+        &capture.diagnostics,
+        &capture.model_document,
+    )?;
+    report_capture_diagnostics(capture.diagnostics)
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ComponentCaptureCursor {
-    schema_version: u32,
-    message_id: String,
-    diagnostics: Vec<String>,
-}
-
-fn capture_cursor_path(app: &dyn PathResolver, thread_id: &str) -> AppResult<PathBuf> {
-    Ok(extracted_component_library_root(app)?
-        .join("capture-cursors")
-        .join(format!("{:x}.json", Sha256::digest(thread_id.as_bytes()))))
-}
-
-/// A persisted cursor avoids rereading/reparsing already indexed model history
-/// on every Library open and MCP search. Bump schema when capture rules change.
 pub fn component_capture_diagnostics(
     app: &dyn PathResolver,
     thread_id: &str,
     message_id: &str,
 ) -> AppResult<Option<Vec<String>>> {
-    let path = capture_cursor_path(app, thread_id)?;
-    match fs::read_to_string(&path) {
-        Ok(raw) => Ok(serde_json::from_str::<ComponentCaptureCursor>(&raw)
-            .ok()
-            .filter(|cursor| cursor.schema_version == 2 && cursor.message_id == message_id)
-            .map(|cursor| cursor.diagnostics)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(AppError::persistence(format!(
-            "Failed to read component capture cursor '{}': {error}",
-            path.display()
-        ))),
-    }
+    open_component_index(app)?.capture_diagnostics(thread_id, message_id)
 }
 
-/// Publish only when this successful version is still latest for its thread.
-/// Callers hold the shared history DB lock across this check and publication so
-/// a later writer cannot be followed by a stale pointer update.
+pub(crate) fn open_component_index(
+    app: &dyn PathResolver,
+) -> AppResult<crate::component_library_index::ComponentLibraryIndex> {
+    let root = extracted_component_library_root(app)?;
+    let mut index =
+        crate::component_library_index::ComponentLibraryIndex::open(&root.join("index.sqlite"))?;
+    if index.needs_bootstrap()? {
+        // One-time migration reads compact headers only. Historical source recovery runs separately.
+        index.bootstrap(&scan_extracted_component_headers(app, "", usize::MAX)?)?;
+    }
+    if !index.packages_imported()? {
+        for coordinate in coordinate_index_entries(app)? {
+            let package = read_component_package_manifest(&payload_store_dir(
+                app,
+                &coordinate.package_digest,
+            )?)?;
+            crate::catalog::cache_package(
+                index.connection(),
+                &package,
+                &coordinate.package_digest,
+            )?;
+        }
+        index.mark_packages_imported()?;
+    }
+    Ok(index)
+}
+
+/// Publish only while this version remains the latest successful rendered source.
+/// The caller holds the history lock for this check and compact index publication.
+pub(crate) fn publish_latest_component_capture(
+    app: &dyn PathResolver,
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    message_id: &str,
+    mut capture: PreparedComponentCapture,
+) -> AppResult<()> {
+    if !crate::db::is_latest_successful_component_capture(conn, thread_id, message_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+    {
+        return Ok(());
+    }
+    if let Some(title) = crate::db::get_thread_title(conn, thread_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+    {
+        capture.model_document.name = title;
+    }
+    let result = publish_component_capture(app, thread_id, message_id, capture);
+    if let Some(title) = crate::db::get_thread_title(conn, thread_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+    {
+        open_component_index(app)?.set_thread_title(thread_id, &title)?;
+    }
+    result
+}
+
 pub fn capture_latest_successful_components(
     app: &dyn PathResolver,
     conn: &rusqlite::Connection,
@@ -2111,29 +2368,32 @@ pub fn capture_latest_successful_components(
     message_id: &str,
     source: &str,
 ) -> AppResult<()> {
-    let latest = crate::db::latest_successful_component_capture_targets(conn)
-        .map_err(|error| AppError::persistence(error.to_string()))?;
-    if latest
-        .iter()
-        .any(|target| target.thread_id == thread_id && target.message_id == message_id)
+    if !crate::db::is_latest_successful_component_capture(conn, thread_id, message_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
     {
-        if let Some(diagnostics) = component_capture_diagnostics(app, thread_id, message_id)? {
-            return report_capture_diagnostics(diagnostics);
-        }
-        let diagnostics = capture_rendered_components(app, thread_id, message_id, source)?;
-        let cursor = serde_json::to_vec(&ComponentCaptureCursor {
-            schema_version: 2,
-            message_id: message_id.to_string(),
-            diagnostics: diagnostics.clone(),
-        })
-        .map_err(|error| AppError::internal(error.to_string()))?;
-        write_atomic(&capture_cursor_path(app, thread_id)?, &cursor)?;
-        report_capture_diagnostics(diagnostics)?;
+        return Ok(());
     }
-    Ok(())
+    if let Some(diagnostics) = component_capture_diagnostics(app, thread_id, message_id)? {
+        return report_capture_diagnostics(diagnostics);
+    }
+    let lock = crate::db::get_version_component_lock(conn, thread_id, message_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    let (source_language, geometry_backend) =
+        crate::db::get_component_capture_settings(conn, thread_id, message_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+    let capture = prepare_component_capture_with_lock(
+        app,
+        thread_id,
+        message_id,
+        source,
+        lock.as_ref(),
+        source_language,
+        geometry_backend,
+    )?;
+    publish_latest_component_capture(app, conn, thread_id, message_id, capture)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> AppResult<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> AppResult<()> {
     let parent = path
         .parent()
         .ok_or_else(|| AppError::internal("Component library file has no parent directory."))?;
@@ -2159,8 +2419,16 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> AppResult<()> {
     })
 }
 
-/// Header-only library scan: never reads `component.ecky` bodies.
+/// Search persisted metadata. No history traversal, source parsing, or per-header reads.
 pub fn search_extracted_components(
+    app: &dyn PathResolver,
+    query: &str,
+    limit: usize,
+) -> AppResult<Vec<ExtractedComponentSearchResult>> {
+    open_component_index(app)?.search(query, limit)
+}
+
+fn scan_extracted_component_headers(
     app: &dyn PathResolver,
     query: &str,
     limit: usize,
@@ -2461,28 +2729,14 @@ pub fn read_component_by_id(
     {
         return Err(AppError::validation("Automatic component ID is invalid."));
     }
-    let identity_dir = extracted_component_library_root(app)?
-        .join(AUTO_COMPONENT_LIBRARY_DIR_NAME)
-        .join(component_id);
-    let pointer_path = identity_dir.join(AUTO_COMPONENT_LATEST_FILE_NAME);
-    let raw = fs::read_to_string(&pointer_path).map_err(|err| {
-        AppError::persistence(format!(
-            "Failed to read latest component revision '{}': {err}",
-            pointer_path.display()
-        ))
-    })?;
-    let pointer: AutoComponentLatest = serde_json::from_str(&raw).map_err(|err| {
-        AppError::parse(format!(
-            "Failed to parse latest component revision '{}': {err}",
-            pointer_path.display()
-        ))
-    })?;
-    if pointer.schema_version != 1 || valid_component_digest(&pointer.revision_digest).is_none() {
-        return Err(AppError::persistence(
-            "Latest component revision pointer has an unsupported schema or invalid digest.",
-        ));
-    }
-    read_component_revision(app, component_id, &pointer.revision_digest)
+    let digest = open_component_index(app)?
+        .latest_revision(component_id)?
+        .ok_or_else(|| {
+            AppError::validation(format!(
+                "Component `{component_id}` has no indexed revision."
+            ))
+        })?;
+    read_component_revision(app, component_id, &digest)
 }
 
 pub fn read_component_revision(
@@ -2714,6 +2968,7 @@ fn builtin_stdlib_record(component: &BuiltinStdlibComponent) -> ExtractedCompone
                 project_id: None,
                 thread_id: None,
                 message_id: None,
+                dependency_lock: None,
                 source_digest: format!("builtin:{}@{}", component.name, component.version),
             },
             interfaces: Vec::new(),
@@ -3568,4 +3823,94 @@ mod package_payload_store_tests {
         assert!(identities.contains(&component_id));
         assert!(!read_component_by_id(&resolver, &component_id, Some("sha256:bad")).is_ok());
     }
+}
+
+/// Public distribution includes declared exports and explicitly listed files only.
+/// Staging outside the project prevents private files and the output archive from entering its payload.
+pub fn write_distributable_component_package_archive(
+    project: &Path,
+    output: &Path,
+) -> AppResult<cairn_registry::Release> {
+    let package = read_component_package_manifest(project)?;
+    let project =
+        fs::canonicalize(project).map_err(|error| AppError::persistence(error.to_string()))?;
+    let mut files = BTreeSet::from([COMPONENT_PACKAGE_FILE_NAME.to_string()]);
+    files.extend(
+        package
+            .components
+            .iter()
+            .filter_map(|component| component.source_ref.clone()),
+    );
+    if let Some(cairn) = &package.cairn {
+        files.extend(cairn.files.iter().cloned());
+    }
+    for license in ["LICENSE", "LICENSE.md", "LICENSE.txt"] {
+        if project.join(license).is_file() {
+            files.insert(license.into());
+        }
+    }
+    if files.len() > 4096 {
+        return Err(AppError::validation("Cairn package exceeds 4096 files"));
+    }
+    let stage = std::env::temp_dir().join(format!("cairn-pack-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&stage).map_err(|error| AppError::persistence(error.to_string()))?;
+    let result = (|| {
+        let mut bytes = 0u64;
+        for file in files {
+            let relative = safe_archive_path(&file)?;
+            let source = fs::canonicalize(project.join(&relative))
+                .map_err(|error| AppError::persistence(format!("Cairn file {file}: {error}")))?;
+            if !source.starts_with(&project)
+                || fs::symlink_metadata(project.join(&relative))
+                    .map_err(|error| AppError::persistence(error.to_string()))?
+                    .file_type()
+                    .is_symlink()
+            {
+                return Err(AppError::validation(format!(
+                    "Cairn file escapes the package or is a symlink: {file}"
+                )));
+            }
+            bytes = bytes.saturating_add(
+                fs::metadata(&source)
+                    .map_err(|error| AppError::persistence(error.to_string()))?
+                    .len(),
+            );
+            if bytes > 128 * 1024 * 1024 {
+                return Err(AppError::validation(
+                    "Cairn package expanded files exceed 128 MiB",
+                ));
+            }
+            let target = stage.join(relative);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| AppError::persistence(error.to_string()))?;
+            }
+            fs::copy(source, target).map_err(|error| AppError::persistence(error.to_string()))?;
+        }
+        let parent = output
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::create_dir_all(parent).map_err(|error| AppError::persistence(error.to_string()))?;
+        let temporary = parent.join(format!(".cairn-pack-{}", uuid::Uuid::new_v4()));
+        let result = (|| {
+            write_component_package_archive(&stage, &temporary)?;
+            let bytes =
+                fs::read(&temporary).map_err(|error| AppError::persistence(error.to_string()))?;
+            let release = cairn_registry::inspect_archive(&bytes).map_err(AppError::validation)?;
+            let validated = validate_payload_archive(&read_decoded_package_payload(&temporary)?)?;
+            if compute_package_payload_digest(&validated).0 != release.package_digest {
+                return Err(AppError::validation(
+                    "Registry/store package digest disagreement",
+                ));
+            }
+            fs::rename(&temporary, output)
+                .map_err(|error| AppError::persistence(error.to_string()))?;
+            Ok(release)
+        })();
+        let _ = fs::remove_file(temporary);
+        result
+    })();
+    let _ = fs::remove_dir_all(stage);
+    result
 }

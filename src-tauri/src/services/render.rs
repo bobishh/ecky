@@ -1882,11 +1882,7 @@ async fn render_model_with_component_lock_internal(
         &resolver,
     )?;
     let _component_payload_pins = crate::component_package_runtime::pin_component_store_payloads(
-        compilation
-            .dependency_lock
-            .dependencies
-            .iter()
-            .map(|dependency| dependency.package_digest.clone()),
+        compilation.dependency_lock.package_digests(),
     );
     let lock_digest = crate::services::render_snapshot::component_dependency_lock_digest(
         &compilation.dependency_lock,
@@ -2785,6 +2781,7 @@ endsolid sample
 
     fn test_config() -> Config {
         Config {
+            cairn: None,
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
@@ -2835,6 +2832,7 @@ endsolid sample
         crate::component_package_runtime::write_component_package_manifest(
             &project,
             &ComponentPackage {
+                cairn: None,
                 schema_version: crate::contracts::COMPONENT_PACKAGE_SCHEMA_VERSION,
                 package_id: "fixture.live".to_string(),
                 version: version.to_string(),

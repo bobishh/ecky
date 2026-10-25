@@ -250,6 +250,8 @@ const READ_ONLY_MCP_TOOLS: &[&str] = &[
     "get_structural_verification_summary",
     "get_model_screenshot",
     "component_search",
+    "catalog_search",
+    "catalog_get",
     "component_get",
     "freecad_library_search",
     "project_folder_status",

@@ -528,7 +528,7 @@ pub fn resolve_authoring_source(
         &step_assets,
     )?;
     let materialized = materialize_compiler_source(&step_lowered, &resolved_sources)?;
-    let (dependency_lock, mut import_spans) =
+    let (mut dependency_lock, mut import_spans) =
         build_lock_and_spans(&resolved_sources, &resolved_steps);
     for span in &mut import_spans {
         let (start, end) = materialized
@@ -540,6 +540,7 @@ pub fn resolve_authoring_source(
         span.resolved_end = end;
     }
     let compiler_source = materialized.compiler_source;
+    dependency_lock.cairn = request.expected_lock.and_then(|lock| lock.cairn.clone());
     dependency_lock.validate()?;
     if let Some(expected) = request.expected_lock {
         verify_against_expected_lock(expected, &dependency_lock)?;
@@ -1464,6 +1465,7 @@ fn build_lock_and_spans(
         });
     }
     let lock = ComponentDependencyLock {
+        cairn: None,
         schema_version: crate::contracts::COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
         dependencies: by_package.into_values().collect(),
     }
@@ -1889,6 +1891,7 @@ mod tests {
         let resolver =
             MemoryResolver::new().with(cage_coordinate(), "cage", cage_source(), "sha256:aaaa");
         let expected = ComponentDependencyLock {
+            cairn: None,
             schema_version: crate::contracts::COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
             dependencies: vec![ComponentDependencyLockEntry {
                 package_id: "bike.kit".to_string(),
@@ -1923,6 +1926,7 @@ mod tests {
         // The package digest is correct, but an empty component list cannot
         // authorize the live `cage` import.
         let expected = ComponentDependencyLock {
+            cairn: None,
             schema_version: crate::contracts::COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
             dependencies: vec![ComponentDependencyLockEntry {
                 package_id: "bike.kit".to_string(),

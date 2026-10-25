@@ -402,13 +402,7 @@ pub async fn save_or_update_agent_version_for_session(
 
         if artifact_bundle.is_some() {
             if let Err(error) =
-                crate::component_package_runtime::capture_latest_successful_components(
-                    app,
-                    &conn,
-                    &thread_id,
-                    &message_id,
-                    &design_output.macro_code,
-                )
+                crate::services::library_panel::schedule_component_recovery(app, state)
             {
                 state.push_log(format!(
                     "Component capture failed for version {message_id}: {error}"
@@ -555,6 +549,7 @@ mod tests {
 
     fn test_config() -> Config {
         Config {
+            cairn: None,
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),

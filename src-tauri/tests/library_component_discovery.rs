@@ -200,3 +200,252 @@ fn given_derived_lexical_geometry_when_captured_then_reused_part_compiles() {
     ))
     .unwrap();
 }
+
+#[test]
+fn given_model_local_components_when_captured_then_parts_include_transitive_definitions() {
+    use ecky_cad_lib::component_package_runtime as library;
+    let paths = TestPaths::new();
+    let source = r#"
+        (define wall 2)
+        (model
+          (params (number width 12))
+          (define-component dryer-base ((number width 12)) (box width wall 3))
+          (define-component dryer-body ((number width 12)) (dryer-base :width width))
+          (part enclosure-body (dryer-body :width width)))
+    "#;
+    library::capture_defined_components(&paths, "dryer", "v1", source).unwrap();
+    let part = library::search_extracted_components(&paths, "enclosure-body", 20)
+        .unwrap()
+        .pop()
+        .expect("model-local component call is reusable");
+    let record = library::read_component_by_id(
+        &paths,
+        part.component_id.as_deref().unwrap(),
+        part.revision_digest.as_deref(),
+    )
+    .unwrap();
+    assert!(record.source.contains("(define-component dryer-base"));
+    assert!(record.source.contains("(define-component dryer-body"));
+    ecky_cad_lib::ecky_scheme::compile_to_core_program(&format!(
+        "{} (model (part copied (enclosure-body)))",
+        record.source
+    ))
+    .expect("captured dependency closure compiles in another model");
+}
+
+#[test]
+fn given_nested_for_union_bindings_when_captured_then_loop_indices_are_not_free_references() {
+    use ecky_cad_lib::component_package_runtime as library;
+    let paths = TestPaths::new();
+    let source = "(model (params (number count 2)) (part bracket
+        (for-union (i count) (for-union (j 2) (box (+ 1 i) (+ 1 j) 1)))))";
+    library::capture_defined_components(&paths, "bracket", "v1", source).unwrap();
+    let part = library::search_extracted_components(&paths, "bracket", 20)
+        .unwrap()
+        .pop()
+        .expect("loop-based part indexed");
+    let record = library::read_component_by_id(
+        &paths,
+        part.component_id.as_deref().unwrap(),
+        part.revision_digest.as_deref(),
+    )
+    .unwrap();
+    assert_eq!(part.param_keys, ["count"]);
+    ecky_cad_lib::ecky_scheme::compile_to_core_program(&format!(
+        "{} (model (part copied (bracket)))",
+        record.source
+    ))
+    .unwrap();
+}
+
+#[test]
+fn given_indexed_component_when_header_becomes_unreadable_then_search_uses_persisted_metadata() {
+    use ecky_cad_lib::component_package_runtime as library;
+    let paths = TestPaths::new();
+    library::capture_defined_components(
+        &paths,
+        "indexed",
+        "v1",
+        "(model (part bracket (box 2 2 2)))",
+    )
+    .unwrap();
+    let before = library::search_extracted_components(&paths, "bracket", 20).unwrap();
+    let part = before.iter().find(|item| item.origin == "local").unwrap();
+    let header = paths
+        .app_data_dir()
+        .join("component-library/local-captures")
+        .join(part.component_id.as_deref().unwrap())
+        .join("revisions")
+        .join(
+            part.revision_digest
+                .as_deref()
+                .unwrap()
+                .strip_prefix("sha256:")
+                .unwrap(),
+        )
+        .join("ecky-header.json");
+    std::fs::write(header, "unavailable").unwrap();
+    let after = library::search_extracted_components(&paths, "bracket", 20).unwrap();
+    assert!(
+        after
+            .iter()
+            .any(|item| item.component_id == part.component_id),
+        "normal search must not reopen source headers"
+    );
+}
+
+#[test]
+fn given_independent_valid_and_blocked_definitions_when_captured_then_valid_source_stays_discoverable(
+) {
+    use ecky_cad_lib::component_package_runtime as library;
+    let paths = TestPaths::new();
+    let source = "(define-component broken () (box missing 2 1)) (define-component good () (box 2 2 1)) (model (part body (good)))";
+    assert!(library::capture_defined_components(&paths, "partial", "v1", source).is_err());
+    let results = library::search_extracted_components(&paths, "good", 20).unwrap();
+    assert!(
+        results.iter().any(|entry| entry.name == "good"),
+        "one invalid definition must not hide an independent valid definition"
+    );
+}
+
+#[test]
+fn given_installed_source_import_when_captured_then_reusable_source_is_closed() {
+    use ecky_cad_lib::component_package_runtime as library;
+    let paths = TestPaths::new();
+    let project = paths.0.join("package");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("clip.ecky"),
+        "(define-component clip () (box 3 2 1))",
+    )
+    .unwrap();
+    let package = serde_json::from_value(json!({
+        "schemaVersion": 1, "packageId": "fixture.clips", "version": "1.0.0", "displayName": "Clips", "visibility": "source",
+        "components": [{"componentId": "clip", "version": "1.0.0", "displayName": "Clip", "sourceRef": "clip.ecky"}]
+    })).unwrap();
+    library::write_component_package_manifest(&project, &package).unwrap();
+    let archive = paths.0.join("clips.ecky-package");
+    library::write_component_package_archive(&project, &archive).unwrap();
+    library::install_component_package_to_store(&paths, &archive).unwrap();
+    let source = "(import-component \"fixture.clips\" :version \"1.0.0\" :component \"clip\" :as mount) (model (part body (mount)))";
+    library::capture_defined_components(&paths, "imported", "v1", source).unwrap();
+    let entry = library::search_extracted_components(&paths, "body", 100)
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.thread_id.as_deref() == Some("imported"))
+        .unwrap();
+    let record = library::read_component_by_id(
+        &paths,
+        entry.component_id.as_deref().unwrap(),
+        entry.revision_digest.as_deref(),
+    )
+    .unwrap();
+    assert!(!record.source.contains("import-component"));
+    ecky_cad_lib::ecky_scheme::compile_to_core_program(&format!(
+        "{} (model (part reuse (body)))",
+        record.source
+    ))
+    .unwrap();
+}
+
+#[test]
+fn given_successful_python_model_when_cataloged_then_native_search_does_not_misclassify_it() {
+    use ecky_cad_lib::{catalog, component_package_runtime as library, db};
+    let paths = TestPaths::new();
+    std::fs::create_dir_all(&paths.0).unwrap();
+    let conn = db::init_db(&paths.0.join("history.sqlite")).unwrap();
+    db::create_or_update_thread(&conn, "legacy-model", "Legacy fixture", 1, None).unwrap();
+    let source = "import FreeCAD\npart = Part.makeBox(1, 2, 3)";
+    let message=serde_json::from_value(json!({"id":"legacy-version","role":"assistant","content":"","status":"success","timestamp":1,
+        "output":{"title":"Legacy fixture","macroCode":source,"macroDialect":"legacy","engineKind":"freecad","sourceLanguage":"legacyPython","geometryBackend":"freecad"},
+        "artifactBundle":{"modelId":"legacy-model","sourceKind":"generated","engineKind":"freecad","sourceLanguage":"legacyPython","geometryBackend":"freecad","contentHash":"sha256:legacy","fcstdPath":"","manifestPath":"manifest","modelStlPath":"model.stl"}
+    })).unwrap();
+    db::add_message(&conn, "legacy-model", &message).unwrap();
+    library::capture_latest_successful_components(
+        &paths,
+        &conn,
+        "legacy-model",
+        "legacy-version",
+        source,
+    )
+    .unwrap();
+    let query = catalog::CatalogQuery {
+        query: "Legacy fixture".into(),
+        kind: Some("model".into()),
+        backend: Some("freecad".into()),
+        ..Default::default()
+    };
+    let found = catalog::search(&paths, &query).unwrap();
+    assert_eq!(
+        found.results.len(),
+        1,
+        "legacy models must retain their actual authoring context"
+    );
+    assert_eq!(found.results[0].document.source_language, "legacyPython");
+    assert!(catalog::search(
+        &paths,
+        &catalog::CatalogQuery {
+            backend: Some("mesh".into()),
+            ..query
+        }
+    )
+    .unwrap()
+    .results
+    .is_empty());
+}
+
+#[tokio::test]
+async fn given_old_component_revision_when_catalog_detail_is_requested_then_contract_matches_that_source(
+) {
+    let paths = TestPaths::new();
+    let capture = |message: &str, source: &str| {
+        ecky_cad_lib::component_package_runtime::capture_defined_components(
+            &paths,
+            "changing-thread",
+            message,
+            source,
+        )
+        .unwrap()
+    };
+    capture(
+        "first",
+        "(define-component changing-clip ((number width 4)) (box width 2 1))",
+    );
+    let hit = ecky_cad_lib::catalog::search(
+        &paths,
+        &ecky_cad_lib::catalog::CatalogQuery {
+            query: "changing-clip".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .results
+    .remove(0);
+    let revision = hit.document.reference["revisionDigest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    capture(
+        "second",
+        "(define-component changing-clip ((number depth 8)) (box 2 depth 1))",
+    );
+    let conn = ecky_cad_lib::db::init_db(&paths.app_data_dir().join("history.sqlite")).unwrap();
+    let config = serde_json::from_value(json!({"engines":[],"selectedEngineId":""})).unwrap();
+    let state = ecky_cad_lib::models::AppState::new(config, None, conn);
+    let result = ecky_cad_lib::catalog::detail(
+        &paths,
+        &state,
+        ecky_cad_lib::catalog::CatalogDetailRequest {
+            id: hit.document.id,
+            revision_digest: Some(revision.clone()),
+            offset: None,
+            max_chars: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["document"]["params"], json!(["width"]));
+    assert_eq!(result["document"]["reference"]["revisionDigest"], revision);
+    assert!(result["sourceWindow"].as_str().unwrap().contains("width"));
+    assert!(!result["sourceWindow"].as_str().unwrap().contains("depth"));
+}

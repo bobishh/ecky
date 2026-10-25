@@ -6,6 +6,7 @@ use ecky_cad_lib::contracts::{
 #[test]
 fn fem_compute_policy_round_trips_through_canonical_edn_value() {
     let config = Config {
+        cairn: None,
         engines: vec![],
         selected_engine_id: String::new(),
         freecad_cmd: String::new(),

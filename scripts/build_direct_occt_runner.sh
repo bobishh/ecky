@@ -45,7 +45,8 @@ fi
 
 case "$(uname -s)" in
   Darwin) RPATH="-Wl,-rpath,@loader_path/../lib" ;;
-  Linux) RPATH="-Wl,-rpath,\$ORIGIN/../lib" ;;
+  # DT_RPATH also resolves transitive private SDK libraries after relocation.
+  Linux) RPATH="-Wl,--disable-new-dtags,-rpath,\$ORIGIN/../lib" ;;
   *)
     echo "Unsupported runner build platform: $(uname -s)" >&2
     exit 1
@@ -58,14 +59,15 @@ CXX_BIN="${CXX:-c++}"
 CC_BIN="${CC:-cc}"
 YYJSON_OBJECT="$OUT_DIR/bin/yyjson.o"
 
-# Resolve a required OCCT dylib to an explicit link path. The prepared runtime
-# may ship a bare `lib<name>.dylib` symlink for some families and only
-# versioned `lib<name>.<ver>.dylib` files for others (e.g. TKXSBase). Prefer
-# the bare symlink when present, otherwise link the versioned file directly so
-# the runner does not depend on a symlink the OCCT bundle may not provide.
+# macOS SDKs may omit the unversioned dylib link; Linux uses normal -l names.
 resolve_occt_lib_path() {
   local lib="$1"
   local lib_dir="$OUT_DIR/lib"
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    [[ -f "$lib_dir/lib${lib}.so" ]] || { echo "Missing OCCT shared library: $lib" >&2; exit 1; }
+    printf '%s' "-l${lib}"
+    return
+  fi
   local bare="$lib_dir/lib${lib}.dylib"
   if [[ -f "$bare" || -L "$bare" ]]; then
     printf '%s' "-l${lib}"

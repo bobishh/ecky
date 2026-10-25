@@ -149,6 +149,7 @@ fn write_artifact_bundle_component_package_project_impl(
     }
 
     let package = ComponentPackage {
+        cairn: None,
         schema_version: crate::contracts::COMPONENT_PACKAGE_SCHEMA_VERSION,
         package_id: request.package_id,
         version: request.version,

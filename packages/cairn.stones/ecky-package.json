@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "packageId": "cairn.stones",
+  "version": "0.1.0",
+  "displayName": "Low-poly stones",
+  "visibility": "source",
+  "tags": [
+    "stone",
+    "low-poly",
+    "terrain",
+    "cairn"
+  ],
+  "components": [
+    {
+      "componentId": "stone",
+      "version": "0.1.0",
+      "displayName": "Faceted stone",
+      "sourceRef": "stone.ecky",
+      "sourceLanguage": "ecky",
+      "geometryBackend": "mesh",
+      "params": [
+        {
+          "key": "width",
+          "label": "Width",
+          "kind": "number",
+          "unit": "mm"
+        },
+        {
+          "key": "depth",
+          "label": "Depth",
+          "kind": "number",
+          "unit": "mm"
+        },
+        {
+          "key": "height",
+          "label": "Height",
+          "kind": "number",
+          "unit": "mm"
+        }
+      ]
+    }
+  ],
+  "cairn": {
+    "repository": "https://github.com/bobishh/ecky",
+    "dependencies": []
+  }
+}

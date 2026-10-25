@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use ecky_cad_lib::contracts::{ArtifactBundle, DesignParams, GeometryBackend, ParamValue};
 use ecky_cad_lib::models::PathResolver;
 
-const USAGE: &str = "Usage:\n  ecky check <input>\n  ecky lower --backend freecad|build123d <input> [--out <path>]\n  ecky render --backend <freecad|native> <input> (--stl <path>|--bundle-dir <dir>) [--step <path>] [--param key=value]... [--params file.json] [--json]\n\nCommands:\n  check   Validate Ecky source.\n  lower   Lower Ecky source without rendering.\n  render  Render Ecky source into requested artifacts.\n";
+const USAGE: &str = "Usage:\n  ecky check <input>\n  ecky lower --backend freecad|build123d <input> [--out <path>]\n  ecky render --backend <freecad|native> <input> (--stl <path>|--bundle-dir <dir>) [--step <path>] [--param key=value]... [--params file.json] [--json]\n\nCommands:\n  cairn   Discover, package and install reusable components.\n  check   Validate Ecky source.\n  lower   Lower Ecky source without rendering.\n  render  Render Ecky source into requested artifacts.\n";
 
 #[derive(Debug)]
 enum CliError {
@@ -42,13 +42,16 @@ impl CliError {
 
 struct CliResolver {
     root: PathBuf,
+    paths: ecky_cad_lib::cairn::CliPaths,
 }
 
 impl CliResolver {
     fn new() -> Result<Self, CliError> {
         let root = env::temp_dir().join(format!("ecky-cli-{}", std::process::id()));
         fs::create_dir_all(&root).map_err(|error| CliError::Write(error.to_string()))?;
-        Ok(Self { root })
+        let paths = ecky_cad_lib::cairn::CliPaths::discover()
+            .map_err(|error| CliError::Write(error.to_string()))?;
+        Ok(Self { root, paths })
     }
 }
 
@@ -58,11 +61,11 @@ impl PathResolver for CliResolver {
     }
 
     fn app_data_dir(&self) -> PathBuf {
-        self.root.join("data")
+        self.paths.app_data_dir()
     }
 
     fn resource_path(&self, path: &str) -> Option<PathBuf> {
-        env::var_os("ECKY_RESOURCE_DIR").map(|root| PathBuf::from(root).join(path))
+        ecky_cad_lib::cairn::packaged_resource_path(path)
     }
 }
 
@@ -79,8 +82,23 @@ fn check(args: &[String]) -> Result<(), CliError> {
         return Err(usage_error("check requires exactly one input path"));
     }
     let source = read_source(&args[0], CliError::Check)?;
-    let program = ecky_cad_lib::ecky_scheme::compile_to_core_program(&source)
-        .map_err(|error| CliError::Check(error.render_with_source(&source)))?;
+    let paths = ecky_cad_lib::cairn::CliPaths::discover()
+        .map_err(|error| CliError::Check(error.to_string()))?;
+    let parent = Path::new(&args[0])
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let lock = ecky_cad_lib::project_mirror::read_project_lock(parent)
+        .map_err(|error| CliError::Check(error.to_string()))?;
+    let compiled = ecky_cad_lib::component_import_runtime::compile_authoring_source(
+        ecky_cad_lib::component_import_runtime::ResolveAuthoringSourceRequest {
+            authored_source: &source,
+            expected_lock: lock.as_ref(),
+        },
+        &ecky_cad_lib::component_import_runtime::InstalledLibraryComponentResolver { app: &paths },
+    )
+    .map_err(|error| CliError::Check(error.to_string()))?;
+    let program = compiled.program;
     println!("check: ok");
     println!("parts: {}", program.parts.len());
     println!("params: {}", program.parameters.len());
@@ -426,8 +444,24 @@ fn render(args: &[String]) -> Result<(), CliError> {
 fn run(args: &[String]) -> Result<(), CliError> {
     match args {
         [] => Err(usage_error("missing command")),
+        [command] if command == "--version" || command == "-V" => {
+            println!("{}", ecky_cad_lib::cairn::version_text());
+            Ok(())
+        }
         [command] if command == "--help" || command == "-h" => {
             print!("{USAGE}");
+            Ok(())
+        }
+        [command, rest @ ..] if command == "cairn" => {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| CliError::Write(error.to_string()))?;
+            let result = runtime
+                .block_on(ecky_cad_lib::cairn::run(rest))
+                .map_err(|error| CliError::Write(error.to_string()))?;
+            ecky_cad_lib::cairn::print_result(
+                &result,
+                rest.iter().any(|argument| argument == "--json"),
+            );
             Ok(())
         }
         [command, rest @ ..] if command == "check" => check(rest),

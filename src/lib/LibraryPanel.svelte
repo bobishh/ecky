@@ -1,16 +1,20 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
+  import { onMount } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
   import {
     formatBackendError,
     libraryPanelIntent,
   } from './tauri/client';
   import type {
     ComponentHeader,
+    ComponentIndexStatus,
     ComponentPackageHeader,
     ExtractedComponentSearchResult,
     FreecadLibraryItem,
     LibraryPanelProjection,
     LibraryComponentSelection,
+    RegistryReleaseSummary,
   } from './tauri/contracts';
   import { config as sharedConfig } from './stores/domainState';
 
@@ -24,7 +28,7 @@
     freecadEnabled?: boolean;
   } = $props();
 
-  type LibraryTab = 'components' | 'freecad';
+  type LibraryTab = 'components' | 'hub' | 'freecad';
 
   let activeTab = $state<LibraryTab>('components');
   let searchQuery = $state('');
@@ -34,10 +38,18 @@
   let packageHeaders = $state<ComponentPackageHeader[]>([]);
   let availableComponents = $state<ExtractedComponentSearchResult[]>([]);
   let indexingDiagnostics = $state<string[]>([]);
+  let indexStatus = $state.raw<ComponentIndexStatus | null>(null);
+  let componentRefreshSerial = 0;
   let packagesLoaded = $state(false);
   let packageImportBusy = $state(false);
   let importingComponentId = $state<string | null>(null);
   let expandedPackageId = $state<string | null>(null);
+  let hubReleases = $state<RegistryReleaseSummary[]>([]);
+  let hubLoaded = $state(false);
+  let hubSearchBusy = $state(false);
+  let hubInstallId = $state<string | null>(null);
+  let registryUrl = $state('https://hub.ecky-cad.com');
+
 
   let freecadLibraryRoots = $state<string[]>([]);
   let freecadLibraryResults = $state<FreecadLibraryItem[]>([]);
@@ -51,6 +63,7 @@
   async function loadActiveTab() {
     if (
       (activeTab === 'components' && packagesLoaded) ||
+      (activeTab === 'hub' && hubLoaded) ||
       (activeTab === 'freecad' && freecadLoaded)
     ) {
       return;
@@ -60,8 +73,9 @@
     loadError = null;
     try {
       if (activeTab === 'components') {
-        projectComponentPackages(await libraryPanelIntent({ kind: 'loadComponents' }));
-        packagesLoaded = true;
+        await refreshComponentIndex();
+      } else if (activeTab === 'hub') {
+        await searchHub();
       } else if (activeTab === 'freecad') {
         projectFreecadLibrary(await libraryPanelIntent({ kind: 'loadFreecad', query: searchQuery, page: 0 }));
         freecadLoaded = true;
@@ -72,6 +86,77 @@
       loading = false;
     }
   }
+
+  async function refreshComponentIndex() {
+    const serial = ++componentRefreshSerial;
+    try {
+      const projection = await libraryPanelIntent({ kind: 'loadComponents' });
+      if (serial !== componentRefreshSerial) return;
+      projectComponentPackages(projection);
+      packagesLoaded = true;
+      loadError = null;
+    } catch (error) {
+      if (serial === componentRefreshSerial) loadError = formatBackendError(error);
+    }
+  }
+
+  async function rebuildComponentIndex() {
+    try {
+      projectComponentPackages(await libraryPanelIntent({ kind: 'rebuildComponentIndex' }));
+      loadError = null;
+    } catch (error) {
+      loadError = formatBackendError(error);
+    }
+  }
+
+  function projectRegistry(projection: LibraryPanelProjection) {
+    if (projection.kind !== 'registryPackages') throw new Error('Expected registry package results');
+    hubReleases = projection.releases;
+    registryUrl = projection.registryUrl;
+    hubLoaded = true;
+  }
+
+  async function searchHub(connect = false) {
+    if (hubSearchBusy) return;
+    hubSearchBusy = true;
+    loadError = null;
+    try {
+      projectRegistry(await libraryPanelIntent(connect
+        ? { kind: 'setRegistry', registryUrl, query: searchQuery }
+        : { kind: 'searchRegistry', query: searchQuery }));
+    } catch (error) {
+      loadError = formatBackendError(error);
+    } finally {
+      hubSearchBusy = false;
+    }
+  }
+
+  async function installHubPackage(release: RegistryReleaseSummary) {
+    if (hubInstallId) return;
+    hubInstallId = `${release.header.packageId}@${release.header.version}`;
+    loadError = null;
+    try {
+      projectComponentPackages(await libraryPanelIntent({ kind: 'installRegistryPackage', packageId: release.header.packageId, version: release.header.version }));
+      packagesLoaded = true;
+      activeTab = 'components';
+      searchQuery = '';
+    } catch (error) {
+      loadError = formatBackendError(error);
+    } finally {
+      hubInstallId = null;
+    }
+  }
+
+  onMount(() => {
+    const internals = (window as unknown as { __TAURI_INTERNALS__?: { transformCallback?: unknown } }).__TAURI_INTERNALS__;
+    if (typeof internals?.transformCallback !== 'function') return;
+    const subscriptions = Promise.all([
+      listen('component-library-updated', () => void refreshComponentIndex()),
+      listen('history-updated', () => void refreshComponentIndex()),
+    ]);
+    void subscriptions.catch((error) => console.warn('Component library updates unavailable:', error));
+    return () => { void subscriptions.then((unlisten) => unlisten.forEach((stop) => stop())).catch(() => {}); };
+  });
 
   $effect(() => {
     if (!freecadEnabled && activeTab === 'freecad') activeTab = 'components';
@@ -132,6 +217,7 @@
     packageHeaders = projection.packageHeaders;
     availableComponents = projection.components ?? [];
     indexingDiagnostics = projection.indexingDiagnostics ?? [];
+    indexStatus = projection.indexStatus ?? null;
   }
 
   function projectFreecadLibrary(projection: LibraryPanelProjection) {
@@ -270,6 +356,7 @@
     loadError = null;
     if (activeTab === 'components') packagesLoaded = false;
     if (activeTab === 'freecad') freecadLoaded = false;
+    if (activeTab === 'hub') hubLoaded = false;
     void loadActiveTab();
   }
 </script>
@@ -280,6 +367,7 @@
       <button class:active={activeTab === 'components'} onclick={() => activeTab = 'components'}>
         COMPONENTS
       </button>
+      <button class:active={activeTab === 'hub'} onclick={() => activeTab = 'hub'}>HUB</button>
       {#if freecadEnabled}
         <button class:active={activeTab === 'freecad'} onclick={() => activeTab = 'freecad'}>
           FREECAD PARTS
@@ -289,12 +377,14 @@
     <div class="library-tools">
       <input class="search-input" type="search" placeholder="Search library..." bind:value={searchQuery} />
       {#if activeTab === 'components'}
-        <button class="secondary-action" onclick={() => packagesLoaded = false} disabled={loading}>
+        <button class="secondary-action" onclick={() => void refreshComponentIndex()} disabled={loading}>
           REFRESH
         </button>
         <button class="primary-action" onclick={handleImportPackageArchive} disabled={packageImportBusy}>
           {packageImportBusy ? 'IMPORTING...' : 'IMPORT PACKAGE'}
         </button>
+      {:else if activeTab === 'hub'}
+        <button class="primary-action" onclick={() => void searchHub()} disabled={hubSearchBusy}>{hubSearchBusy ? 'SEARCHING...' : 'SEARCH'}</button>
       {:else if activeTab === 'freecad'}
         <button class="primary-action" onclick={handleSearchFreecadLibrary} disabled={freecadLibrarySearchBusy}>
           {freecadLibrarySearchBusy ? 'SEARCHING...' : 'SEARCH'}
@@ -303,22 +393,70 @@
     </div>
   </header>
 
+  {#if activeTab === 'components'}
+    <section class="component-index-status" aria-label="Component library status">
+      <div class="index-message">
+        {#if indexStatus?.phase === 'indexing'}
+          <div role="status" aria-label="Component index progress">UPDATING LIBRARY · {indexStatus.completed} / {indexStatus.total}</div>
+        {:else if indexStatus?.phase === 'failed'}
+          <strong>LIBRARY UPDATE INCOMPLETE</strong>
+        {:else}
+          <span>{availableComponents.length} COMPONENTS AVAILABLE</span>
+        {/if}
+        {#if indexStatus?.error}<pre>{indexStatus.error}</pre>{/if}
+        {#if loadError && packagesLoaded}<div class="error-state"><pre>{loadError}</pre><button class="secondary-action" onclick={() => void refreshComponentIndex()}>RETRY</button></div>{/if}
+        {#if indexingDiagnostics.length}
+          <details aria-label="Component indexing diagnostics">
+            <summary>{indexingDiagnostics.length} source issues · show details</summary>
+            {#each indexingDiagnostics as diagnostic, i (i)}<pre>{diagnostic}</pre>{/each}
+          </details>
+        {/if}
+      </div>
+      <button class="secondary-action" onclick={rebuildComponentIndex} disabled={indexStatus?.phase === 'indexing'}>REBUILD INDEX</button>
+    </section>
+  {/if}
+
+  {#if activeTab === 'hub'}
+    <section class="component-index-status" aria-label="Hub connection">
+      <div class="index-message">
+        <span>{registryUrl}</span>
+        <div class="registry-controls">
+          <input aria-label="Registry URL" bind:value={registryUrl} />
+          <button class="secondary-action" onclick={() => void searchHub(true)} disabled={hubSearchBusy}>CONNECT</button>
+        </div>
+        {#if loadError && hubLoaded}<pre class="hub-error">{loadError}</pre>{/if}
+      </div>
+    </section>
+  {/if}
+
   <main class="library-content">
     {#if loading}
       <div class="state">LOADING LIBRARY...</div>
-    {:else if loadError}
+    {:else if loadError && !((activeTab === 'components' && packagesLoaded) || (activeTab === 'hub' && hubLoaded))}
       <div class="error-state">
         <strong>LIBRARY ERROR</strong>
         <pre>{loadError}</pre>
         <button onclick={retry}>RETRY</button>
       </div>
-    {:else if activeTab === 'components'}
-      {#if indexingDiagnostics.length}
-        <div class="error-state" role="status" aria-label="Component indexing diagnostics">
-          <strong>COMPONENT INDEXING NEEDS ATTENTION</strong>
-          {#each indexingDiagnostics as diagnostic}<pre>{diagnostic}</pre>{/each}
+    {:else if activeTab === 'hub'}
+      {#if hubReleases.length === 0}
+        <div class="state">{hubSearchBusy ? 'SEARCHING HUB...' : 'NO MATCHING PACKAGES'}</div>
+      {:else}
+        <div class="library-grid">
+          {#each hubReleases as release (`${release.header.packageId}@${release.header.version}`)}
+            <article class="library-card">
+              <div class="card-title"><h3>{release.header.displayName}</h3><span>{release.header.version}</span></div>
+              <p>{release.header.packageId}</p>
+              <p>{release.header.components?.length ?? 0} exports{release.license ? ` · ${release.license}` : ''}</p>
+              <div class="tag-list">{#each release.header.tags as tag (tag)}<span>{tag}</span>{/each}</div>
+              <button class="primary-action" aria-label={`INSTALL ${release.header.displayName}`} onclick={() => installHubPackage(release)} disabled={Boolean(hubInstallId)}>
+                {hubInstallId === `${release.header.packageId}@${release.header.version}` ? 'INSTALLING...' : 'INSTALL'}
+              </button>
+            </article>
+          {/each}
         </div>
       {/if}
+    {:else if activeTab === 'components'}
       {#if filteredComponents.length === 0 && filteredPackages.length === 0}
         <div class="state">{searchQuery.trim() ? 'NO MATCHING COMPONENTS' : 'NO COMPONENTS OR PACKAGES'}</div>
       {:else}
@@ -348,7 +486,7 @@
                 {#if component.origin !== 'builtin' && component.threadId}<small>ID {component.threadId}</small>{/if}
               </div>
               {#if component.tags.length}
-                <div class="tag-list">{#each component.tags as tag}<span>{tag}</span>{/each}</div>
+                <div class="tag-list">{#each component.tags as tag (tag)}<span>{tag}</span>{/each}</div>
               {/if}
               <button
                 class="primary-action"
@@ -396,7 +534,7 @@
               {/if}
               {#if pkg.tags?.length}
                 <div class="tag-list">
-                  {#each pkg.tags as tag}
+                  {#each pkg.tags as tag (tag)}
                     <span>{tag}</span>
                   {/each}
                 </div>
@@ -454,6 +592,28 @@
 </div>
 
 <style>
+  .registry-controls { display: flex; gap: 0.5rem; }
+  .registry-controls input { min-width: 0; flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+  .hub-error { color: var(--danger, #ef6464); }
+
+  .component-index-status {
+    height: 4.5rem;
+    min-height: 4.5rem;
+    flex-shrink: 0;
+    overflow: auto;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.5rem 1rem;
+    box-sizing: border-box;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.75rem;
+  }
+  .index-message { flex: 1; min-width: 0; }
+  .component-index-status > button { flex-shrink: 0; position: sticky; top: 0; }
+  .component-index-status pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.25rem 0; }
+  .component-index-status .error-state { padding: 0; border: 0; }
+
   .library-panel {
     container-type: inline-size;
     display: flex;

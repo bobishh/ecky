@@ -410,6 +410,7 @@ pub fn accepted_brep_candidate_to_component_package(
     )?;
 
     let package = ComponentPackage {
+        cairn: None,
         schema_version: COMPONENT_PACKAGE_SCHEMA_VERSION,
         package_id: request.package_id,
         version: request.version,

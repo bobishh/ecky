@@ -63,6 +63,9 @@ fn opt_int<T: Into<i64> + Copy>(value: Option<T>) -> SteelDataValue {
 
 pub fn encode_config(config: &Config) -> AppResult<SteelDataValue> {
     config.jev_classifier.validate()?;
+    if let Some(cairn) = &config.cairn {
+        super::validate_cairn_registry(&cairn.registry_url)?;
+    }
     unique_ids(config.engines.iter().map(|x| x.id.as_str()), "engines")?;
     unique_ids(config.assets.iter().map(|x| x.id.as_str()), "assets")?;
     unique_ids(
@@ -82,6 +85,19 @@ pub fn encode_config(config: &Config) -> AppResult<SteelDataValue> {
     Ok(map(vec![
         ("schema", key(SCHEMA)),
         ("version", SteelDataValue::Integer(1)),
+        (
+            "cairn",
+            config
+                .cairn
+                .as_ref()
+                .map(|cairn| {
+                    map(vec![(
+                        "registry-url",
+                        SteelDataValue::String(cairn.registry_url.clone()),
+                    )])
+                })
+                .unwrap_or(SteelDataValue::Nil),
+        ),
         (
             "engines",
             SteelDataValue::Vector(config.engines.iter().map(encode_engine).collect()),
@@ -407,6 +423,7 @@ pub fn decode_config(value: &SteelDataValue) -> AppResult<Config> {
             "connection-type",
             "provider-models",
             "jev-classifier",
+            "cairn",
             "default-engine-kind",
             "default-source-language",
             "default-geometry-backend",
@@ -424,6 +441,16 @@ pub fn decode_config(value: &SteelDataValue) -> AppResult<Config> {
         .transpose()?
         .unwrap_or_default();
     let config = Config {
+        cairn: root
+            .optional("cairn")
+            .filter(|value| !matches!(value, SteelDataValue::Nil))
+            .map(|value| -> AppResult<super::CairnConfig> {
+                let fields = Fields::new(value, "cairn", &["registry-url"])?;
+                let registry_url = string(fields.required("registry-url")?, "cairn.registry-url")?;
+                super::validate_cairn_registry(&registry_url)?;
+                Ok(super::CairnConfig { registry_url })
+            })
+            .transpose()?,
         engines,
         selected_engine_id: string(root.required("selected-engine-id")?, "selected-engine-id")?,
         freecad_cmd: root
@@ -939,6 +966,7 @@ mod tests {
     use super::*;
     fn minimum() -> Config {
         Config {
+            cairn: None,
             engines: vec![],
             selected_engine_id: "selected".into(),
             freecad_cmd: String::new(),

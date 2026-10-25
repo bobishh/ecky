@@ -612,9 +612,101 @@ fn decode_lock_entry(value: &SteelDataValue) -> AppResult<ComponentDependencyLoc
     })
 }
 
+fn encode_cairn_dependency(dependency: &crate::contracts::CairnDependency) -> SteelDataValue {
+    edn_map(vec![
+        (
+            "package-id",
+            SteelDataValue::String(dependency.package_id.clone()),
+        ),
+        (
+            "version",
+            SteelDataValue::String(dependency.version.clone()),
+        ),
+    ])
+}
+fn decode_cairn_dependency(value: &SteelDataValue) -> AppResult<crate::contracts::CairnDependency> {
+    let entries = edn_entries(value, "Cairn dependency")?;
+    Ok(crate::contracts::CairnDependency {
+        package_id: edn_string(entries, "package-id", "Cairn dependency")?,
+        version: edn_string(entries, "version", "Cairn dependency")?,
+    })
+}
+fn cairn_vector<T>(
+    entries: &[(String, SteelDataValue)],
+    key: &str,
+    decode: impl Fn(&SteelDataValue) -> AppResult<T>,
+) -> AppResult<Vec<T>> {
+    match edn_get(entries, key, "Cairn lock")? {
+        SteelDataValue::Vector(values) => values.iter().map(decode).collect(),
+        _ => Err(AppError::parse(format!("Cairn {key} must be a vector"))),
+    }
+}
+fn encode_cairn_lock(lock: &crate::contracts::CairnLock) -> SteelDataValue {
+    edn_map(vec![
+        ("registry", SteelDataValue::String(lock.registry.clone())),
+        (
+            "roots",
+            SteelDataValue::Vector(lock.roots.iter().map(encode_cairn_dependency).collect()),
+        ),
+        (
+            "releases",
+            SteelDataValue::Vector(
+                lock.releases
+                    .iter()
+                    .map(|release| {
+                        edn_map(vec![
+                            (
+                                "package-id",
+                                SteelDataValue::String(release.package_id.clone()),
+                            ),
+                            ("version", SteelDataValue::String(release.version.clone())),
+                            (
+                                "package-digest",
+                                SteelDataValue::String(release.package_digest.clone()),
+                            ),
+                            (
+                                "archive-digest",
+                                SteelDataValue::String(release.archive_digest.clone()),
+                            ),
+                            (
+                                "dependencies",
+                                SteelDataValue::Vector(
+                                    release
+                                        .dependencies
+                                        .iter()
+                                        .map(encode_cairn_dependency)
+                                        .collect(),
+                                ),
+                            ),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+    ])
+}
+fn decode_cairn_lock(value: &SteelDataValue) -> AppResult<crate::contracts::CairnLock> {
+    let entries = edn_entries(value, "Cairn lock")?;
+    let releases = cairn_vector(entries, "releases", |value| {
+        let fields = edn_entries(value, "Cairn release")?;
+        Ok(crate::contracts::CairnLockedRelease {
+            package_id: edn_string(fields, "package-id", "Cairn release")?,
+            version: edn_string(fields, "version", "Cairn release")?,
+            package_digest: edn_string(fields, "package-digest", "Cairn release")?,
+            archive_digest: edn_string(fields, "archive-digest", "Cairn release")?,
+            dependencies: cairn_vector(fields, "dependencies", decode_cairn_dependency)?,
+        })
+    })?;
+    Ok(crate::contracts::CairnLock {
+        registry: edn_string(entries, "registry", "Cairn lock")?,
+        roots: cairn_vector(entries, "roots", decode_cairn_dependency)?,
+        releases,
+    })
+}
+
 fn encode_component_dependency_lock(lock: &ComponentDependencyLock) -> SteelDataValue {
     let canonical = lock.clone().canonical();
-    edn_map(vec![
+    let mut entries = vec![
         (
             "schema-version",
             SteelDataValue::Integer(i64::from(canonical.schema_version)),
@@ -629,7 +721,11 @@ fn encode_component_dependency_lock(lock: &ComponentDependencyLock) -> SteelData
                     .collect(),
             ),
         ),
-    ])
+    ];
+    if let Some(cairn) = &canonical.cairn {
+        entries.push(("cairn", encode_cairn_lock(cairn)));
+    }
+    edn_map(entries)
 }
 
 fn decode_component_dependency_lock(value: &SteelDataValue) -> AppResult<ComponentDependencyLock> {
@@ -646,6 +742,11 @@ fn decode_component_dependency_lock(value: &SteelDataValue) -> AppResult<Compone
         }
     };
     Ok(ComponentDependencyLock {
+        cairn: entries
+            .iter()
+            .find(|(key, _)| key.trim_start_matches(':') == "cairn")
+            .map(|(_, value)| decode_cairn_lock(value))
+            .transpose()?,
         schema_version: edn_u32(entries, "schema-version", "component dependency lock")
             .unwrap_or(COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION),
         dependencies,
@@ -755,20 +856,7 @@ impl PortablePayloadStorage for GlobalComponentPayloadStorage<'_> {
 
 fn dependency_payload_digests(lock: &ComponentDependencyLock) -> AppResult<Vec<String>> {
     lock.validate()?;
-    let canonical = lock.clone().canonical();
-    let mut digests = Vec::with_capacity(canonical.dependencies.len());
-    for dependency in canonical.dependencies {
-        if dependency.package_digest.trim().is_empty() {
-            return Err(AppError::validation(format!(
-                "Dependency lock entry '{}@{}' has an empty package digest.",
-                dependency.package_id, dependency.version
-            )));
-        }
-        digests.push(dependency.package_digest);
-    }
-    digests.sort();
-    digests.dedup();
-    Ok(digests)
+    Ok(lock.package_digests().into_iter().collect())
 }
 
 fn portable_payload_path(dir: &Path, package_digest: &str) -> AppResult<PathBuf> {
@@ -1186,6 +1274,7 @@ mod tests {
         )
         .expect("project export");
         let lock = ComponentDependencyLock {
+            cairn: None,
             schema_version: COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
             dependencies: vec![ComponentDependencyLockEntry {
                 package_id: "bike.kit".to_string(),
@@ -1276,6 +1365,7 @@ mod tests {
         let payload = validate_payload_archive(&payload_bytes).expect("valid payload");
         let (digest, _) = compute_package_payload_digest(&payload);
         let lock = ComponentDependencyLock {
+            cairn: None,
             schema_version: 1,
             dependencies: vec![crate::contracts::ComponentDependencyLockEntry {
                 package_id: "bike.kit".to_string(),
@@ -1358,6 +1448,7 @@ mod tests {
             .publish_validated_payload(&digest, &payload, inventory)
             .expect("seed source CAS");
         let lock = ComponentDependencyLock {
+            cairn: None,
             schema_version: crate::contracts::COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
             dependencies: vec![crate::contracts::ComponentDependencyLockEntry {
                 package_id: "fixture.portable".to_string(),

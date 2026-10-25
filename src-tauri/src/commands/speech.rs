@@ -366,6 +366,7 @@ mod tests {
 
     fn config(engines: Vec<Engine>, selected_engine_id: &str) -> Config {
         Config {
+            cairn: None,
             engines,
             selected_engine_id: selected_engine_id.to_string(),
             freecad_cmd: String::new(),

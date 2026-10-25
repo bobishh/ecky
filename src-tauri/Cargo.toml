@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ecky-render", "crates/ecky-fem", "crates/ecky-accelerate-sparse"]
+members = [".", "crates/ecky-render", "crates/ecky-fem", "crates/ecky-accelerate-sparse", "crates/cairn-registry"]
 resolver = "2"
 
 [package]
@@ -20,6 +20,7 @@ tooling = []
 tauri-build = { version = "2.0", features = [] }
 
 [dependencies]
+cairn-registry = { path = "crates/cairn-registry", features = ["specta"] }
 tauri = { version = "2.0", features = ["protocol-asset"] }
 tauri-plugin-shell = "2.0"
 tauri-plugin-dialog = "2.0"
@@ -96,6 +97,11 @@ path = "src/bin/ecky.rs"
 required-features = ["cli"]
 
 [[bin]]
+name = "cairn"
+path = "src/bin/cairn.rs"
+required-features = ["cli"]
+
+[[bin]]
 name = "migrate_history_payloads"
 path = "src/bin/migrate_history_payloads.rs"
 required-features = ["tooling"]
@@ -153,3 +159,8 @@ opt-level = 3
 
 [profile.dev.package.ecky-accelerate-sparse]
 opt-level = 3
+
+[[bin]]
+name = "export_cairn_catalog"
+path = "src/bin/export_cairn_catalog.rs"
+required-features = ["tooling"]

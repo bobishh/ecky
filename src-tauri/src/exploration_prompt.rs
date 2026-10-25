@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 
-pub const STATIC_PROMPT_VERSION: &str = "exploration-cycle-v1";
+pub const STATIC_PROMPT_VERSION: &str = "exploration-cycle-v2";
 pub const STATIC_GUIDANCE: &str = "EXPLORATION CONTROLLER\n\
 Use four controller phases: PLAN, BUILD, VERIFY, DECIDE. These are state-machine\n\
 phases, not a required number of model calls. PLAN selects one bounded next\n\

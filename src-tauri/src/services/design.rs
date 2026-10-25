@@ -321,13 +321,7 @@ pub async fn add_manual_version(
         )?;
         if status == MessageStatus::Success && artifact_bundle.is_some() {
             if let Err(error) =
-                crate::component_package_runtime::capture_latest_successful_components(
-                    app,
-                    &db,
-                    &thread_id,
-                    &existing.id,
-                    &output.macro_code,
-                )
+                crate::services::library_panel::schedule_component_recovery(app, state)
             {
                 state.push_log(format!(
                     "Component capture failed for version {}: {error}",
@@ -379,16 +373,8 @@ pub async fn add_manual_version(
         Some(&msg_id),
     )?;
     if msg.status == MessageStatus::Success && artifact_bundle.is_some() {
-        if let Err(error) = crate::component_package_runtime::capture_latest_successful_components(
-            app,
-            &db,
-            &thread_id,
-            &msg_id,
-            &msg.output
-                .as_ref()
-                .expect("manual version has output")
-                .macro_code,
-        ) {
+        if let Err(error) = crate::services::library_panel::schedule_component_recovery(app, state)
+        {
             state.push_log(format!(
                 "Component capture failed for version {msg_id}: {error}"
             ));
@@ -583,6 +569,7 @@ params = {
 
     fn test_config() -> crate::contracts::Config {
         crate::contracts::Config {
+            cairn: None,
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),

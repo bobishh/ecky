@@ -1003,6 +1003,8 @@ pub struct AssemblyDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ComponentPackage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cairn: Option<super::CairnDistribution>,
     #[serde(default = "default_component_package_schema_version")]
     pub schema_version: u32,
     pub package_id: String,
@@ -1024,6 +1026,8 @@ pub struct ComponentPackage {
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ComponentPackageHeader {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cairn: Option<super::CairnDistribution>,
     pub schema_version: u32,
     pub package_id: String,
     pub version: String,
@@ -1321,6 +1325,8 @@ pub struct ComponentDependencyLockEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ComponentDependencyLock {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cairn: Option<super::CairnLock>,
     #[serde(default = "default_component_dependency_lock_schema_version")]
     pub schema_version: u32,
     #[serde(default)]
@@ -1332,6 +1338,18 @@ fn default_component_dependency_lock_schema_version() -> u32 {
 }
 
 impl ComponentDependencyLock {
+    pub fn package_digests(&self) -> std::collections::BTreeSet<String> {
+        self.dependencies
+            .iter()
+            .map(|entry| entry.package_digest.clone())
+            .chain(self.cairn.iter().flat_map(|cairn| {
+                cairn
+                    .releases
+                    .iter()
+                    .map(|release| release.package_digest.clone())
+            }))
+            .collect()
+    }
     /// Returns a canonically-ordered copy (dependencies by `(packageId,
     /// version)`, components by `componentId`). Equal inputs always produce
     /// byte-identical canonical lock bytes and therefore equal digests.
@@ -1350,6 +1368,7 @@ impl ComponentDependencyLock {
         Self {
             schema_version: self.schema_version,
             dependencies,
+            cairn: self.cairn.map(super::CairnLock::canonical),
         }
     }
 
@@ -1366,6 +1385,20 @@ impl ComponentDependencyLock {
     /// version input. Ordering is normalized separately; duplicate coordinates
     /// or components are ambiguous and therefore never canonicalized away.
     pub fn validate(&self) -> crate::contracts::AppResult<()> {
+        if let Some(cairn) = &self.cairn {
+            cairn.validate()?;
+            for dependency in &self.dependencies {
+                if !cairn.releases.iter().any(|release| {
+                    release.package_id == dependency.package_id
+                        && release.version == dependency.version
+                        && release.package_digest == dependency.package_digest
+                }) {
+                    return Err(super::AppError::validation(
+                        "Imported component is outside the pinned Cairn package graph",
+                    ));
+                }
+            }
+        }
         if self.schema_version != COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION {
             return Err(crate::contracts::AppError::validation(format!(
                 "Unsupported component dependency lock schemaVersion '{}'.",
@@ -1637,6 +1670,7 @@ mod component_import_contract_tests {
     fn sample_lock_shuffled() -> ComponentDependencyLock {
         // Deliberately out of canonical order.
         ComponentDependencyLock {
+            cairn: None,
             schema_version: COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
             dependencies: vec![
                 lock_entry(
@@ -1742,6 +1776,7 @@ mod component_import_contract_tests {
 
         let step_digest = format!("sha256:{}", "b".repeat(64));
         let lock = ComponentDependencyLock {
+            cairn: None,
             schema_version: COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
             dependencies: vec![lock_entry(
                 "fixture.step",

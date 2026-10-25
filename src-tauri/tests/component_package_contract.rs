@@ -190,6 +190,7 @@ fn sample_mate_type() -> MateTypeDefinition {
 
 fn sample_package() -> ComponentPackage {
     ComponentPackage {
+        cairn: None,
         schema_version: COMPONENT_PACKAGE_SCHEMA_VERSION,
         package_id: "bike.bottle-holder-kit".to_string(),
         version: "0.1.0".to_string(),
@@ -350,6 +351,7 @@ fn write_parametric_component_source(
 
 fn test_config() -> Config {
     Config {
+        cairn: None,
         engines: Vec::new(),
         selected_engine_id: String::new(),
         freecad_cmd: String::new(),
@@ -1053,6 +1055,7 @@ async fn resolve_installed_component_controls_merges_package_initial_params_with
     write_component_package_manifest(
         &project_dir,
         &ComponentPackage {
+            cairn: None,
             schema_version: COMPONENT_PACKAGE_SCHEMA_VERSION,
             package_id: "generated.parametric-body-kit".to_string(),
             version: "0.1.0".to_string(),
@@ -1251,6 +1254,7 @@ async fn render_installed_component_source_merges_package_initial_params_with_ov
     write_component_package_manifest(
         &project_dir,
         &ComponentPackage {
+            cairn: None,
             schema_version: COMPONENT_PACKAGE_SCHEMA_VERSION,
             package_id: "generated.parametric-body-kit".to_string(),
             version: "0.1.0".to_string(),
@@ -2233,6 +2237,7 @@ async fn resolve_installed_component_source_backfills_params_from_source_when_ma
     write_component_package_manifest(
         &project_dir,
         &ComponentPackage {
+            cairn: None,
             schema_version: COMPONENT_PACKAGE_SCHEMA_VERSION,
             package_id: "generated.legacy-parametric".to_string(),
             version: "0.1.0".to_string(),

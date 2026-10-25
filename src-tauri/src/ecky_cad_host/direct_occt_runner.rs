@@ -3487,6 +3487,7 @@ mod tests {
         );
         let state = crate::models::AppState::new(
             crate::contracts::Config {
+                cairn: None,
                 engines: Vec::new(),
                 selected_engine_id: String::new(),
                 freecad_cmd: forbidden_freecad.to_string_lossy().to_string(),

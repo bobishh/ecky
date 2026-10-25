@@ -20,6 +20,24 @@ pub struct LatestSuccessfulTarget {
     pub message_id: String,
 }
 
+pub fn is_latest_successful_component_capture(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: &str,
+) -> SqlResult<bool> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT m.id FROM messages m JOIN threads t ON t.id=m.thread_id
+         WHERE m.thread_id=?1 AND t.deleted_at IS NULL AND m.deleted_at IS NULL
+           AND m.role='assistant' AND m.status='success' AND m.output IS NOT NULL
+           AND m.artifact_bundle IS NOT NULL ORDER BY m.timestamp DESC, m.rowid DESC LIMIT 1",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(latest.as_deref() == Some(message_id))
+}
+
 pub fn latest_successful_component_capture_targets(
     conn: &Connection,
 ) -> SqlResult<Vec<LatestSuccessfulTarget>> {
@@ -3045,6 +3063,80 @@ pub fn get_version_source(
     .optional()
 }
 
+pub struct ComponentCaptureInput {
+    pub source: String,
+    pub lock: Option<crate::contracts::ComponentDependencyLock>,
+    pub source_language: crate::contracts::SourceLanguage,
+    pub geometry_backend: crate::contracts::GeometryBackend,
+}
+
+/// Compact authoring settings retain legacy provenance without decoding geometry.
+pub fn get_component_capture_settings(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: &str,
+) -> SqlResult<(
+    crate::contracts::SourceLanguage,
+    crate::contracts::GeometryBackend,
+)> {
+    let (language,backend):(String,String)=conn.query_row(
+        "SELECT COALESCE(json_extract(output,'$.sourceLanguage'),CASE json_extract(output,'$.macroDialect') WHEN 'ecky' THEN 'ecky' WHEN 'eckyIrV0' THEN 'ecky' WHEN 'build123d' THEN 'build123d' ELSE 'legacyPython' END),
+         COALESCE(json_extract(output,'$.geometryBackend'),CASE COALESCE(json_extract(output,'$.sourceLanguage'),json_extract(output,'$.macroDialect')) WHEN 'ecky' THEN 'mesh' WHEN 'eckyIrV0' THEN 'mesh' WHEN 'ecky_ir_v0' THEN 'mesh' WHEN 'build123d' THEN 'build123d' ELSE 'freecad' END)
+         FROM messages WHERE thread_id=?1 AND id=?2 AND deleted_at IS NULL",
+        params![thread_id,message_id],|row|Ok((row.get(0)?,row.get(1)?)))?;
+    Ok((
+        serde_json::from_value(serde_json::Value::String(language))
+            .map_err(sqlite_conversion_error)?,
+        serde_json::from_value(serde_json::Value::String(backend))
+            .map_err(sqlite_conversion_error)?,
+    ))
+}
+
+/// Read only source, committed lock and authoring settings; never hydrate dense geometry.
+pub fn get_component_capture_input(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: &str,
+) -> SqlResult<Option<ComponentCaptureInput>> {
+    let Some((source, _)) = get_version_source(conn, thread_id, message_id)? else {
+        return Ok(None);
+    };
+    let (source_language, geometry_backend) =
+        get_component_capture_settings(conn, thread_id, message_id)?;
+    Ok(Some(ComponentCaptureInput {
+        source,
+        lock: get_version_component_lock(conn, thread_id, message_id)?,
+        source_language,
+        geometry_backend,
+    }))
+}
+
+pub fn get_version_component_lock(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: &str,
+) -> SqlResult<Option<crate::contracts::ComponentDependencyLock>> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LockProjection {
+        component_dependency_lock: Option<crate::contracts::ComponentDependencyLock>,
+    }
+    let blob: Option<Vec<u8>> = conn.query_row(
+        "SELECT CAST(artifact_bundle AS BLOB) FROM messages WHERE thread_id=?1 AND id=?2 AND deleted_at IS NULL",
+        params![thread_id, message_id], |row| row.get(0),
+    ).optional()?.flatten();
+    blob.map(|bytes| {
+        let projection: LockProjection = if bytes.starts_with(PAYLOAD_CODEC_MAGIC) {
+            decode_payload(&bytes)?
+        } else {
+            serde_json::from_slice(&bytes).map_err(sqlite_conversion_error)?
+        };
+        Ok(projection.component_dependency_lock)
+    })
+    .transpose()
+    .map(Option::flatten)
+}
+
 pub fn get_dense_topology_json_page(
     conn: &Connection,
     thread_id: &str,
@@ -4446,9 +4538,7 @@ pub fn component_dependency_package_digests(
             continue;
         };
         if let Some(lock) = bundle.component_dependency_lock {
-            for dependency in lock.dependencies {
-                roots.insert(dependency.package_digest);
-            }
+            roots.extend(lock.package_digests());
         }
     }
     Ok(roots)
@@ -5763,6 +5853,7 @@ mod tests {
     ) -> ArtifactBundle {
         let mut bundle = sample_artifact_bundle(model_id);
         let lock = ComponentDependencyLock {
+            cairn: None,
             schema_version: crate::contracts::COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
             dependencies: vec![ComponentDependencyLockEntry {
                 package_id: "fixture.live".to_string(),

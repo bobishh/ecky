@@ -1,0 +1,8 @@
+; Faceted stone with named dimensions; reusable as terrain or a game token.
+(define-component stone
+  ((number width 24) (number depth 18) (number height 12))
+  (scale width depth height
+    (polyhedron
+      :vertices ((0 0 0.5) (0 0 -0.5) (0.5 0 0) (0 0.5 0) (-0.5 0 0) (0 -0.5 0))
+      :triangles ((0 2 3) (0 3 4) (0 4 5) (0 5 2)
+                  (1 3 2) (1 4 3) (1 5 4) (1 2 5)))))

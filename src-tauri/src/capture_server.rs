@@ -823,6 +823,7 @@ mod tests {
 
     fn test_state() -> AppState {
         let config = Config {
+            cairn: None,
             engines: vec![],
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),

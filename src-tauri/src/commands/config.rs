@@ -436,6 +436,7 @@ mod tests {
 
     fn config(selected: &str) -> Config {
         Config {
+            cairn: None,
             engines: vec![],
             selected_engine_id: selected.into(),
             freecad_cmd: String::new(),

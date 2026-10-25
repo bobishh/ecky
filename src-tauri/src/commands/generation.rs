@@ -979,11 +979,19 @@ pub(crate) async fn generate_design_core(
     // content-free telemetry recorded after dispatch through the existing
     // profiler/session-activity path. The rendered user content is byte-
     // identical; this is the only generation-assembly hook telemetry needs.
-    let generation_payload = crate::context::assemble_generation_payload(
+    let catalog_context = if source_language == crate::contracts::SourceLanguage::EckyIrV0 {
+        crate::catalog::plan_context(app, &prompt, geometry_backend.as_str()).unwrap_or_else(|error| {
+            format!("CATALOG RETRIEVAL UNAVAILABLE: {error}. State noSuitableMatch only after reporting this retrieval failure; inspect existing pinned references.")
+        })
+    } else {
+        String::new()
+    };
+    let generation_payload = crate::context::assemble_generation_payload_with_catalog(
         &ctx,
         &prompt,
         intent_mode,
         target_authoring,
+        &catalog_context,
     )
     .map_err(|budget_err| {
         AppError::with_details(
@@ -1573,21 +1581,13 @@ pub(crate) async fn finalize_generation_core(
 
     if status == FinalizeStatus::Success {
         if let Some(thread_id) = thread_id {
-            if artifact_bundle.is_some() {
-                if let Some(design) = design.as_ref() {
-                    if let Err(error) =
-                        crate::component_package_runtime::capture_latest_successful_components(
-                            app,
-                            &db,
-                            &thread_id,
-                            &message_id,
-                            &design.macro_code,
-                        )
-                    {
-                        state.push_log(format!(
-                            "Component capture failed for version {message_id}: {error}"
-                        ));
-                    }
+            if artifact_bundle.is_some() && design.is_some() {
+                if let Err(error) =
+                    crate::services::library_panel::schedule_component_recovery(app, state)
+                {
+                    state.push_log(format!(
+                        "Component capture failed for version {message_id}: {error}"
+                    ));
                 }
             }
             let title = design
@@ -1949,6 +1949,7 @@ mod tests {
 
     fn test_config() -> Config {
         Config {
+            cairn: None,
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),

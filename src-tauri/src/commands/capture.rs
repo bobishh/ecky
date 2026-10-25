@@ -696,6 +696,7 @@ mod guided_tests {
 
     fn test_config() -> crate::contracts::Config {
         crate::contracts::Config {
+            cairn: None,
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),

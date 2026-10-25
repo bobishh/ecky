@@ -31,14 +31,17 @@
     "test:component": "vitest run",
     "test:rust:clean": "bash scripts/test_rust_and_clean.sh",
     "clean:rust-artifacts": "cargo clean --manifest-path src-tauri/Cargo.toml -p ecky_cad -p ecky-fem",
-    "test:e2e:ci": "playwright test e2e/app.spec.ts e2e/config.spec.ts e2e/layout.spec.ts e2e/genie.spec.ts e2e/params.spec.ts",
+    "test:e2e:ci": "playwright test e2e/app.spec.ts e2e/config.spec.ts e2e/layout.spec.ts e2e/genie.spec.ts e2e/params.spec.ts e2e/component-packages.spec.ts",
     "test:e2e": "playwright test",
     "test:editors": "node scripts/test_editor_support.mjs && emacs -Q --batch -L editors/emacs -l editors/emacs/test-ecky-mode.el",
     "start": "tsx server/index.ts",
     "prepare": "git config core.hooksPath .githooks",
     "build:docs-site": "tsx scripts/build_ecky_ir_docs_site.ts",
     "prebuild": "npm run build:book",
-    "build:farm-assets": "node scripts/render_farm_assets.mjs"
+    "build:farm-assets": "node scripts/render_farm_assets.mjs",
+    "build:hub": "vite build --config sites/hub/vite.config.ts",
+    "test:hub": "playwright test --config sites/hub/playwright.config.ts",
+    "check:hub": "svelte-check --workspace sites/hub --tsconfig ./tsconfig.json"
   },
   "dependencies": {
     "@codemirror/lang-python": "^6.2.1",

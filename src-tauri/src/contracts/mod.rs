@@ -37,6 +37,8 @@ pub use verify::{
     VerifierSource, VerifierStatus, VisualIssue, VisualIssueCategory, VisualVerificationResult,
 };
 
+mod cairn;
+pub use cairn::*;
 mod component;
 pub use component::*;
 mod render;
@@ -2195,6 +2197,9 @@ pub fn validate_model_runtime_bundle(
 }
 
 pub fn validate_component_package(package: &ComponentPackage) -> AppResult<()> {
+    if let Some(cairn) = &package.cairn {
+        crate::contracts::validate_cairn_dependencies(&cairn.dependencies)?;
+    }
     if package.schema_version == 0 {
         return Err(AppError::validation(
             "component package schemaVersion must be greater than 0.",
@@ -2245,7 +2250,7 @@ pub fn validate_component_package(package: &ComponentPackage) -> AppResult<()> {
         mate_types_by_id.insert(mate_type.type_id.as_str(), mate_type);
     }
 
-    if package.components.is_empty() {
+    if package.components.is_empty() && package.cairn.is_none() {
         return Err(AppError::validation(
             "component package must include at least one component.",
         ));
@@ -2281,6 +2286,7 @@ pub fn validate_component_package(package: &ComponentPackage) -> AppResult<()> {
 pub fn component_package_header(package: &ComponentPackage) -> AppResult<ComponentPackageHeader> {
     validate_component_package(package)?;
     Ok(ComponentPackageHeader {
+        cairn: package.cairn.clone(),
         schema_version: package.schema_version,
         package_id: package.package_id.clone(),
         version: package.version.clone(),

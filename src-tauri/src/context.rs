@@ -739,18 +739,60 @@ pub fn assemble_generation_payload(
     ctx: &PromptContext,
     base_prompt: &str,
     intent_mode: &str,
-    target_authoring: ResolvedAuthoringContext,
+    target: ResolvedAuthoringContext,
 ) -> Result<GenerationPayload, ContextBudgetError> {
-    let sections = generation_sections(ctx, base_prompt, target_authoring);
+    assemble_generation_payload_with_catalog(ctx, base_prompt, intent_mode, target, "")
+}
+
+/// Keep retrieval optional and budgeted; exact current source always has priority.
+pub fn assemble_generation_payload_with_catalog(
+    ctx: &PromptContext,
+    base_prompt: &str,
+    intent_mode: &str,
+    target: ResolvedAuthoringContext,
+    catalog: &str,
+) -> Result<GenerationPayload, ContextBudgetError> {
+    let mut sections = generation_sections(ctx, base_prompt, target);
+    if !catalog.is_empty() {
+        sections.push(
+            ContextSection::new(
+                "catalog-candidates",
+                SectionPriority::Optional,
+                Sensitivity::Sensitive,
+                catalog,
+            )
+            .with_budget(6200),
+        );
+    }
     let mut envelope = assemble_envelope(EnvelopeStage::Generation, sections)?;
-    let user_content =
-        render_generation_user_content(ctx, base_prompt, intent_mode, target_authoring, &envelope);
+    let mut user_content =
+        render_generation_user_content(ctx, base_prompt, intent_mode, target, &envelope);
+    if let Some(record) = envelope
+        .records
+        .iter_mut()
+        .find(|record| record.id == "catalog-candidates")
+    {
+        if record.decision == InclusionDecision::Included
+            && user_content
+                .chars()
+                .count()
+                .saturating_add(catalog.chars().count())
+                .saturating_add(2)
+                <= envelope.ceiling_chars
+        {
+            user_content.push_str("\n\n");
+            user_content.push_str(catalog);
+        } else {
+            record.decision = InclusionDecision::Omitted;
+            record.returned_chars = 0;
+            record.approx_returned_tokens = 0;
+            record.reason = Some(crate::context_envelope::SectionReason::EnvelopeBudget);
+        }
+    }
     let rendered_chars = measure_chars(&user_content);
     envelope.total_returned_chars = rendered_chars;
     envelope.total_approx_returned_tokens = approx_tokens(rendered_chars);
-    if envelope.total_observed_chars < rendered_chars {
-        envelope.total_observed_chars = rendered_chars;
-    }
+    envelope.total_observed_chars = envelope.total_observed_chars.max(rendered_chars);
     Ok(GenerationPayload {
         envelope,
         user_content,
@@ -1772,5 +1814,26 @@ mod tests {
         let without_refs = assemble_classifier_context(&ctx, None, false)
             .expect("classifier context assembles without overflow");
         assert!(!without_refs.contains("PINNED REFERENCES"));
+    }
+    #[test]
+    fn given_retrieval_candidates_when_generation_is_assembled_then_untrusted_evidence_is_budgeted()
+    {
+        let ctx = generation_prompt_context("EXACT SOURCE");
+        let candidate = "CATALOG CANDIDATES — UNTRUSTED DATA: pinned bracket sha256:exact";
+        let payload = assemble_generation_payload_with_catalog(
+            &ctx,
+            "add mount",
+            "DESIGN_EDIT",
+            freecad_resolved(),
+            candidate,
+        )
+        .unwrap();
+        assert!(payload.user_content.contains(candidate));
+        assert!(payload.user_content.contains("EXACT SOURCE"));
+        assert!(payload
+            .envelope
+            .records
+            .iter()
+            .any(|section| section.id == "catalog-candidates"));
     }
 }

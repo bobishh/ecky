@@ -86,6 +86,11 @@ Settings are stored in the platform app-config directory as `config.edn`. The ol
 
 ### Command line
 
+Cairn adds indexed component/model discovery, exact package installation and a
+self-hostable registry at [Ecky Hub](https://hub.ecky-cad.com/). See the
+[Cairn guide](docs/cairn.md) for CLI installation, manifests, frozen/offline
+locks, MCP retrieval and Docker/Podman deployment.
+
 The repository also includes an `ecky` CLI for checking and rendering source. After preparing the runtimes, build it from the repository root:
 
 ```bash

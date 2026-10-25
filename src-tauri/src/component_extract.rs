@@ -20,7 +20,7 @@ use crate::ecky_scheme::compiler::{
     collect_free_variables, expr_head_name, expr_identifier, expr_list_items,
 };
 
-/// Captures only authored top-level `define-component` forms. The stored source
+/// Captures authored `define-component` forms at top level and in model clauses. The stored source
 /// includes each component's transitive local definitions in deterministic
 /// order so a library entry remains vendorable after the model changes.
 #[derive(Clone)]
@@ -37,9 +37,20 @@ pub fn extract_defined_components(
     thread_id: &str,
     message_id: &str,
 ) -> AppResult<Vec<ExtractedComponent>> {
+    extract_definition_outcomes(source, thread_id, message_id)?
+        .into_iter()
+        .collect()
+}
+
+fn extract_definition_outcomes(
+    source: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> AppResult<Vec<AppResult<ExtractedComponent>>> {
     let Ok(forms) = Parser::parse_without_lowering(source) else {
         return Ok(Vec::new());
     };
+    let forms = authored_definitions(&forms);
     let top_level_names = forms
         .iter()
         .filter_map(|form| {
@@ -203,55 +214,76 @@ pub fn extract_defined_components(
         if !definition.is_component {
             continue;
         }
-        let mut ordered = Vec::new();
-        visit_dependencies(
-            name,
-            &definitions,
-            &mut BTreeSet::new(),
-            &mut BTreeSet::new(),
-            &mut ordered,
-        )?;
-        let dependencies = ordered
-            .iter()
-            .filter(|dependency| *dependency != name)
-            .cloned()
-            .collect::<Vec<_>>();
-        let component_source = ordered
-            .iter()
-            .filter_map(|dependency| definitions.get(dependency).map(|item| item.form.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let revision_digest = format!("sha256:{:x}", Sha256::digest(component_source.as_bytes()));
-        let component_id = format!(
-            "local-{:x}",
-            Sha256::digest(format!("{thread_id}\0{name}").as_bytes())
-        );
-        let params = definition.params.clone();
-        let header = ComponentHeader {
-            schema_version: 1,
-            name: name.clone(),
-            component_id: Some(component_id),
-            revision_digest: Some(revision_digest.clone()),
-            dependencies,
-            description: None,
-            params,
-            tags: Vec::new(),
-            provenance: ComponentProvenance {
-                project_id: None,
-                thread_id: Some(thread_id.to_string()),
-                message_id: Some(message_id.to_string()),
-                source_digest: revision_digest,
-            },
-            interfaces: Vec::new(),
-            ports: definition.ports.clone(),
-        };
-        output.push(ExtractedComponent {
-            name: name.clone(),
-            component_source,
-            header,
-        });
+        let outcome = (|| -> AppResult<ExtractedComponent> {
+            let mut ordered = Vec::new();
+            visit_dependencies(
+                name,
+                &definitions,
+                &mut BTreeSet::new(),
+                &mut BTreeSet::new(),
+                &mut ordered,
+            )?;
+            let dependencies = ordered
+                .iter()
+                .filter(|dependency| *dependency != name)
+                .cloned()
+                .collect::<Vec<_>>();
+            let component_source = ordered
+                .iter()
+                .filter_map(|dependency| definitions.get(dependency).map(|item| item.form.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let revision_digest =
+                format!("sha256:{:x}", Sha256::digest(component_source.as_bytes()));
+            let component_id = format!(
+                "local-{:x}",
+                Sha256::digest(format!("{thread_id}\0{name}").as_bytes())
+            );
+            let params = definition.params.clone();
+            let header = ComponentHeader {
+                schema_version: 1,
+                name: name.clone(),
+                component_id: Some(component_id),
+                revision_digest: Some(revision_digest.clone()),
+                dependencies,
+                description: None,
+                params,
+                tags: Vec::new(),
+                provenance: ComponentProvenance {
+                    dependency_lock: None,
+                    project_id: None,
+                    thread_id: Some(thread_id.to_string()),
+                    message_id: Some(message_id.to_string()),
+                    source_digest: revision_digest,
+                },
+                interfaces: Vec::new(),
+                ports: definition.ports.clone(),
+            };
+            Ok(ExtractedComponent {
+                name: name.clone(),
+                component_source,
+                header,
+            })
+        })();
+        output.push(outcome);
     }
     Ok(output)
+}
+
+fn authored_definitions(forms: &[ExprKind]) -> Vec<ExprKind> {
+    let mut definitions = Vec::new();
+    for form in forms {
+        let Ok(items) = expr_list_items(form, "authored definition") else {
+            continue;
+        };
+        match items.first().and_then(expr_head_name).as_deref() {
+            Some("define" | "define-component") => definitions.push(form.clone()),
+            // Match the compiler's supported model-level definition scope.
+            Some("model") => definitions.extend(authored_definitions(&items[1..])),
+            _ => {}
+        }
+    }
+    definitions
 }
 
 fn visit_dependencies(
@@ -341,6 +373,8 @@ pub struct ComponentProvenance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
     pub source_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_lock: Option<crate::contracts::ComponentDependencyLock>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -406,14 +440,8 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
     let forms = Parser::parse_without_lowering(&request.source)
         .map_err(|err| AppError::parse(format!("Extraction failed to parse source: {err}")))?;
     let scan = scan_model(&forms, &request.part_key)?;
-    let local_definitions = forms
+    let local_definitions = authored_definitions(&forms)
         .iter()
-        .filter(|form| {
-            expr_list_items(form, "top-level form")
-                .ok()
-                .and_then(|items| items.first().and_then(expr_head_name))
-                .is_some_and(|head| matches!(head.as_str(), "define" | "define-component"))
-        })
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
@@ -509,12 +537,13 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
         .filter(|key| scan.relation_keys.contains(key))
         .collect();
 
-    let closed = extract_defined_components(
+    let closed = extract_definition_outcomes(
         &format!("{local_definitions}\n{component_source}"),
         request.thread_id.as_deref().unwrap_or_default(),
         request.message_id.as_deref().unwrap_or_default(),
     )?
     .into_iter()
+    .filter_map(Result::ok)
     .find(|component| component.name == name)
     .ok_or_else(|| AppError::validation("Extracted component has no reusable definition."))?;
     component_source = closed.component_source;
@@ -528,6 +557,7 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
         params: header_params,
         tags: request.tags.clone(),
         provenance: ComponentProvenance {
+            dependency_lock: None,
             project_id: None,
             thread_id: request.thread_id.clone(),
             message_id: request.message_id.clone(),
@@ -551,11 +581,19 @@ pub fn extract_rendered_components(
     thread_id: &str,
     message_id: &str,
 ) -> (Vec<ExtractedComponent>, Vec<String>) {
-    let (mut components, mut diagnostics) =
-        match extract_defined_components(source, thread_id, message_id) {
-            Ok(components) => (components, Vec::new()),
-            Err(error) => (Vec::new(), vec![error.to_string()]),
-        };
+    let mut components = Vec::new();
+    let mut diagnostics = Vec::new();
+    match extract_definition_outcomes(source, thread_id, message_id) {
+        Ok(outcomes) => {
+            for outcome in outcomes {
+                match outcome {
+                    Ok(component) => components.push(component),
+                    Err(error) => diagnostics.push(error.to_string()),
+                }
+            }
+        }
+        Err(error) => diagnostics.push(error.to_string()),
+    }
     let Ok(forms) = Parser::parse_without_lowering(source) else {
         return (components, diagnostics);
     };
@@ -627,14 +665,8 @@ fn extract_lexically_closed_part(
     for (head, bindings) in scan.part_scope_frames.iter().rev() {
         body = format!("({head} {bindings} {body})");
     }
-    let definitions = forms
+    let definitions = authored_definitions(&forms)
         .iter()
-        .filter(|form| {
-            expr_list_items(form, "top-level form")
-                .ok()
-                .and_then(|items| items.first().and_then(expr_head_name))
-                .is_some_and(|head| matches!(head.as_str(), "define" | "define-component"))
-        })
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");

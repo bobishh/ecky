@@ -472,6 +472,7 @@ pub struct AppState {
     pub last_snapshot: Arc<Mutex<Option<LastDesignSnapshot>>>,
     pub db: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     pub db_read: Option<Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
+    pub component_index_worker: Arc<crate::component_library_index::ComponentIndexWorker>,
     pub render_lock: Arc<tokio::sync::Mutex<()>>,
     geometry_render_active_count: Arc<AtomicUsize>,
     /// Active project-folder renders keyed by project slug. Snapshot source
@@ -731,6 +732,9 @@ impl AppState {
             last_snapshot: Arc::new(Mutex::new(last_snapshot)),
             db: Arc::new(tokio::sync::Mutex::new(conn)),
             db_read: read_conn.map(|conn| Arc::new(tokio::sync::Mutex::new(conn))),
+            component_index_worker: Arc::new(
+                crate::component_library_index::ComponentIndexWorker::default(),
+            ),
             render_lock: Arc::new(tokio::sync::Mutex::new(())),
             geometry_render_active_count: Arc::new(AtomicUsize::new(0)),
             project_folder_render_activity: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
@@ -1409,6 +1413,7 @@ mod tests {
 
     fn minimal_config() -> Config {
         Config {
+            cairn: None,
             engines: vec![Engine {
                 id: "test".to_string(),
                 name: "Test".to_string(),

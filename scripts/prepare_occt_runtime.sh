@@ -73,7 +73,8 @@ copy_lib_family() {
   local lib="$1"
   local found=0
   shopt -s nullglob
-  for path in "$OCCT_ROOT/lib/lib${lib}"*."$LIB_EXT"; do
+  for path in "$OCCT_ROOT/lib/lib${lib}"*."$LIB_EXT" "$OCCT_ROOT/lib/lib${lib}"*."$LIB_EXT".*; do
+    [[ -f "$path" || -L "$path" ]] || continue
     copy_library_path "$path"
     found=1
   done
@@ -178,6 +179,25 @@ if [[ "$PLATFORM" == "macos" ]]; then
     done < <(otool -L "$dylib" | tail -n +2 | awk '{print $1}')
     codesign --force --sign - "$dylib" >/dev/null 2>&1 || true
   done < <(find "$OUT_DIR/lib" -type f -name "*.${LIB_EXT}")
+fi
+
+if [[ "$PLATFORM" == "linux" ]]; then
+  # ldd resolves the complete dependency closure against the pinned SDK. Keep
+  # system libc/libstdc++ external; bundle SDK and optional TBB dependencies.
+  while :; do
+    copied=0
+    while IFS= read -r library; do
+      while IFS= read -r dependency; do
+        [[ -f "$OUT_DIR/lib/$(basename "$dependency")" ]] && continue
+        if [[ "$dependency" == "$OCCT_ROOT/lib/"* || ( -n "$TBB_ROOT" && "$dependency" == "$TBB_ROOT/lib/"* ) ]]; then
+          copy_library_path "$dependency"
+          copied=1
+        fi
+      done < <(LD_LIBRARY_PATH="$OUT_DIR/lib:$OCCT_ROOT/lib${TBB_ROOT:+:$TBB_ROOT/lib}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$library" | awk '$2 == "=>" && $3 ~ /^\// {print $3}')
+    done < <(find "$OUT_DIR/lib" -maxdepth 1 -type f -name '*.so*')
+    [[ "$copied" -eq 0 ]] && break
+    convert_runtime_symlinks
+  done
 fi
 
 for required in "${REQUIRED_HEADERS[@]}"; do

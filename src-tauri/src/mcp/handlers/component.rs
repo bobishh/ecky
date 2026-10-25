@@ -44,6 +44,7 @@ pub struct ComponentSearchToolRequest {
 pub struct ComponentSearchToolResponse {
     pub results: Vec<crate::component_package_runtime::ExtractedComponentSearchResult>,
     pub indexing_diagnostics: Vec<String>,
+    pub index_status: crate::component_library_index::ComponentIndexStatus,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -101,14 +102,11 @@ pub fn handle_component_search(
     req: ComponentSearchToolRequest,
 ) -> AppResult<ComponentSearchToolResponse> {
     let limit = req.limit.unwrap_or(20).clamp(1, 100);
-    let results = crate::component_package_runtime::search_extracted_components(
-        app,
-        req.query.as_deref().unwrap_or(""),
-        limit,
-    )?;
+    let index = crate::component_package_runtime::open_component_index(app)?;
     Ok(ComponentSearchToolResponse {
-        results,
-        indexing_diagnostics: Vec::new(),
+        results: index.search(req.query.as_deref().unwrap_or(""), limit)?,
+        indexing_diagnostics: index.diagnostics()?,
+        index_status: index.status()?,
     })
 }
 

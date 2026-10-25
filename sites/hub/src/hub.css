@@ -1,0 +1,38 @@
+.hub-hero { padding-bottom: 2rem; }
+.hub-catalog { padding-top: 1.5rem; }
+.hub-search { display: flex; gap: 0.75rem; }
+.hub-search input { min-width: 0; flex: 1; padding: 0.9rem 1rem; background: var(--bg-100); color: var(--text); border: 1px solid var(--border-bright); font: inherit; }
+.hub-search input:focus { outline: 1px solid var(--primary); }
+.hub-status { min-height: 4rem; display: flex; gap: 1rem; align-items: center; color: var(--text-dim); font-size: 0.85rem; }
+.hub-error { color: var(--red); overflow-wrap: anywhere; }
+.hub-browser { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 1.5rem; align-items: start; }
+.hub-results { min-width: 0; min-height: 30rem; }
+.hub-package,.hub-inspector { border: 1px solid var(--border-bright); background: var(--bg); min-width: 0; }
+.hub-package { padding: 1.25rem; margin-bottom: 1rem; }
+.hub-package-heading { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.hub-package h3,.hub-inspector h3 { color: var(--text); font-family: var(--font-display); font-size: 1.25rem; overflow-wrap: anywhere; }
+.hub-package-heading>span { color: var(--secondary); white-space: nowrap; font-size: 0.8rem; }
+.hub-coordinate { font-size: 0.8rem; color: var(--text-dim); overflow-wrap: anywhere; }
+.hub-tags { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.75rem 0; }
+.hub-tags span { color: var(--secondary); border: 1px solid var(--primary-dim); padding: 0 0.4rem; font-size: 0.7rem; }
+.hub-export { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; border-top: 1px solid var(--border); padding: 0.8rem 0; }
+.hub-export>div { min-width: 0; }
+.hub-export strong { font-size: 0.9rem; }
+.hub-export p { color: var(--text-dim); font-size: 0.72rem; overflow-wrap: anywhere; }
+.hub-export .btn { flex-shrink: 0; font-size: 0.7rem; padding: 0.4rem 0.6rem; }
+.hub-inspector { position: sticky; top: 5.5rem; }
+.hub-inspector-title,.hub-contract,.hub-use { padding: 1.25rem; }
+.hub-inspector-title p,.hub-attribution { font-size: 0.78rem; color: var(--text-dim); overflow-wrap: anywhere; }
+.hub-contract { border-top: 1px solid var(--border); font-size: 0.75rem; }
+.hub-contract strong { color: var(--secondary); font-size: 0.7rem; }
+.hub-contract p { overflow-wrap: anywhere; }
+.hub-source-window { min-height: 18rem; max-height: 32rem; overflow: auto; border-block: 1px solid var(--border); padding: 1rem; background: var(--bg-100); font-size: 0.75rem; }
+.hub-source-window pre { white-space: pre; }
+.hub-source-window code { background: none; padding: 0; }
+.hub-placeholder { min-height: 26rem; color: var(--text-dim); }
+.hub-command { display: flex; gap: 0.75rem; align-items: start; margin: 0.75rem 0 1rem; }
+.hub-command code { min-width: 0; flex: 1; overflow-wrap: anywhere; font-size: 0.8rem; }
+.hub-command .btn { padding: 0.25rem 0.6rem; font-size: 0.7rem; }
+.hub-empty { padding: 2rem; border: 1px solid var(--border); color: var(--text-dim); }
+.hub-install { max-width: 100%; overflow-x: auto; background: var(--bg-100); border: 1px solid var(--border); padding: 1rem; margin: 1rem 0; font-size: 0.8rem; }
+@media(max-width:760px) { .hub-browser { grid-template-columns: minmax(0,1fr); } .hub-inspector { position: static; } .hub-results { min-height: 0; } .hub-search .btn { padding-inline: 0.6rem; } .hub-status { flex-wrap: wrap; padding-block: 0.5rem; } }

@@ -1,0 +1,112 @@
+name: CLI archives
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src-tauri/**'
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/package_cli.sh'
+      - 'scripts/prepare_cli_occt_sdk.sh'
+      - 'scripts/prepare_manifold_runtime.sh'
+      - 'scripts/prepare_occt_runtime.sh'
+      - 'scripts/build_direct_occt_runner.sh'
+      - 'server/freecad_runner.py'
+      - 'model-runtime/**'
+      - 'public/docs/ecky-agent-reference.md'
+      - '.github/workflows/cli-archives.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_RELEASE_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  archive:
+    name: CLI (${{ matrix.platform }})
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: macos-15
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build compile-time frontend resources
+        run: npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake rsync curl python3 libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev
+      - name: Install macOS build tools
+        if: runner.os == 'macOS'
+        run: command -v cmake >/dev/null || brew install cmake
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: cli-${{ matrix.platform }}
+      - name: Cache pinned native runtime
+        id: runtime
+        uses: actions/cache@v4
+        with:
+          path: |
+            .dist/runtime/occt
+            .dist/runtime/manifold
+          key: cli-native-${{ matrix.platform }}-${{ hashFiles('scripts/prepare_cli_occt_sdk.sh', 'scripts/prepare_occt_runtime.sh', 'scripts/prepare_manifold_runtime.sh', 'scripts/build_direct_occt_runner.sh', 'src-tauri/native/**', 'src-tauri/src/ecky_cad_host/direct_occt_sdk.rs') }}
+      - name: Prepare native runtime
+        if: steps.runtime.outputs.cache-hit != 'true'
+        run: |
+          bash scripts/prepare_cli_occt_sdk.sh
+          bash scripts/prepare_manifold_runtime.sh
+          ECKY_OCCT_SOURCE_ROOT="$PWD/.dist/build/cli-occt/sdk" bash scripts/prepare_occt_runtime.sh
+      - name: Build clients
+        run: |
+          mkdir -p .dist/speech-runtime
+          cargo build --locked --manifest-path src-tauri/Cargo.toml --release --features cli --bin ecky --bin cairn
+      - name: Package and verify archive
+        env:
+          ECKY_CLI_VERSION: ${{ github.sha }}
+        run: |
+          scripts/package_cli.sh "$RUNNER_TEMP/cli-release"
+          mkdir "$RUNNER_TEMP/cli-unpacked"
+          tar -xzf "$RUNNER_TEMP/cli-release/ecky-cli-${{ matrix.platform }}.tar.gz" -C "$RUNNER_TEMP/cli-unpacked"
+          "$RUNNER_TEMP/cli-unpacked/ecky-cli/bin/cairn" --version
+          printf '(model (part stone (box 3 2 1)))\n' > "$RUNNER_TEMP/stone.ecky"
+          ECKY_DATA_DIR="$RUNNER_TEMP/cli-data" "$RUNNER_TEMP/cli-unpacked/ecky-cli/bin/ecky" check "$RUNNER_TEMP/stone.ecky"
+          ECKY_DATA_DIR="$RUNNER_TEMP/cli-data" "$RUNNER_TEMP/cli-unpacked/ecky-cli/bin/ecky" render --backend native "$RUNNER_TEMP/stone.ecky" --stl "$RUNNER_TEMP/stone.stl" --step "$RUNNER_TEMP/stone.step"
+          test -s "$RUNNER_TEMP/stone.stl" && test -s "$RUNNER_TEMP/stone.step"
+      - name: Verify Linux archive without desktop libraries
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            --mount type=bind,src="$RUNNER_TEMP/cli-unpacked/ecky-cli",dst=/cli,readonly \
+            --mount type=bind,src="$RUNNER_TEMP/stone.ecky",dst=/stone.ecky,readonly \
+            --env DEBIAN_FRONTEND=noninteractive \
+            --env ECKY_DATA_DIR=/tmp/ecky-data \
+            ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac \
+            sh -ec 'apt-get update -qq && apt-get install -y --no-install-recommends libstdc++6 ca-certificates; /cli/bin/cairn --version; /cli/bin/ecky check /stone.ecky; /cli/bin/ecky render --backend native /stone.ecky --stl /tmp/stone.stl --step /tmp/stone.step; test -s /tmp/stone.stl && test -s /tmp/stone.step'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ecky-cli-${{ matrix.platform }}-${{ github.sha }}
+          path: ${{ runner.temp }}/cli-release/*
+          if-no-files-found: error
+          retention-days: 14

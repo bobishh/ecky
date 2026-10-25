@@ -579,13 +579,8 @@ async fn attach_outcome(
         Some(message_id),
     )?;
     if status == MessageStatus::Success && artifact_bundle.is_some() {
-        if let Err(error) = crate::component_package_runtime::capture_latest_successful_components(
-            app,
-            &conn,
-            &request.thread_id,
-            message_id,
-            &design.macro_code,
-        ) {
+        if let Err(error) = crate::services::library_panel::schedule_component_recovery(app, state)
+        {
             state.push_log(format!(
                 "Component capture failed for version {message_id}: {error}"
             ));

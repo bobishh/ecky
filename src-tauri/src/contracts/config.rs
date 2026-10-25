@@ -282,6 +282,8 @@ impl std::fmt::Debug for JevClassifierConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cairn: Option<super::CairnConfig>,
     pub engines: Vec<Engine>,
     #[serde(alias = "selected_engine_id")]
     pub selected_engine_id: String,

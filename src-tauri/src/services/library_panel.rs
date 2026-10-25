@@ -1,4 +1,7 @@
+use crate::component_library_index::{ComponentIndexPhase, ComponentIndexStatus};
 use std::path::Path;
+use std::sync::Arc;
+use tauri::Emitter;
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -20,6 +23,21 @@ const FREECAD_PAGE_SIZE: u32 = 100;
 )]
 pub enum LibraryPanelIntent {
     LoadComponents,
+    #[specta(rename_all = "camelCase")]
+    SearchRegistry {
+        query: String,
+    },
+    #[specta(rename_all = "camelCase")]
+    InstallRegistryPackage {
+        package_id: String,
+        version: String,
+    },
+    #[specta(rename_all = "camelCase")]
+    SetRegistry {
+        registry_url: String,
+        query: String,
+    },
+    RebuildComponentIndex,
     #[specta(rename_all = "camelCase")]
     InstallPackage {
         archive_path: String,
@@ -44,10 +62,17 @@ pub enum LibraryPanelIntent {
 )]
 pub enum LibraryPanelProjection {
     #[specta(rename_all = "camelCase")]
+    RegistryPackages {
+        registry_url: String,
+        releases: Vec<crate::cairn::RegistryReleaseSummary>,
+    },
+    #[specta(rename_all = "camelCase")]
     ComponentPackages {
         package_headers: Vec<ComponentPackageHeader>,
         components: Vec<component_package_runtime::ExtractedComponentSearchResult>,
         indexing_diagnostics: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        index_status: Option<ComponentIndexStatus>,
     },
     #[specta(rename_all = "camelCase")]
     FreecadLibrary {
@@ -59,101 +84,244 @@ pub enum LibraryPanelProjection {
 }
 
 pub fn load_component_packages(app: &dyn PathResolver) -> AppResult<LibraryPanelProjection> {
+    let index = component_package_runtime::open_component_index(app)?;
     Ok(LibraryPanelProjection::ComponentPackages {
-        package_headers: component_package_runtime::list_installed_component_package_headers(app)?,
+        package_headers: crate::catalog::package_headers(index.connection())?,
         components: component_package_runtime::search_extracted_components(app, "", usize::MAX)?,
-        indexing_diagnostics: Vec::new(),
+        indexing_diagnostics: index.diagnostics()?,
+        index_status: Some(index.status()?),
     })
 }
 
-#[derive(Debug, Default)]
-pub struct ComponentLibraryBackfillReport {
-    pub thread_titles: std::collections::HashMap<String, String>,
-    pub diagnostics: Vec<String>,
-}
-
-/// Backfill successful history through the same index path used by the UI and
-/// MCP search. The DB guard covers selection, latest validation, and pointer
-/// publication so an older completion cannot regress a newer revision.
+/// History recovery is explicit background work, never part of a search request.
 pub async fn backfill_latest_component_sources(
-    app: &dyn PathResolver,
+    app: Arc<dyn PathResolver>,
     state: &crate::models::AppState,
-) -> AppResult<ComponentLibraryBackfillReport> {
-    let mut report = ComponentLibraryBackfillReport::default();
-    let conn = state.db.lock().await;
-    let targets = crate::db::latest_successful_component_capture_targets(&conn)
-        .map_err(|error| AppError::persistence(error.to_string()))?;
-    for target in targets {
-        if let Some(title) = crate::db::get_thread_title(&conn, &target.thread_id)
+    force: bool,
+) -> AppResult<()> {
+    let targets = {
+        let conn = state.db_read.as_ref().unwrap_or(&state.db).lock().await;
+        crate::db::latest_successful_component_capture_targets(&conn)
             .map_err(|error| AppError::persistence(error.to_string()))?
-        {
-            report.thread_titles.insert(target.thread_id.clone(), title);
-        }
-        if let Some(diagnostics) = component_package_runtime::component_capture_diagnostics(
-            app,
-            &target.thread_id,
-            &target.message_id,
-        )? {
-            report.diagnostics.extend(
-                diagnostics
-                    .into_iter()
-                    .map(|detail| format!("Version {}: {detail}", target.message_id)),
-            );
-            continue;
-        }
-        match crate::db::get_thread_message_version(&conn, &target.thread_id, &target.message_id) {
-            Ok(Some(message)) => {
-                if let (Some(design), true) = (message.output, message.artifact_bundle.is_some()) {
-                    if let Err(error) =
-                        component_package_runtime::capture_latest_successful_components(
-                            app,
-                            &conn,
+    };
+    let mut progress = ComponentIndexStatus {
+        phase: ComponentIndexPhase::Indexing,
+        completed: 0,
+        total: u32::try_from(targets.len()).unwrap_or(u32::MAX),
+        error: None,
+    };
+    let index = component_package_runtime::open_component_index(app.as_ref())?;
+    index.set_status(&progress)?;
+    notify_component_library_changed(state);
+    for target in targets {
+        let cached = !force
+            && index
+                .capture_diagnostics(&target.thread_id, &target.message_id)?
+                .is_some();
+        if !cached {
+            let source = {
+                let conn = state.db_read.as_ref().unwrap_or(&state.db).lock().await;
+                crate::db::get_component_capture_input(&conn, &target.thread_id, &target.message_id)
+                    .map_err(|error| AppError::persistence(error.to_string()))
+            };
+            let capture = match source {
+                Ok(Some(input)) => {
+                    let paths = app.clone();
+                    let thread_id = target.thread_id.clone();
+                    let message_id = target.message_id.clone();
+                    // Parsing and immutable source writes must not hold the history lock.
+                    tokio::task::spawn_blocking(move || {
+                        component_package_runtime::prepare_component_capture_with_lock(
+                            paths.as_ref(),
+                            &thread_id,
+                            &message_id,
+                            &input.source,
+                            input.lock.as_ref(),
+                            input.source_language,
+                            input.geometry_backend,
+                        )
+                    })
+                    .await
+                    .map_err(|error| AppError::internal(error.to_string()))?
+                }
+                Ok(None) => Err(AppError::persistence(
+                    "Successful model source is unavailable.",
+                )),
+                Err(error) => Err(error),
+            };
+            match capture {
+                Ok(capture) => {
+                    let conn = state.db.lock().await;
+                    if let Err(error) = component_package_runtime::publish_latest_component_capture(
+                        app.as_ref(),
+                        &conn,
+                        &target.thread_id,
+                        &target.message_id,
+                        capture,
+                    ) {
+                        // Extraction diagnostics are already committed; storage failures are fatal.
+                        if index
+                            .capture_diagnostics(&target.thread_id, &target.message_id)?
+                            .is_none()
+                        {
+                            return Err(error);
+                        }
+                        state.push_log(format!("Component indexing: {error}"));
+                    }
+                }
+                Err(error) => {
+                    let conn = state.db.lock().await;
+                    if crate::db::is_latest_successful_component_capture(
+                        &conn,
+                        &target.thread_id,
+                        &target.message_id,
+                    )
+                    .map_err(|error| AppError::persistence(error.to_string()))?
+                    {
+                        index.record_failure(
                             &target.thread_id,
                             &target.message_id,
-                            &design.macro_code,
-                        )
-                    {
-                        let detail = format!("Version {}: {error}", target.message_id);
-                        state.push_log(format!("Component library backfill failed: {detail}"));
-                        report.diagnostics.push(detail);
+                            &error.to_string(),
+                        )?;
                     }
                 }
             }
-            Ok(None) => {}
-            Err(error) => {
-                let detail = format!(
-                    "Version {}: failed to read source: {error}",
-                    target.message_id
-                );
-                state.push_log(format!("Component library backfill failed: {detail}"));
-                report.diagnostics.push(detail);
-            }
+        }
+        let title = {
+            let conn = state.db_read.as_ref().unwrap_or(&state.db).lock().await;
+            crate::db::get_thread_title(&conn, &target.thread_id)
+                .map_err(|error| AppError::persistence(error.to_string()))?
+        };
+        if let Some(title) = title {
+            index.set_thread_title(&target.thread_id, &title)?;
+        }
+        progress.completed += 1;
+        if progress.completed.is_multiple_of(16) || progress.completed == progress.total {
+            index.set_status(&progress)?;
+            notify_component_library_changed(state);
         }
     }
-    Ok(report)
+    {
+        let conn = state.db.lock().await;
+        let current = crate::db::latest_successful_component_capture_targets(&conn)
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        component_package_runtime::open_component_index(app.as_ref())?.retain_threads(
+            &current
+                .into_iter()
+                .map(|target| target.thread_id)
+                .collect::<Vec<_>>(),
+        )?;
+    }
+    progress.phase = if index.diagnostics()?.is_empty() {
+        ComponentIndexPhase::Ready
+    } else {
+        ComponentIndexPhase::Failed
+    };
+    index.set_status(&progress)?;
+    notify_component_library_changed(state);
+    Ok(())
+}
+
+fn notify_component_library_changed(state: &crate::models::AppState) {
+    if let Some(handle) = state
+        .app_handle
+        .lock()
+        .ok()
+        .and_then(|handle| handle.clone())
+    {
+        let _ = handle.emit("component-library-updated", ());
+    }
+}
+
+/// Render publication only enqueues work; extraction never occupies its history writer lock.
+pub fn schedule_component_recovery(
+    app: &dyn PathResolver,
+    state: &crate::models::AppState,
+) -> AppResult<()> {
+    struct Paths {
+        config: std::path::PathBuf,
+        data: std::path::PathBuf,
+    }
+    impl PathResolver for Paths {
+        fn app_config_dir(&self) -> std::path::PathBuf {
+            self.config.clone()
+        }
+        fn app_data_dir(&self) -> std::path::PathBuf {
+            self.data.clone()
+        }
+        fn resource_path(&self, _: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+    start_component_library_indexing(
+        Arc::new(Paths {
+            config: app.try_app_config_dir()?,
+            data: app.app_data_dir(),
+        }),
+        state.clone(),
+        false,
+    )
+}
+
+pub fn start_component_library_indexing(
+    app: Arc<dyn PathResolver>,
+    state: crate::models::AppState,
+    force: bool,
+) -> AppResult<()> {
+    if !state.component_index_worker.request(force) {
+        return Ok(());
+    }
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let force = state.component_index_worker.take_request();
+            if let Err(error) = backfill_latest_component_sources(app.clone(), &state, force).await
+            {
+                state.push_log(format!("Component index recovery failed: {error}"));
+                if let Ok(index) = component_package_runtime::open_component_index(app.as_ref()) {
+                    let mut status = index.status().unwrap_or_default();
+                    status.phase = ComponentIndexPhase::Failed;
+                    status.error = Some(error.to_string());
+                    let _ = index.set_status(&status);
+                }
+            }
+            let again = state.component_index_worker.finish_iteration();
+            notify_component_library_changed(&state);
+            if !again {
+                break;
+            }
+        }
+    });
+    Ok(())
 }
 
 pub async fn load_component_packages_for_state(
     app: &dyn PathResolver,
     state: &crate::models::AppState,
 ) -> AppResult<LibraryPanelProjection> {
-    let backfill = backfill_latest_component_sources(app, state).await?;
     let mut projection = load_component_packages(app)?;
-    if let LibraryPanelProjection::ComponentPackages {
-        components,
-        indexing_diagnostics: output,
-        ..
-    } = &mut projection
-    {
-        for component in components {
-            component.thread_title = component
-                .thread_id
-                .as_ref()
-                .and_then(|thread_id| backfill.thread_titles.get(thread_id).cloned());
+    if state.component_index_worker.is_running() {
+        if let LibraryPanelProjection::ComponentPackages {
+            index_status: Some(status),
+            ..
+        } = &mut projection
+        {
+            status.phase = ComponentIndexPhase::Indexing;
+            status.error = None;
         }
-        *output = backfill.diagnostics;
     }
     Ok(projection)
+}
+
+pub async fn search_registry(
+    app: &dyn PathResolver,
+    config: &Config,
+    query: &str,
+) -> AppResult<LibraryPanelProjection> {
+    let registry = crate::cairn::configured_registry(config);
+    Ok(LibraryPanelProjection::RegistryPackages {
+        registry_url: registry.into(),
+        releases: crate::cairn::search_registry(app, registry, query).await?,
+    })
 }
 
 pub fn install_component_package(
@@ -247,6 +415,7 @@ mod tests {
         assert_eq!(updated.selected_engine_id, config.selected_engine_id);
     }
 
+    #[derive(Clone)]
     struct TestPaths(std::path::PathBuf);
 
     impl PathResolver for TestPaths {
@@ -263,6 +432,7 @@ mod tests {
 
     fn test_config() -> Config {
         Config {
+            cairn: None,
             engines: Vec::new(),
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),
@@ -287,8 +457,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn library_load_backfills_latest_success_without_appending_versions_or_indexing_failures()
-    {
+    async fn given_indexed_components_when_history_is_busy_then_library_reads_without_waiting() {
+        let resolver = TestPaths(
+            std::env::temp_dir().join(format!("ecky-library-fast-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&resolver.0).unwrap();
+        let conn = crate::db::init_db(&resolver.0.join("history.sqlite")).unwrap();
+        let state = crate::models::AppState::new(test_config(), None, conn);
+        component_package_runtime::capture_defined_components(
+            &resolver,
+            "indexed",
+            "v1",
+            "(model (part fast-clip (box 2 2 2)))",
+        )
+        .unwrap();
+        let history_writer = state.db.lock().await;
+        schedule_component_recovery(&resolver, &state).unwrap();
+        let projection = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            load_component_packages_for_state(&resolver, &state),
+        )
+        .await
+        .expect("search must not acquire the history writer lock")
+        .unwrap();
+        let LibraryPanelProjection::ComponentPackages {
+            components,
+            index_status,
+            ..
+        } = projection
+        else {
+            panic!("components")
+        };
+        assert!(components.iter().any(|entry| entry.name == "fast-clip"));
+        assert_eq!(index_status.unwrap().phase, ComponentIndexPhase::Indexing);
+        drop(history_writer);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            state.component_index_worker.wait_idle(),
+        )
+        .await
+        .expect("queued recovery must finish after the history writer is released");
+    }
+
+    #[tokio::test]
+    async fn background_recovery_indexes_latest_success_without_appending_versions_or_redecoding_history(
+    ) {
         let resolver = TestPaths(
             std::env::temp_dir().join(format!("ecky-library-backfill-{}", uuid::Uuid::new_v4())),
         );
@@ -348,6 +561,9 @@ mod tests {
                 .unwrap();
             }
         }
+        backfill_latest_component_sources(Arc::new(resolver.clone()), &state, false)
+            .await
+            .unwrap();
         let projection = load_component_packages_for_state(&resolver, &state)
             .await
             .unwrap();
@@ -477,6 +693,35 @@ mod tests {
                 .revision_digest
                 .as_deref(),
             Some(expected_digest.as_str())
+        );
+        drop(conn);
+        state
+            .db
+            .lock()
+            .await
+            .execute(
+                "UPDATE threads SET deleted_at = 10 WHERE id = 'thread-backfill'",
+                [],
+            )
+            .unwrap();
+        backfill_latest_component_sources(Arc::new(resolver.clone()), &state, false)
+            .await
+            .unwrap();
+        assert!(
+            !component_package_runtime::search_extracted_components(&resolver, "clip", 100)
+                .unwrap()
+                .iter()
+                .any(|item| item.thread_id.as_deref() == Some("thread-backfill")),
+            "deleted projects must leave discovery"
+        );
+        assert!(
+            component_package_runtime::read_component_by_id(
+                &resolver,
+                &identity,
+                Some(&expected_digest)
+            )
+            .is_ok(),
+            "historical pinned source must survive discovery cleanup"
         );
     }
 }

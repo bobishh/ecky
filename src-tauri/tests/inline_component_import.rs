@@ -32,6 +32,7 @@ impl PathResolver for TestResolver {
 
 fn test_config() -> Config {
     Config {
+        cairn: None,
         engines: Vec::new(),
         selected_engine_id: String::new(),
         freecad_cmd: String::new(),

@@ -21,6 +21,7 @@ pub mod bindings;
 pub mod build_queue;
 pub mod cad_source_adapters;
 pub mod cad_transpile;
+pub mod cairn;
 pub mod campaign_definition;
 pub mod campaign_projects;
 pub mod capture_brep_validation;
@@ -30,9 +31,11 @@ pub mod capture_mesh_crop;
 pub mod capture_reconstruction;
 pub mod capture_runs;
 pub mod capture_server;
+pub mod catalog;
 pub mod commands;
 pub mod component_extract;
 pub mod component_import_runtime;
+pub mod component_library_index;
 pub mod component_package_runtime;
 pub mod component_step_runtime;
 pub mod config_store;
@@ -100,7 +103,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::Manager;
+use tauri::{Listener, Manager};
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -597,6 +600,7 @@ pub fn run() {
     let builder = crate::bindings::builder();
 
     let default_config = crate::contracts::Config {
+        cairn: None,
         engines: vec![crate::contracts::Engine {
             id: "default-gemini".to_string(),
             name: "Google Gemini".to_string(),
@@ -719,6 +723,22 @@ pub fn run() {
             *state.config_persistence_status.lock().unwrap() = config_persistence_status.clone();
             state.set_app_handle(app.handle().clone());
             app.manage(state.clone());
+            if let Err(error) = crate::services::library_panel::start_component_library_indexing(
+                Arc::new(app.handle().clone()),
+                state.clone(),
+                false,
+            ) {
+                state.push_log(format!("Component index startup failed: {error}"));
+            }
+            let index_app = app.handle().clone();
+            let index_state = state.clone();
+            app.listen("history-updated", move |_| {
+                let _ = crate::services::library_panel::start_component_library_indexing(
+                    Arc::new(index_app.clone()),
+                    index_state.clone(),
+                    false,
+                );
+            });
             if let Err(error) = crate::web_content_recovery::install(app.handle()) {
                 state.push_log(format!(
                     "[WEB_CONTENT] failed to install termination hook: {error}"
@@ -895,6 +915,7 @@ mod tests {
 
     fn startup_config() -> Config {
         Config {
+            cairn: None,
             engines: vec![],
             selected_engine_id: "selected".into(),
             freecad_cmd: String::new(),

@@ -1,0 +1,50 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="background" x1="48" y1="36" x2="464" y2="476" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1a2238"/>
+      <stop offset="1" stop-color="#0b0e1b"/>
+    </linearGradient>
+    <radialGradient id="aura" cx="220" cy="236" r="224" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4a8c5c" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#4a8c5c" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="stone-shadow" x="-30%" y="-25%" width="160%" height="165%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#02040a" flood-opacity="0.48"/>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="128" fill="url(#background)"/>
+  <rect x="1" y="1" width="510" height="510" rx="127" fill="none" stroke="#ffffff" stroke-opacity="0.06" stroke-width="2"/>
+  <circle cx="228" cy="246" r="224" fill="url(#aura)"/>
+
+  <g filter="url(#stone-shadow)" stroke="#a1ceb0" stroke-opacity="0.18" stroke-width="1.5" stroke-linejoin="round">
+    <path id="ecky-silhouette" d="M216 62 329 111 382 202 404 322 333 407 208 441 119 369 89 282 94 192 107 119Z" fill="#376f4c"/>
+    <path d="M216 62 107 119 161 187 214 157Z" fill="#659a78"/>
+    <path d="M216 62 329 111 290 168 214 157Z" fill="#5c9270"/>
+    <path d="M329 111 382 202 332 229 290 168Z" fill="#477f5d"/>
+    <path d="M382 202 404 322 316 303 332 229Z" fill="#3c7251"/>
+    <path d="M404 322 333 407 252 343 316 303Z" fill="#326646"/>
+    <path d="M333 407 208 441 178 307 252 343Z" fill="#3f7454"/>
+    <path d="M208 441 119 369 141 255 178 307Z" fill="#4d8061"/>
+    <path d="M119 369 89 282 141 255 178 307Z" fill="#396d50"/>
+    <path d="M89 282 94 192 149 186 141 255Z" fill="#4f8765"/>
+    <path d="M94 192 107 119 161 187 149 186Z" fill="#679d7a"/>
+    <path d="M161 187 214 157 219 231 149 186Z" fill="#639b78"/>
+    <path d="M214 157 290 168 286 231 219 231Z" fill="#5c9471"/>
+    <path d="M290 168 332 229 286 231Z" fill="#4f8866"/>
+    <path d="M332 229 316 303 278 274 286 231Z" fill="#477f5d"/>
+    <path d="M316 303 252 343 253 294 278 274Z" fill="#3f7756"/>
+    <path d="M252 343 178 307 228 293 253 294Z" fill="#447c5b"/>
+    <path d="M178 307 141 255 196 269 228 293Z" fill="#4c8663"/>
+    <path d="M141 255 149 186 219 231 196 269Z" fill="#5b9470"/>
+    <path d="M219 231 286 231 278 274 253 294 228 293 196 269Z" fill="#568f6b"/>
+  </g>
+
+  <g fill="#f2efc8">
+    <rect data-ecky-feature="eye" x="174" y="229" width="42" height="9" rx="1" transform="rotate(2 195 233.5)"/>
+    <rect data-ecky-feature="eye" x="286" y="229" width="42" height="9" rx="1" transform="rotate(2 307 233.5)"/>
+    <polygon data-ecky-feature="mouth" points="236,281 276,281 256,295"/>
+  </g>
+
+  <path d="M128 1C60 1 1 60 1 128V82C1 38 38 1 82 1Z" fill="#ffffff" fill-opacity="0.035"/>
+</svg>

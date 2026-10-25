@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_INCREMENTAL: 0
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -73,6 +76,9 @@ jobs:
             codex_app_server_projection \
             codex_takeover_persistence \
             component_package_contract \
+            cairn_package_contract \
+            cairn_cli \
+            library_component_discovery \
             config_json_boundary \
             context_budget_audit \
             llm_eval_artifacts \
@@ -82,6 +88,14 @@ jobs:
           do
             cargo test -p ecky_cad --test "$test_target" --all-features --verbose
           done
+
+      - name: Run Catalog and Recovery Tests
+        run: |
+          cd src-tauri
+          cargo test -p ecky_cad --lib catalog::tests --all-features
+          cargo test -p ecky_cad --lib services::library_panel::tests --all-features
+          cargo test -p ecky_cad --lib given_retrieval_candidates --all-features
+          cargo test -p ecky_cad --lib given_catalog_capability --all-features
 
       - name: Run Clippy
         run: cd src-tauri && cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -105,6 +119,12 @@ jobs:
 
       - name: Typecheck Frontend
         run: npm run typecheck
+
+      - name: Check and build Hub
+        run: npm run check:hub && npm run build:hub
+
+      - name: Check CLI Installer
+        run: python3 scripts/test_cli_installer.py
 
       - name: Run Frontend Unit Tests
         run: npm run test:unit
@@ -140,6 +160,9 @@ jobs:
 
       - name: Run Playwright E2E
         run: npm run test:e2e:ci
+
+      - name: Run Hub E2E
+        run: npm run test:hub
 
   test-landing:
     name: Landing Site (build + e2e)

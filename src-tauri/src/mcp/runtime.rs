@@ -3299,6 +3299,7 @@ mod tests {
 
     fn test_config(primary_agent_id: Option<&str>) -> Config {
         Config {
+            cairn: None,
             engines: vec![],
             selected_engine_id: String::new(),
             freecad_cmd: String::new(),

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-type PackageLibraryMockMode = 'ok' | 'discovery' | 'discoveryCards' | 'error' | 'empty' | 'installError' | 'componentImportError' | 'componentImportPending' | 'discoveryError' | 'discoveryPending';
+type PackageLibraryMockMode = 'hub' | 'hubInstallError' | 'ok' | 'discovery' | 'discoveryCards' | 'discoveryIndexing' | 'discoveryIndexFailed' | 'error' | 'empty' | 'installError' | 'componentImportError' | 'componentImportPending' | 'discoveryError' | 'discoveryPending';
 
 async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMode) {
   await page.route(/\/mock\/.*\.stl(\?.*)?$/, async (route) => {
@@ -267,6 +267,14 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
       }
       if (cmd === 'library_panel_intent') {
         const intent = args?.intent;
+        if (intent?.kind === 'searchRegistry') {
+          return { kind: 'registryPackages', registryUrl: 'https://hub.ecky-cad.com', releases: [{ header: packageHeader, license: 'MIT', archiveDigest: 'sha256:' + 'a'.repeat(64), packageDigest: 'sha256:' + 'b'.repeat(64) }] };
+        }
+        if (intent?.kind === 'installRegistryPackage') {
+          if (mockMode === 'hubInstallError') throw { code: 'validation', message: 'Archive integrity mismatch', details: 'expected sha256:release; received sha256:other' };
+          mockWindow.__PACKAGE_HEADERS__ = [packageHeader];
+          return { kind: 'componentPackages', packageHeaders: [packageHeader], components: [], indexingDiagnostics: [], indexStatus: {phase:'ready',completed:0,total:0} };
+        }
         if (intent?.kind === 'loadComponents') {
           mockWindow.__LIBRARY_LOAD_COUNT__ += 1;
           if (mockMode === 'error') {
@@ -276,7 +284,13 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
               details: 'raw package index missing',
             };
           }
-          return { kind: 'componentPackages', packageHeaders: mockWindow.__PACKAGE_HEADERS__, components: mockMode === 'discoveryCards' ? [
+          return { kind: 'componentPackages', packageHeaders: mockWindow.__PACKAGE_HEADERS__,
+            indexStatus: mockMode === 'discoveryIndexing'
+              ? { phase: 'indexing', completed: 2, total: 4 }
+              : mockMode === 'discoveryIndexFailed'
+                ? { phase: 'failed', completed: 2, total: 4, error: 'source snapshot unavailable' }
+                : { phase: 'ready', completed: 4, total: 4 },
+            components: mockMode === 'discoveryCards' ? [
             { name: 'rail-clip', origin: 'local', componentId: 'rail-clip-id', revisionDigest: 'sha256:rail-clip-revision', oneLiner: 'Clips securely onto a 20 mm support rail.', paramKeys: ['support_rail_width', 'clip_depth'], tags: ['fixture'], ports: [], threadId: 'rail-project-id', threadTitle: 'Hydrant cap project' },
             { name: 'undocumented-bracket', origin: 'local', componentId: 'undocumented-id', revisionDigest: 'sha256:undocumented-revision', oneLiner: '', paramKeys: ['exceptionally_long_parameter_name_for_narrow_cards'], tags: [], ports: [], threadId: 'orphan-source-id', threadTitle: null },
             { name: 'builtin-washer', origin: 'builtin', version: '1.0.0', oneLiner: 'Standard washer.', paramKeys: ['diameter'], tags: [], ports: [] },
@@ -329,6 +343,52 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
 }
 
 test.describe('Component package library', () => {
+  test('Given Hub packages When a collection is installed Then verified exports appear in the local library', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'hub');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /LIBRARY/i }).click();
+    await page.getByRole('button', {name: 'HUB', exact: true}).click();
+    await expect(page.getByText('https://hub.ecky-cad.com', {exact:true})).toBeVisible();
+    await expect(page.getByRole('heading', {name:'Bike Bottle System'})).toBeVisible();
+    await page.getByRole('button', {name:'INSTALL Bike Bottle System',exact:true}).click();
+    await expect(page.getByRole('button', {name:'COMPONENTS',exact:true})).toHaveClass(/active/);
+    await expect(page.getByRole('heading', {name:'Bike Bottle System'})).toBeVisible();
+  });
+
+  test('Given Hub archive integrity fails When installation is attempted Then backend detail stays visible and retry remains available', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'hubInstallError');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /LIBRARY/i }).click();
+    await page.getByRole('button', {name:'HUB',exact:true}).click();
+    const install=page.getByRole('button', {name:'INSTALL Bike Bottle System',exact:true});
+    await install.click();
+    await expect(page.getByText(/expected sha256:release; received sha256:other/)).toBeVisible();
+    await expect(install).toBeEnabled();
+  });
+
+  test('Given index recovery pending When Library opens Then indexed components remain searchable with progress', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'discoveryIndexing');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /LIBRARY/i }).click();
+    await expect(page.getByRole('status', { name: 'Component index progress' })).toContainText('2 / 4');
+    await page.getByPlaceholder('Search library...').fill('bottle-cage');
+    await expect(page.getByRole('heading', { name: 'bottle-cage', exact: true })).toBeVisible();
+    await expect(page.getByText('COMPONENT INDEXING NEEDS ATTENTION')).toHaveCount(0);
+  });
+
+  test('Given index recovery failed When Library opens Then saved components stay available with a rebuild action', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'discoveryIndexFailed');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /LIBRARY/i }).click();
+    await expect(page.getByText('source snapshot unavailable')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'bottle-cage', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'REBUILD INDEX' })).toBeEnabled();
+  });
+
   test('Given a rendered local component When inserted Then exact revision is submitted without FreeCAD catalog', async ({ page }) => {
     await installProjectLibraryMocks(page, 'discovery');
     await page.goto('/');

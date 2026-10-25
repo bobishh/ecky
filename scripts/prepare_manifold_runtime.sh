@@ -53,7 +53,7 @@ cmake -S "$SOURCE_DIR" -B "$BUILD_DIR" \
   -DMANIFOLD_TEST=OFF \
   -DMANIFOLD_PYBIND=OFF \
   -DMANIFOLD_CBIND=OFF
-cmake --build "$BUILD_DIR" --config Release --parallel
+cmake --build "$BUILD_DIR" --config Release --parallel "${ECKY_NATIVE_BUILD_JOBS:-2}"
 cmake --install "$BUILD_DIR" --config Release
 
 LIBRARY="$OUT_DIR/lib/libmanifold.a"

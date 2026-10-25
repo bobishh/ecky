@@ -1720,6 +1720,12 @@ export type BrepHiddenLineWarningKind = "projectionNoEdges"
 export type BrepProjectedEdge2d = { edgeId: string; points?: ([number, number])[]; sourceClass: string }
 export type BrepProjectedLoop2d = { loopId: string; edgeIds?: string[]; points?: ([number, number])[]; role?: BrepProjectedLoopRole; sourceClass: string }
 export type BrepProjectedLoopRole = "outer" | "hole" | "unknown"
+export type CairnConfig = { registryUrl: string }
+/**
+ * Exact install environment inside the existing canonical model dependency lock.
+ */
+export type CairnLock = { registry: string; roots: PackageDependency[]; releases: CairnLockedRelease[] }
+export type CairnLockedRelease = { packageId: string; version: string; packageDigest: string; archiveDigest: string; dependencies?: PackageDependency[] }
 export type CalloutAnchor = { anchorId: string; position: [number, number, number]; normal?: [number, number, number] | null }
 export type CampaignAcceptance = { mode: string; referenceStepId: string }
 export type CampaignCanonicalPreview = { canonicalSourceDigest: string; runtimeDigest: string; artifactBundle: ArtifactBundle }
@@ -1850,7 +1856,7 @@ geometryProvenance?: GeometryProvenance | null; sketches?: SketchDefinition[]; k
  * by `Message.artifactBundle.componentDependencyLock`. Canonical ordering is
  * dependencies by `(packageId, version)`, components by `componentId`.
  */
-export type ComponentDependencyLock = { schemaVersion?: number; dependencies?: ComponentDependencyLockEntry[] }
+export type ComponentDependencyLock = { cairn?: CairnLock | null; schemaVersion?: number; dependencies?: ComponentDependencyLockEntry[] }
 /**
  * One component entry inside a dependency lock.
  */
@@ -1912,13 +1918,15 @@ nodeIds?: number[] }
  * this host-owned value rather than adding package metadata to Core IR spans.
  */
 export type ComponentImportSourceSpan = { start: number; end: number }
+export type ComponentIndexPhase = "ready" | "indexing" | "failed"
+export type ComponentIndexStatus = { phase: ComponentIndexPhase; completed: number; total: number; error?: string | null }
 export type ComponentInterfaceValue = number | string | boolean
 export type ComponentKeepoutVolume = { keepoutId: string; label: string; kind: KeepoutVolumeKind; frame?: PortFrame | null; size?: [number, number, number] | null; radius?: number | null; height?: number | null }
 export type ComponentMateNormalMode = "aligned" | "opposed"
 export type ComponentMateStatus = "solved" | "failed"
 export type ComponentMirrorAxis = "x" | "y"
-export type ComponentPackage = { schemaVersion?: number; packageId: string; version: string; displayName: string; visibility: PackageVisibility; tags?: string[]; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: ComponentDefinition[]; assemblies?: AssemblyDefinition[] }
-export type ComponentPackageHeader = { schemaVersion: number; packageId: string; version: string; displayName: string; visibility: PackageVisibility; tags?: string[]; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: ComponentHeader[]; assemblies?: AssemblyHeader[] }
+export type ComponentPackage = { cairn?: PackageDistribution | null; schemaVersion?: number; packageId: string; version: string; displayName: string; visibility: PackageVisibility; tags?: string[]; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: ComponentDefinition[]; assemblies?: AssemblyDefinition[] }
+export type ComponentPackageHeader = { cairn?: PackageDistribution | null; schemaVersion: number; packageId: string; version: string; displayName: string; visibility: PackageVisibility; tags?: string[]; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: ComponentHeader[]; assemblies?: AssemblyHeader[] }
 export type ComponentParam = { key: string; label: string; kind: ComponentParamKind; unit?: string | null }
 export type ComponentParamKind = "number" | "text" | "boolean" | "choice"
 export type ComponentPayloadKind = "source" | "step"
@@ -1929,7 +1937,7 @@ export type ComponentPayloadKind = "source" | "step"
 export type ComponentPlacementEvidence = { instanceId: string; componentId: string; sourcePortRef: PortReference; targetPortRef: PortReference; placementFrame: PortFrame; normalMode: ComponentMateNormalMode; rollDegrees: number; offset: [number, number, number]; mirrorAxis?: ComponentMirrorAxis | null; mateStatus: ComponentMateStatus; resolvedFitValues: Partial<{ [key in string]: ComponentInterfaceValue }>; diagnostics: string[]; sourceStart?: number | null; sourceEnd?: number | null }
 export type ComponentPort = { portId: string; typeId: string; targetIds?: string[]; frame?: PortFrame | null; params?: Partial<{ [key in string]: ComponentInterfaceValue }>; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[] }
 export type ComponentStoreGcReport = { deletedPackageDigests: string[]; retainedPackageDigests: string[] }
-export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; cadTextFontPath?: string; freecadLibraryRoots?: string[]; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; femCompute?: FemComputeConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; providerModels?: ProviderModels; jevClassifier?: JevClassifierConfig; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number;
+export type Config = { cairn?: CairnConfig | null; engines: Engine[]; selectedEngineId: string; freecadCmd?: string; cadTextFontPath?: string; freecadLibraryRoots?: string[]; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; femCompute?: FemComputeConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; providerModels?: ProviderModels; jevClassifier?: JevClassifierConfig; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number;
 /**
  * Filesystem root for exported project folders. Blank/None uses the
  * default `<app_data>/projects`. See `filesystem-project-mirror`.
@@ -2102,8 +2110,8 @@ export type LastDesignSnapshot = { design?: DesignOutput | null; threadId?: stri
  * revision; legacy name lookup remains available for extracted/built-in source.
  */
 export type LibraryComponentSelection = { packageId: string; version: string; componentId: string } | { componentId: string; revisionDigest: string } | { name: string }
-export type LibraryPanelIntent = { kind: "loadComponents" } | { kind: "installPackage"; archivePath: string } | { kind: "loadFreecad"; query: string; page: number } | { kind: "setFreecadRoot"; root: string; query: string }
-export type LibraryPanelProjection = { kind: "componentPackages"; packageHeaders: ComponentPackageHeader[]; components: ExtractedComponentSearchResult[]; indexingDiagnostics: string[] } | { kind: "freecadLibrary"; freecadLibraryRoots: string[]; items: FreecadLibraryItem[]; page: number; hasMore: boolean }
+export type LibraryPanelIntent = { kind: "loadComponents" } | { kind: "searchRegistry"; query: string } | { kind: "installRegistryPackage"; packageId: string; version: string } | { kind: "setRegistry"; registryUrl: string; query: string } | { kind: "rebuildComponentIndex" } | { kind: "installPackage"; archivePath: string } | { kind: "loadFreecad"; query: string; page: number } | { kind: "setFreecadRoot"; root: string; query: string }
+export type LibraryPanelProjection = { kind: "registryPackages"; registryUrl: string; releases: RegistryReleaseSummary[] } | { kind: "componentPackages"; packageHeaders: ComponentPackageHeader[]; components: ExtractedComponentSearchResult[]; indexingDiagnostics: string[]; indexStatus?: ComponentIndexStatus | null } | { kind: "freecadLibrary"; freecadLibraryRoots: string[]; items: FreecadLibraryItem[]; page: number; hasMore: boolean }
 export type LithophaneAttachment = { id: string; enabled?: boolean; source: LithophaneAttachmentSource; targetPartId?: string; placement?: LithophanePlacement; relief?: LithophaneRelief; color?: LithophaneColor }
 export type LithophaneAttachmentSource = { kind: "file"; imagePath: string } | { kind: "param"; imageParam: string }
 export type LithophaneColor = { mode?: LithophaneColorMode; channelThicknessMm?: number }
@@ -2177,6 +2185,8 @@ export type OpenCampaignProjectResult = { run: CampaignRun; step: CampaignStepPa
 export type OpenInventoryThreadIntent = { threadId: string; messageLimit: number | null }
 export type OperationKind = "place" | "mate" | "join" | "cut" | "fuse" | "mold" | "blend"
 export type OverflowMode = "contain" | "cover" | "clamp" | "bleed"
+export type PackageDependency = { packageId: string; version: string }
+export type PackageDistribution = { files: string[]; license?: string | null; repository?: string | null; dependencies?: PackageDependency[] }
 export type PackageVisibility = "source" | "compiled" | "locked" | "private"
 export type ParamValue = string | number | boolean | null
 export type ParameterGroup = { groupId: string; label: string; parameterKeys?: string[]; partIds?: string[]; editable: boolean; presentation?: string | null; order?: number | null }
@@ -2252,6 +2262,7 @@ export type RasterTraceContour = { contourId: string; points: ([number, number])
 export type RasterTraceProvenance = { kind: string; asset: RasterTraceAssetIdentity; view: SketchView; calibration: RasterTraceCalibration; threshold: number; invert: boolean; contourId: string; extractorVersion: string }
 export type RasterTraceRequest = { imagePath: string; view: SketchView; calibration: RasterTraceCalibration; threshold: number; invert?: boolean }
 export type RasterTraceResponse = { asset: RasterTraceAssetIdentity; contours: RasterTraceContour[]; connectedComponentCount: number; extractorVersion: string; evidence?: string[] }
+export type RegistryReleaseSummary = { header: ComponentPackageHeader; license: string | null; archiveDigest: string; packageDigest: string }
 export type RejectViewportScreenshotInput = { requestId: string; error: string }
 export type ReopenedCaptureRun = { run: CaptureRun; session: CaptureSessionInfo }
 export type RepairVersionRuntimeIntent = { threadId: string; messageId: string; expectedArtifactIdentity?: string | null }

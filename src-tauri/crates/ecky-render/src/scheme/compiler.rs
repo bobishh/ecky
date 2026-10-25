@@ -3203,6 +3203,21 @@ fn collect_component_free_vars(
                         collect_component_free_vars(item, &mut scope, registry, free);
                     }
                 }
+                Some("for-union" | "for-compound") if items.len() >= 3 => {
+                    let mut scope = bound.clone();
+                    if let Ok(binding) = expr_list_items(&items[1], "for binding") {
+                        // The count is evaluated outside the loop variable's scope.
+                        for value in binding.iter().skip(1) {
+                            collect_component_free_vars(value, bound, registry, free);
+                        }
+                        if let Some(name) = binding.first().and_then(expr_identifier) {
+                            scope.insert(name);
+                        }
+                    }
+                    for item in items.iter().skip(2) {
+                        collect_component_free_vars(item, &mut scope, registry, free);
+                    }
+                }
                 Some("repeat")
                 | Some("repeat-union")
                 | Some("repeat-compound")

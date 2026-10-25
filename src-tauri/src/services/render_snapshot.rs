@@ -520,6 +520,7 @@ mod tests {
 
         fn lock(payload: &str) -> ComponentDependencyLock {
             ComponentDependencyLock {
+                cairn: None,
                 schema_version: COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
                 dependencies: vec![ComponentDependencyLockEntry {
                     package_id: "bike.kit".to_string(),
@@ -557,6 +558,7 @@ mod tests {
         fn locked_bundle(model_id: &str, payload: &str) -> ArtifactBundle {
             let mut bundle = bundle(model_id);
             let lock = ComponentDependencyLock {
+                cairn: None,
                 schema_version: COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
                 dependencies: vec![ComponentDependencyLockEntry {
                     package_id: "fixture.live".to_string(),
