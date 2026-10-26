@@ -40,7 +40,7 @@
 
 - [x] 5.6 Serve a branded public Hub with shared landing assets, bounded source inspection and browser happy/failure checks.
 - [x] 5.7 Configure DNS, then verify public CLI installation and local catalog discovery.
-- [ ] 5.8 Activate the Hub in the existing desktop profile and verify configuration and installed exports after restarting Ecky.
+- [x] 5.8 Activate the Hub in the existing desktop profile and verify configuration and installed exports after restarting Ecky.
 
 ## 6. Release
 
