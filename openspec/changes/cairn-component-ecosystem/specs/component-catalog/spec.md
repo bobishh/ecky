@@ -26,6 +26,11 @@ The system SHALL resolve supported model-local definitions and lexical loop bind
 - **WHEN** free references are collected
 - **THEN** loop indices are local to their bodies while count expressions retain outer-scope dependencies
 
+#### Scenario: Domain literals and binders
+- **GIVEN** unit-suffixed coordinate literals, keyword option blocks, literal axes or radial-loft expression binders
+- **WHEN** dependency closure is collected
+- **THEN** syntax literals and locally bound sampling variables are excluded while outer parameter references remain in the contract
+
 ### Requirement: Asynchronous recovery
 The system SHALL recover missing or obsolete catalog projections outside search requests, report progress and retain an available published snapshot during recovery.
 

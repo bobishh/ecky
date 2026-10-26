@@ -3203,6 +3203,40 @@ fn collect_component_free_vars(
                         collect_component_free_vars(item, &mut scope, registry, free);
                     }
                 }
+                Some("mirror")
+                    if items
+                        .get(1)
+                        .and_then(expr_identifier)
+                        .as_deref()
+                        .is_some_and(|axis| matches!(axis, "x" | "y" | "z")) =>
+                {
+                    // Axis symbols are syntax literals, not lexical references.
+                    for item in items.iter().skip(2) {
+                        collect_component_free_vars(item, bound, registry, free);
+                    }
+                }
+                Some("sampled-radial-loft") if items.len() >= 2 => {
+                    let mut scope = bound.clone();
+                    if let Ok(binders) = expr_list_items(&items[1], "radial loft binders") {
+                        for binder in &binders {
+                            bind_pattern_names(binder, &mut scope);
+                        }
+                    }
+                    for option in items[2..].chunks(2) {
+                        if let Some(value) = option.get(1) {
+                            let scoped = matches!(
+                                instantiation_keyword_name(&option[0]).as_deref(),
+                                Some("radius" | "z-map" | "z_map")
+                            );
+                            collect_component_free_vars(
+                                value,
+                                if scoped { &mut scope } else { bound },
+                                registry,
+                                free,
+                            );
+                        }
+                    }
+                }
                 Some("for-union" | "for-compound") if items.len() >= 3 => {
                     let mut scope = bound.clone();
                     if let Ok(binding) = expr_list_items(&items[1], "for binding") {
@@ -3249,21 +3283,17 @@ fn collect_component_free_vars(
                     }
                 }
                 _ => {
-                    let mut iter = items.iter();
-                    if head.is_some() {
-                        // Skip the operator position; it is either a builtin,
-                        // a component (checked via registry), or reported when
-                        // unknown below.
-                        if let Some(op) = iter.next().and_then(expr_identifier) {
-                            if !component_builtin_names().contains(&op)
-                                && !registry.contains_key(&op)
-                                && !bound.contains(&op)
-                            {
-                                free.insert(op);
-                            }
+                    for (index, item) in items.iter().enumerate() {
+                        // Image foreground enum literals belong to extrude's syntax.
+                        if head.as_deref() == Some("extrude")
+                            && index > 0
+                            && instantiation_keyword_name(&items[index - 1]).as_deref()
+                                == Some("foreground")
+                            && matches!(expr_identifier(item).as_deref(), Some("dark" | "light"))
+                        {
+                            continue;
                         }
-                    }
-                    for item in iter {
+                        // Operators and literal list heads use the same atom rules.
                         collect_component_free_vars(item, bound, registry, free);
                     }
                 }

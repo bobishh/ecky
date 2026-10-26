@@ -77,6 +77,19 @@ fn read_source(path: &str, failure: fn(String) -> CliError) -> Result<String, Cl
     fs::read_to_string(path).map_err(|error| failure(error.to_string()))
 }
 
+fn input_lock(
+    input: &str,
+) -> Result<
+    Option<ecky_cad_lib::contracts::ComponentDependencyLock>,
+    Box<ecky_cad_lib::contracts::AppError>,
+> {
+    let parent = Path::new(input)
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    ecky_cad_lib::project_mirror::read_project_lock(parent).map_err(Box::new)
+}
+
 fn check(args: &[String]) -> Result<(), CliError> {
     if args.len() != 1 || args[0].starts_with('-') {
         return Err(usage_error("check requires exactly one input path"));
@@ -84,12 +97,7 @@ fn check(args: &[String]) -> Result<(), CliError> {
     let source = read_source(&args[0], CliError::Check)?;
     let paths = ecky_cad_lib::cairn::CliPaths::discover()
         .map_err(|error| CliError::Check(error.to_string()))?;
-    let parent = Path::new(&args[0])
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let lock = ecky_cad_lib::project_mirror::read_project_lock(parent)
-        .map_err(|error| CliError::Check(error.to_string()))?;
+    let lock = input_lock(&args[0]).map_err(|error| CliError::Check(error.to_string()))?;
     let compiled = ecky_cad_lib::component_import_runtime::compile_authoring_source(
         ecky_cad_lib::component_import_runtime::ResolveAuthoringSourceRequest {
             authored_source: &source,
@@ -148,6 +156,18 @@ fn lower(args: &[String]) -> Result<(), CliError> {
         return Err(usage_error(format!("unsupported backend: {backend}")));
     }
     let source = read_source(input, CliError::Lower)?;
+    let paths = ecky_cad_lib::cairn::CliPaths::discover()
+        .map_err(|error| CliError::Lower(error.to_string()))?;
+    let lock = input_lock(input).map_err(|error| CliError::Lower(error.to_string()))?;
+    let resolved = ecky_cad_lib::component_import_runtime::resolve_authoring_source(
+        ecky_cad_lib::component_import_runtime::ResolveAuthoringSourceRequest {
+            authored_source: &source,
+            expected_lock: lock.as_ref(),
+        },
+        &ecky_cad_lib::component_import_runtime::InstalledLibraryComponentResolver { app: &paths },
+    )
+    .map_err(|error| CliError::Lower(error.to_string()))?;
+    let source = resolved.compiler_source;
     let lowered = match backend {
         "freecad" => ecky_cad_lib::ecky_ir::lower_to_freecad(&source),
         "build123d" => ecky_cad_lib::ecky_ir::lower_to_freecad(&source).map(|lowered| {
@@ -390,6 +410,7 @@ fn render_with(
         &DesignParams,
         GeometryBackend,
         &dyn PathResolver,
+        Option<&ecky_cad_lib::contracts::ComponentDependencyLock>,
     ) -> std::result::Result<
         ArtifactBundle,
         Box<ecky_cad_lib::contracts::AppError>,
@@ -398,8 +419,15 @@ fn render_with(
     let args = parse_render(args)?;
     let source = read_source(&args.input, CliError::Render)?;
     let resolver = CliResolver::new()?;
-    let bundle = render_backend(&source, &args.parameters, args.backend, &resolver)
-        .map_err(|error| CliError::Render(error.to_string()))?;
+    let lock = input_lock(&args.input).map_err(|error| CliError::Render(error.to_string()))?;
+    let bundle = render_backend(
+        &source,
+        &args.parameters,
+        args.backend,
+        &resolver,
+        lock.as_ref(),
+    )
+    .map_err(|error| CliError::Render(error.to_string()))?;
     if let Some(path) = &args.stl {
         copy_artifact(Path::new(&bundle.model_stl_path), path)?;
     }
@@ -429,12 +457,13 @@ fn render_with(
 }
 
 fn render(args: &[String]) -> Result<(), CliError> {
-    render_with(args, |source, parameters, backend, resolver| {
-        ecky_cad_lib::services::render::render_cli_ecky(
+    render_with(args, |source, parameters, backend, resolver, lock| {
+        ecky_cad_lib::services::render::render_cli_ecky_with_component_lock(
             source,
             parameters,
             backend,
             env::var("ECKY_FREECAD_CMD").ok().as_deref(),
+            lock,
             resolver,
         )
         .map_err(Box::new)
@@ -562,7 +591,7 @@ mod tests {
             output.display().to_string(),
         ];
 
-        render_with(&args, |_, _, backend, _| {
+        render_with(&args, |_, _, backend, _, _| {
             assert_eq!(backend, GeometryBackend::Freecad);
             Ok(bundle(&root.0, &preview, None))
         })
@@ -586,7 +615,7 @@ mod tests {
             output.display().to_string(),
         ];
 
-        render_with(&args, |_, _, backend, _| {
+        render_with(&args, |_, _, backend, _, _| {
             assert_eq!(backend, GeometryBackend::EckyRust);
             Ok(bundle(&root.0, &preview, None))
         })
@@ -613,7 +642,7 @@ mod tests {
                 &copied_step.display().to_string(),
             ],
         );
-        render_with(&args, |_, _, _, _| {
+        render_with(&args, |_, _, _, _, _| {
             Ok(bundle(&root.0, &preview, Some(&step)))
         })
         .expect("copy STEP");
@@ -624,7 +653,7 @@ mod tests {
 
         let missing = root.0.join("missing.stl");
         let missing_args = render_args(&input, &["--stl", &output.display().to_string()]);
-        let error = render_with(&missing_args, |_, _, _, _| {
+        let error = render_with(&missing_args, |_, _, _, _, _| {
             Ok(bundle(&root.0, &missing, None))
         })
         .expect_err("missing artifact should fail");
@@ -640,7 +669,7 @@ mod tests {
         fs::write(&input, "(model (part body (box 1 2 3)))").expect("write input");
         let args = render_args(&input, &["--stl", &output.display().to_string()]);
 
-        let error = render_with(&args, |_, _, _, _| {
+        let error = render_with(&args, |_, _, _, _, _| {
             Err(Box::new(AppError::with_details(
                 AppErrorCode::Render,
                 "native runner failed",

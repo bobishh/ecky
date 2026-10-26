@@ -96,6 +96,8 @@ jobs:
           cargo test -p ecky_cad --lib services::library_panel::tests --all-features
           cargo test -p ecky_cad --lib given_retrieval_candidates --all-features
           cargo test -p ecky_cad --lib given_catalog_capability --all-features
+          cargo test -p ecky_cad --test render_source_compiler_boundary given_installed_mesh_component --all-features
+          cargo test -p ecky_cad --bin ecky --features cli
 
       - name: Run Clippy
         run: cd src-tauri && cargo clippy --workspace --all-targets --all-features -- -D warnings

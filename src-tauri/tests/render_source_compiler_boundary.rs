@@ -125,3 +125,48 @@ fn cyrillic_pair_lookup_renders_from_a_select_parameter() {
     assert!(std::path::Path::new(&rendered.model_stl_path).is_file());
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn given_installed_mesh_component_when_cli_renders_live_import_then_source_and_lock_evidence_survive(
+) {
+    let root =
+        std::env::temp_dir().join(format!("ecky-cli-package-render-{}", uuid::Uuid::new_v4()));
+    let paths = RenderPaths(root.clone());
+    let project = root.join("package");
+    std::fs::create_dir_all(&project).unwrap();
+    let package=serde_json::from_value(serde_json::json!({"schemaVersion":1,"packageId":"cli.mesh","version":"1.0.0","displayName":"CLI mesh","visibility":"source","components":[{"componentId":"token","version":"1.0.0","displayName":"Token","sourceRef":"token.ecky","sourceLanguage":"ecky","geometryBackend":"mesh"}]})).unwrap();
+    ecky_cad_lib::component_package_runtime::write_component_package_manifest(&project, &package)
+        .unwrap();
+    std::fs::write(project.join("token.ecky"),"(define-component token () (polyhedron :vertices ((0 0 0) (3 0 0) (0 2 0) (0 0 1)) :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3))))").unwrap();
+    let archive = root.join("token.ecky-package");
+    ecky_cad_lib::component_package_runtime::write_distributable_component_package_archive(
+        &project, &archive,
+    )
+    .unwrap();
+    ecky_cad_lib::component_package_runtime::install_component_package_to_store(&paths, &archive)
+        .unwrap();
+    let source="(import-component \"cli.mesh\" :version \"1.0.0\" :component \"token\" :as token)\n(model (part body (token)))";
+    let bundle = render_cli_ecky(
+        source,
+        &DesignParams::new(),
+        GeometryBackend::EckyRust,
+        None,
+        &paths,
+    )
+    .expect("CLI resolves imports before native compilation");
+    assert_eq!(
+        bundle
+            .component_dependency_lock
+            .as_ref()
+            .unwrap()
+            .dependencies
+            .len(),
+        1
+    );
+    assert_eq!(
+        std::fs::read_to_string(bundle.macro_path.as_ref().unwrap()).unwrap(),
+        source
+    );
+    assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
+    std::fs::remove_dir_all(root).unwrap();
+}

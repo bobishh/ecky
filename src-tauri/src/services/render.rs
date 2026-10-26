@@ -1675,14 +1675,55 @@ pub fn render_cli_ecky(
     configured_freecad_cmd: Option<&str>,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
+    render_cli_ecky_with_component_lock(
+        source,
+        parameters,
+        geometry_backend,
+        configured_freecad_cmd,
+        None,
+        app,
+    )
+}
+
+/// CLI rendering shares package resolution, immutable pins and evidence with workbench rendering.
+pub fn render_cli_ecky_with_component_lock(
+    source: &str,
+    parameters: &DesignParams,
+    geometry_backend: GeometryBackend,
+    configured_freecad_cmd: Option<&str>,
+    expected_lock: Option<&crate::contracts::ComponentDependencyLock>,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
     let config = RenderConfigSnapshot {
         default_source_language: crate::contracts::SourceLanguage::EckyIrV0,
         default_geometry_backend: geometry_backend,
         freecad_cmd: configured_freecad_cmd.unwrap_or_default().to_string(),
         cad_text_font_path: String::new(),
     };
-    render_model_unlocked(
-        source,
+    let compilation = if expected_lock.is_some()
+        || crate::component_import_runtime::source_has_live_component_import(source)
+    {
+        Some(crate::component_import_runtime::compile_authoring_source(
+            crate::component_import_runtime::ResolveAuthoringSourceRequest {
+                authored_source: source,
+                expected_lock,
+            },
+            &crate::component_import_runtime::InstalledLibraryComponentResolver { app },
+        )?)
+    } else {
+        None
+    };
+    let _pins = compilation.as_ref().map(|compiled| {
+        crate::component_package_runtime::pin_component_store_payloads(
+            compiled.dependency_lock.package_digests(),
+        )
+    });
+    let resolved_source = compilation
+        .as_ref()
+        .map(component_render_source)
+        .transpose()?;
+    let bundle = render_model_unlocked(
+        resolved_source.as_deref().unwrap_or(source),
         parameters,
         Some(MacroDialect::EckyIrV0),
         Some(geometry_backend),
@@ -1691,7 +1732,11 @@ pub fn render_cli_ecky(
         &config,
         app,
         None,
-    )
+    )?;
+    match compilation {
+        Some(compiled) => finish_component_render(app, source, &compiled, bundle),
+        None => Ok(bundle),
+    }
 }
 
 pub async fn render_stl(
@@ -1884,17 +1929,8 @@ async fn render_model_with_component_lock_internal(
     let _component_payload_pins = crate::component_package_runtime::pin_component_store_payloads(
         compilation.dependency_lock.package_digests(),
     );
-    let lock_digest = crate::services::render_snapshot::component_dependency_lock_digest(
-        &compilation.dependency_lock,
-    )?;
-    // Runtime model ids and backend caches hash source identity. The lock salt
-    // prevents byte-identical package exports at different immutable
-    // coordinates from sharing one artifact directory.
-    let render_source = format!(
-        "; componentDependencyLockDigest {lock_digest}\n{}",
-        compilation.compiler_source
-    );
-    let mut bundle = render_model_with_previous_manifest_resolved(
+    let render_source = component_render_source(&compilation)?;
+    let bundle = render_model_with_previous_manifest_resolved(
         &render_source,
         parameters,
         macro_dialect,
@@ -1906,6 +1942,28 @@ async fn render_model_with_component_lock_internal(
         app,
     )
     .await?;
+    finish_component_render(app, authored_source, &compilation, bundle)
+}
+
+fn component_render_source(
+    compilation: &crate::component_import_runtime::ResolvedCompilation,
+) -> AppResult<String> {
+    let lock_digest = crate::services::render_snapshot::component_dependency_lock_digest(
+        &compilation.dependency_lock,
+    )?;
+    // Exact coordinates salt caches even when exported source bytes happen to match.
+    Ok(format!(
+        "; componentDependencyLockDigest {lock_digest}\n{}",
+        compilation.compiler_source
+    ))
+}
+
+fn finish_component_render(
+    app: &dyn PathResolver,
+    authored_source: &str,
+    compilation: &crate::component_import_runtime::ResolvedCompilation,
+    mut bundle: ArtifactBundle,
+) -> AppResult<ArtifactBundle> {
     if let Some(path) = bundle.macro_path.as_deref() {
         fs::write(path, authored_source).map_err(|error| {
             AppError::persistence(format!(
@@ -1921,7 +1979,7 @@ async fn render_model_with_component_lock_internal(
     crate::component_import_runtime::attach_resolved_component_evidence(
         &mut bundle,
         &mut manifest,
-        &compilation,
+        compilation,
     )?;
     crate::model_runtime::write_runtime_bundle(app, &bundle.model_id, &bundle, &manifest)
         .map(|(stored_bundle, _)| stored_bundle)

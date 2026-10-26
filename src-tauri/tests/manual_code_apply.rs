@@ -166,6 +166,12 @@ async fn changed_code_appends_then_renders_one_success_version_and_snapshot() {
     assert!(json.get("messageId").is_some());
     assert!(json.get("designOutput").is_some());
     assert!(json.get("thread_id").is_none());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -219,6 +225,12 @@ async fn invalid_code_is_already_head_then_records_raw_render_error_without_seco
         snapshot.design.expect("attempted snapshot").macro_code,
         invalid_source
     );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -260,6 +272,12 @@ async fn unchanged_successful_code_apply_reuses_durable_version_without_render_a
         .expect("count versions");
     assert_eq!(version_count, 2, "base + one changed source version");
     drop(conn);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -306,6 +324,12 @@ async fn code_preview_renders_snapshot_without_growing_history() {
         Some(base_message_id.as_str())
     );
     assert_eq!(snapshot.design.expect("preview design").macro_code, source);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -345,5 +369,11 @@ async fn invalid_code_preview_returns_raw_error_without_appending_history() {
         "(model (part body (box 10 10 10)))"
     );
     drop(conn);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(root).expect("cleanup");
 }

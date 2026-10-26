@@ -97,6 +97,7 @@ async fn given_published_collection_when_added_then_frozen_offline_install_prese
     command(&root.0, &consumer, &registry, &["init", "consumer"])
         .await
         .unwrap();
+    std::fs::write(consumer.join("model.ecky"),"(import-component \"cairn.stones\" :version \"0.1.0\" :component \"stone\" :as stone)\n(model (part token (stone)))").unwrap();
     command(
         &root.0,
         &consumer,
@@ -108,6 +109,29 @@ async fn given_published_collection_when_added_then_frozen_offline_install_prese
     assert!(!incomplete.join("interrupted.tmp").exists());
     assert!(incomplete.join("ecky-integrity.json").is_file());
     let lock = std::fs::read(consumer.join("ecky.lock.edn")).unwrap();
+    #[cfg(feature = "cli")]
+    {
+        for command in ["check", "lower"] {
+            let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ecky"));
+            child.arg(command);
+            if command == "lower" {
+                child
+                    .args(["--backend", "freecad", "--out"])
+                    .arg(root.0.join("lowered.py"));
+            }
+            let output = child
+                .arg(consumer.join("model.ecky"))
+                .env("ECKY_DATA_DIR", root.0.join("data"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{command}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     let found = command(&root.0, &consumer, &registry, &["search", "stone"])
         .await
         .unwrap();

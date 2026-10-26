@@ -237,6 +237,12 @@ async fn copy_inline_import_patches_renders_and_commits_one_version() {
             .expect("committed import")
     };
     assert_eq!(Some(head.id.as_str()), result.version.message_id.as_deref());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        fixture.state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(fixture.root).expect("cleanup");
 }
 
@@ -275,6 +281,12 @@ async fn stale_source_digest_rejects_before_source_or_version_write() {
         std::fs::read_to_string(binding.source_path).expect("persisted source"),
         fixture.source
     );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        fixture.state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(fixture.root).expect("cleanup");
 }
 
@@ -302,6 +314,12 @@ async fn render_failure_returns_raw_error_and_commits_one_error_version() {
     };
     assert_eq!(head.status, MessageStatus::Error);
     assert_eq!(Some(head.id.as_str()), result.version.message_id.as_deref());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        fixture.state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(fixture.root).expect("cleanup");
 }
 
@@ -370,5 +388,12 @@ async fn pinned_local_component_insertion_uses_bound_source_and_renders_one_vers
             .id,
         result.version.message_id.unwrap()
     );
+    drop(conn);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        fixture.state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(fixture.root).unwrap();
 }

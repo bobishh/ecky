@@ -266,6 +266,12 @@ async fn plane_crop_and_remove_append_versions_and_return_canonical_sources() {
     assert_eq!(removed.version.status, MessageStatus::Success);
     assert!(removed.external_sources[0].plane_crops.is_empty());
     assert_eq!(removed.version.design_output.macro_code, fixture.source);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        fixture.state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(fixture.root).expect("cleanup");
 }
 
@@ -312,6 +318,12 @@ async fn surface_trim_and_remove_append_versions_and_return_canonical_sources() 
     .expect("remove trim");
     assert_eq!(removed.version.status, MessageStatus::Success);
     assert!(removed.external_sources[0].surface_trims.is_empty());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        fixture.state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(fixture.root).expect("cleanup");
 }
 
@@ -349,6 +361,12 @@ async fn stale_source_digest_rejects_before_version_append() {
             .id
     };
     assert_eq!(before, after);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        fixture.state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(fixture.root).expect("cleanup");
 }
 
@@ -387,6 +405,12 @@ async fn render_failure_returns_raw_error_and_one_failed_immutable_version() {
     assert_eq!(head.status, MessageStatus::Error);
     assert_eq!(Some(head.id.as_str()), result.version.message_id.as_deref());
     drop(conn);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        fixture.state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(fixture.root).expect("cleanup");
 }
 

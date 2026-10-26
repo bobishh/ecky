@@ -11,7 +11,7 @@ use specta::Type;
 use crate::component_package_runtime::ExtractedComponentSearchResult;
 use crate::contracts::{AppError, AppResult};
 
-pub(crate) const CAPTURE_SCHEMA_VERSION: u32 = 5;
+pub(crate) const CAPTURE_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

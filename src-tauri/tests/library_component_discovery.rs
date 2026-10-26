@@ -449,3 +449,54 @@ async fn given_old_component_revision_when_catalog_detail_is_requested_then_cont
     assert!(result["sourceWindow"].as_str().unwrap().contains("width"));
     assert!(!result["sourceWindow"].as_str().unwrap().contains("depth"));
 }
+
+#[test]
+fn given_units_in_coordinate_lists_when_captured_then_literals_are_not_free_operators() {
+    let source="(model (part token (polyhedron :vertices ((0mm 0mm 0mm) (3mm 0mm 0mm) (0mm 2mm 0mm) (0mm 0mm 1mm)) :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))))";
+    let component = ecky_cad_lib::component_extract::extract_component(
+        &ecky_cad_lib::component_extract::ComponentExtractRequest {
+            source: source.into(),
+            part_key: "token".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    ecky_cad_lib::ecky_scheme::compile_to_core_program(&format!(
+        "{}\n(model (part reused (token)))",
+        component.component_source
+    ))
+    .unwrap();
+}
+
+#[test]
+fn given_keyword_option_blocks_when_captured_then_keywords_are_not_free_operators() {
+    let source="(model (part wall (wall-pattern (:mode \"ribs\" :depth 0.3 :uFreq 4 :vFreq 5) (box 10 10 2))))";
+    let component = ecky_cad_lib::component_extract::extract_component(
+        &ecky_cad_lib::component_extract::ComponentExtractRequest {
+            source: source.into(),
+            part_key: "wall".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    ecky_cad_lib::ecky_scheme::compile_to_core_program(&format!(
+        "{}\n(model (part reused (wall)))",
+        component.component_source
+    ))
+    .unwrap();
+}
+
+#[test]
+fn given_domain_binders_and_literals_when_collecting_references_then_only_outer_values_are_free() {
+    use std::collections::BTreeSet;
+    use steel_core::parser::parser::Parser;
+    for (source,expected) in [
+        ("(mirror y 0 missing-geometry)",vec!["missing-geometry"]),
+        ("(extrude input-profile extrusion-height :foreground dark)",vec!["extrusion-height","input-profile"]),
+        ("(sampled-radial-loft (theta z fz) :height height :z-steps 4 :theta-steps 12 :radius (+ base (* fz (sin theta)) z) :z-map (* fz height))",vec!["base","height"]),
+    ] {
+        let forms=Parser::parse_without_lowering(source).unwrap();
+        let free=ecky_cad_lib::ecky_scheme::compiler::collect_free_variables(&forms[0],&BTreeSet::new());
+        assert_eq!(free,expected.into_iter().map(str::to_string).collect(),"{source}");
+    }
+}

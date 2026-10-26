@@ -138,6 +138,12 @@ async fn persisted_parameter_apply_renders_manifest_and_appends_success_version_
         manifest.model_id
     );
     drop(conn);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -180,5 +186,11 @@ async fn failed_persisted_parameter_apply_appends_error_version_with_raw_backend
     assert_eq!(head.content, error.to_string());
     assert_eq!(head.output.expect("failed design").initial_params, invalid);
     drop(conn);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state.component_index_worker.wait_idle(),
+    )
+    .await
+    .expect("component indexing finishes before fixture cleanup");
     std::fs::remove_dir_all(root).expect("cleanup");
 }
