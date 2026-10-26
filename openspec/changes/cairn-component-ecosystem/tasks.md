@@ -35,21 +35,22 @@
 - [x] 5.1 Implement a desktop-independent versioned registry with SQLite metadata, immutable blobs and ETag caching.
 - [x] 5.2 Cover authenticated/idempotent publication, coordinate conflicts, yanking, bounded uploads and crash recovery through real HTTP flows.
 - [x] 5.3 Add a pinned Docker/Podman-compatible image, standalone binary usage, non-root volume/backup instructions and isolated container verification.
-- [ ] 5.4 Deploy through the existing server workflow with the task's infrastructure changes isolated from unrelated work.
-- [ ] 5.5 Publish a new low-poly stone demonstration collection and verify CLI discovery, frozen install and source compilation from the deployed endpoint.
+- [x] 5.4 Deploy through the existing server workflow with the task's infrastructure changes isolated from unrelated work.
+- [x] 5.5 Publish a new low-poly stone demonstration collection and verify CLI discovery, frozen install and source compilation from the deployed endpoint.
 
 - [x] 5.6 Serve a branded public Hub with shared landing assets, bounded source inspection and browser happy/failure checks.
-- [ ] 5.7 Configure DNS and the existing Ecky profile, then verify public CLI install and local catalog discovery.
+- [x] 5.7 Configure DNS, then verify public CLI installation and local catalog discovery.
+- [ ] 5.8 Activate the Hub in the existing desktop profile and verify configuration and installed exports after restarting Ecky.
 
 ## 6. Release
 
 - [x] 6.1 Update maintained English product/CLI/MCP documentation and generated contracts/references.
 - [x] 6.2 Run appropriate local Rust, frontend and browser checks; fix failures before the batched release push.
-- [ ] 6.3 Commit and push verified task changes without rewriting unrelated commits; follow relevant CI and deployment checks to completion using notifications or scheduled checks.
-- [ ] 6.4 Reconcile final specifications and retain execution evidence outside Git.
+- [x] 6.3 Commit and push verified task changes without rewriting unrelated commits; follow relevant CI and deployment checks to completion using notifications or scheduled checks.
+- [x] 6.4 Reconcile final specifications and retain execution evidence outside Git.
 
 ## 7. CLI distribution
 
-- [ ] 7.1 Package `ecky` and `cairn` as versioned macOS/Linux archives with checksums and any required runtime assets.
+- [x] 7.1 Package `ecky` and `cairn` as versioned macOS/Linux archives with checksums and any required runtime assets.
 - [x] 7.2 Provide a one-command installer that selects the platform, verifies checksums and preserves existing installations on failure.
-- [ ] 7.3 Verify installation from an isolated release directory and publish through the existing release workflow.
+- [x] 7.3 Verify installation from an isolated release directory and publish through the existing release workflow.

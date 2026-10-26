@@ -11,6 +11,8 @@ management never runs build scripts or fetches dependencies during compilation.
 curl -fsSL https://hub.ecky-cad.com/install.sh | sh
 ```
 
+Published builds support macOS arm64 and Linux arm64/x86_64 (Ubuntu 24.04 or newer).
+
 The installer selects the macOS/Linux archive for the machine, checks its SHA-256,
 stages the version and switches both commands together. The default prefix is
 `~/.local`; set `CAIRN_PREFIX` to use another absolute directory. It preserves old
