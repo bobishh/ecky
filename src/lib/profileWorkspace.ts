@@ -9,6 +9,9 @@ import type {
   ProfileLoopRole as ContractProfileLoopRole,
   ProfilePlane as ContractProfilePlane,
   ProfileDrawingProjectionResponse as ContractProfileDrawingProjectionResponse,
+  ProfileDisplayCurve as ContractProfileDisplayCurve,
+  ProfileSketchGeometry as ContractProfileSketchGeometry,
+  ProfileSketchLoop as ContractProfileSketchLoop,
   ProfileDrawingVisibility as ContractProfileDrawingVisibility,
   ProjectProfileDrawingRequest,
 } from './tauri/contracts';
@@ -16,12 +19,15 @@ import type {
 export type ProfilePlane = ContractProfilePlane;
 export type ProfileLoopRole = ContractProfileLoopRole;
 export type ProfilePoint = ContractProfileLoop['points'][number];
-export type ProfileLoop = ContractProfileLoop;
+export type ProfileCircleGeometry = Extract<ContractProfileSketchGeometry, { kind: 'circle' }>;
+export type ProfileLoop = ContractProfileLoop & { analyticCircle?: ProfileCircleGeometry };
 export type ProfileGeometryOperation = ProfileDerivationOperation;
 export type ProfileGeometryAccuracy = ProfileEvidenceAccuracy;
 export type ProfileAssetReference = ProfileAsset;
 export type ProfileGeometryResponse = ContractProfileGeometryResponse;
 export type ProfileDrawingProjectionResponse = ContractProfileDrawingProjectionResponse;
+export type ProfileDisplayCurve = ContractProfileDisplayCurve;
+export type ProfileSketchLoop = ContractProfileSketchLoop;
 export type ProfileDrawingVisibility = ContractProfileDrawingVisibility;
 export type ProfileDrawingInput = Pick<ProjectProfileDrawingRequest, 'view' | 'toleranceMm'> & {
   visibility: ProfileDrawingVisibility;
@@ -32,7 +38,7 @@ export type ProfileDeriveInput = Pick<ProfileGeometryRequest, 'operation' | 'tol
 export type ProfileApplyReference = NonNullable<ProfileFeatureApplyRequest['reference']>;
 export type ProfileApplyInput = Pick<
   ProfileFeatureApplyRequest,
-  'loops' | 'plane' | 'offsetMm' | 'clearanceMm' | 'depthMm' | 'partName' | 'reference' | 'drawingProfile'
+  'loops' | 'sketchLoops' | 'plane' | 'offsetMm' | 'clearanceMm' | 'depthMm' | 'partName' | 'reference' | 'drawingProfile'
 >;
 export type ProfileApplyOutcome = { status: 'saved' } | { status: 'error'; message: string };
 
@@ -93,6 +99,40 @@ export function profileLoopsForApply(
   return normalizeProfileLoops(editableLoops);
 }
 
+export function profileSketchLoopsForApply(editableLoops: ProfileLoop[]): ProfileSketchLoop[] | undefined {
+  if (!editableLoops.some((loop) => loop.analyticCircle)) return undefined;
+  return normalizeProfileLoops(editableLoops).map((loop) => ({
+    role: loop.role,
+    parentIndex: loop.parentIndex,
+    geometry: loop.analyticCircle
+      ? { kind: 'circle', centerMm: loop.analyticCircle.centerMm, radiusMm: loop.analyticCircle.radiusMm }
+      : { kind: 'polygon', pointsMm: loop.points },
+  }));
+}
+
+export function profileDisplayCurveArcPath(
+  curve: Extract<ProfileDisplayCurve, { kind: 'circularArc' | 'ellipticalArc' }>,
+): string {
+  const ellipse = curve.kind === 'ellipticalArc';
+  const rotation = ellipse ? curve.rotationRad : 0;
+  const majorRadius = ellipse ? curve.majorRadiusMm : curve.radiusMm;
+  const minorRadius = ellipse ? curve.minorRadiusMm : curve.radiusMm;
+  const pointAt = (angle: number): ProfilePoint => {
+    const x = majorRadius * Math.cos(angle);
+    const y = minorRadius * Math.sin(angle);
+    return [
+      curve.centerMm[0] + x * Math.cos(rotation) - y * Math.sin(rotation),
+      curve.centerMm[1] + x * Math.sin(rotation) + y * Math.cos(rotation),
+    ];
+  };
+  const start = pointAt(curve.startAngleRad);
+  const end = pointAt(curve.startAngleRad + curve.sweepAngleRad);
+  const largeArcFlag = Math.abs(curve.sweepAngleRad) > Math.PI ? 1 : 0;
+  const sweepFlag = curve.sweepAngleRad < 0 ? 1 : 0;
+  const rotationDegrees = (rotation * -180) / Math.PI;
+  return `M ${svgNumber(start[0])} ${svgNumber(-start[1])} A ${svgNumber(majorRadius)} ${svgNumber(minorRadius)} ${svgNumber(rotationDegrees)} ${largeArcFlag} ${sweepFlag} ${svgNumber(end[0])} ${svgNumber(-end[1])}`;
+}
+
 export function profileReferenceForApply(
   evidence: ProfileGeometryResponse | null,
   convertedToApproximate: boolean,
@@ -136,11 +176,16 @@ export function removeProfileLoop(loops: ProfileLoop[], removeIndex: number): Pr
 }
 
 export function profileBounds(loops: ProfileLoop[]): ProfileBounds {
-  return profileBoundsFromPoints(loops.flatMap((loop) => loop.points));
+  return profileBoundsFromPoints(loops.flatMap((loop) => loop.analyticCircle
+    ? circleBoundsPoints(loop.analyticCircle.centerMm, loop.analyticCircle.radiusMm)
+    : loop.points));
 }
 
-export function profileDrawingBounds(displayEdges: ProfileDrawingProjectionResponse['displayEdges']): ProfileBounds | null {
-  const points = displayEdges.flat();
+export function profileDrawingBounds(
+  displayEdges: ProfileDrawingProjectionResponse['displayEdges'],
+  displayCurves: ProfileDisplayCurve[] = [],
+): ProfileBounds | null {
+  const points = [...displayEdges.flat(), ...displayCurves.flatMap(displayCurveBoundsPoints)];
   return points.length ? profileBoundsFromPoints(points) : null;
 }
 
@@ -188,6 +233,11 @@ export function profilePointFromPointer(
 }
 
 export function profileLoopArea(loop: ProfileLoop): number {
+  if (loop.analyticCircle) {
+    const { radiusMm } = loop.analyticCircle;
+    const area = Math.PI * radiusMm * radiusMm;
+    return loop.role === 'hole' ? -area : area;
+  }
   let area = 0;
   for (let index = 0; index < loop.points.length; index += 1) {
     const current = loop.points[index];
@@ -212,6 +262,11 @@ export function normalizeProfileLoops(loops: ProfileLoop[]): ProfileLoop[] {
       points,
       role: loop.role,
       parentIndex: loop.role === 'hole' ? loop.parentIndex : null,
+      ...(loop.analyticCircle ? { analyticCircle: {
+        kind: 'circle' as const,
+        centerMm: [loop.analyticCircle.centerMm[0], loop.analyticCircle.centerMm[1]] as ProfilePoint,
+        radiusMm: loop.analyticCircle.radiusMm,
+      } } : {}),
     };
   });
 }
@@ -220,7 +275,14 @@ export function profileLoopError(loops: ProfileLoop[]): string | null {
   if (!loops.length) return 'Draw or extract a closed profile first.';
   const normalized = normalizeProfileLoops(loops);
   for (const [index, loop] of normalized.entries()) {
-    if (loop.points.length < 3) return `Profile ${index + 1} needs at least three vertices.`;
+    if (loop.analyticCircle) {
+      const { centerMm, radiusMm } = loop.analyticCircle;
+      if (!Number.isFinite(centerMm[0]) || !Number.isFinite(centerMm[1]) || !Number.isFinite(radiusMm) || radiusMm <= 0) {
+        return `Circle ${index + 1} needs a finite center and a radius greater than zero.`;
+      }
+    } else if (loop.points.length < 3) {
+      return `Profile ${index + 1} needs at least three vertices.`;
+    }
     if (loop.points.some((point) => !isFinitePoint(point))) return `Profile ${index + 1} has a non-finite vertex.`;
     if (Math.abs(profileLoopArea(loop)) < 1e-8) return `Profile ${index + 1} has no measurable area.`;
     if (loop.role === 'hole') {
@@ -228,8 +290,7 @@ export function profileLoopError(loops: ProfileLoop[]): string | null {
       if (!parent || parent.role !== 'outer' || loop.parentIndex === index) {
         return `Hole ${index + 1} needs an outer profile.`;
       }
-      const firstPoint = loop.points[0];
-      if (firstPoint && !pointInsideProfile(firstPoint, parent)) {
+      if (!profileLoopContainedBy(loop, parent)) {
         return `Hole ${index + 1} must sit inside its outer profile.`;
       }
     }
@@ -237,7 +298,31 @@ export function profileLoopError(loops: ProfileLoop[]): string | null {
   return null;
 }
 
+function profileLoopContainedBy(inner: ProfileLoop, outer: ProfileLoop): boolean {
+  if (inner.analyticCircle && outer.analyticCircle) {
+    const centerDistance = Math.hypot(
+      inner.analyticCircle.centerMm[0] - outer.analyticCircle.centerMm[0],
+      inner.analyticCircle.centerMm[1] - outer.analyticCircle.centerMm[1],
+    );
+    return centerDistance + inner.analyticCircle.radiusMm <= outer.analyticCircle.radiusMm + 1e-8;
+  }
+  const innerPoints = inner.analyticCircle
+    ? profileCirclePoints(inner.analyticCircle.centerMm, inner.analyticCircle.radiusMm)
+    : inner.points;
+  if (outer.analyticCircle) {
+    return innerPoints.every((point) => {
+      const distance = Math.hypot(point[0] - outer.analyticCircle!.centerMm[0], point[1] - outer.analyticCircle!.centerMm[1]);
+      return distance <= outer.analyticCircle!.radiusMm + 1e-8;
+    });
+  }
+  return innerPoints.every((point) => pointInsideProfile(point, outer));
+}
+
 export function pointInsideProfile(point: ProfilePoint, loop: ProfileLoop): boolean {
+  if (loop.analyticCircle) {
+    const [centerX, centerY] = loop.analyticCircle.centerMm;
+    return Math.hypot(point[0] - centerX, point[1] - centerY) < loop.analyticCircle.radiusMm;
+  }
   let inside = false;
   const [x, y] = point;
   for (let index = 0, previous = loop.points.length - 1; index < loop.points.length; previous = index, index += 1) {
@@ -262,9 +347,55 @@ function cloneProfileLoop(loop: ProfileLoop): ProfileLoop {
     points: loop.points.map(([x, y]) => [x, y]),
     role: loop.role,
     parentIndex: loop.parentIndex,
+    ...(loop.analyticCircle ? { analyticCircle: {
+      kind: 'circle',
+      centerMm: [loop.analyticCircle.centerMm[0], loop.analyticCircle.centerMm[1]],
+      radiusMm: loop.analyticCircle.radiusMm,
+    } } : {}),
   };
+}
+
+export function profileCirclePoints(centerMm: ProfilePoint, radiusMm: number, count = 64): ProfilePoint[] {
+  return Array.from({ length: count }, (_, index) => {
+    const angle = (Math.PI * 2 * index) / count;
+    return [centerMm[0] + radiusMm * Math.cos(angle), centerMm[1] + radiusMm * Math.sin(angle)];
+  });
+}
+
+function circleBoundsPoints(centerMm: ProfilePoint, radiusMm: number): ProfilePoint[] {
+  return [
+    [centerMm[0] - radiusMm, centerMm[1]],
+    [centerMm[0], centerMm[1] - radiusMm],
+    [centerMm[0] + radiusMm, centerMm[1]],
+    [centerMm[0], centerMm[1] + radiusMm],
+  ];
+}
+
+function displayCurveBoundsPoints(curve: ProfileDisplayCurve): ProfilePoint[] {
+  if (curve.kind === 'line') return [curve.startMm, curve.endMm];
+  const steps = 64;
+  if (curve.kind === 'circle') return circleBoundsPoints(curve.centerMm, curve.radiusMm);
+  const isEllipse = curve.kind === 'ellipse' || curve.kind === 'ellipticalArc';
+  const startAngle = curve.kind === 'circularArc' || curve.kind === 'ellipticalArc' ? curve.startAngleRad : 0;
+  const sweep = curve.kind === 'circularArc' || curve.kind === 'ellipticalArc' ? curve.sweepAngleRad : Math.PI * 2;
+  const rotation = isEllipse ? curve.rotationRad : 0;
+  const majorRadius = isEllipse ? curve.majorRadiusMm : curve.radiusMm;
+  const minorRadius = isEllipse ? curve.minorRadiusMm : curve.radiusMm;
+  return Array.from({ length: steps + 1 }, (_, index) => {
+    const angle = startAngle + (sweep * index) / steps;
+    const x = majorRadius * Math.cos(angle);
+    const y = minorRadius * Math.sin(angle);
+    const cos = Math.cos(rotation);
+    const sin = Math.sin(rotation);
+    return [curve.centerMm[0] + x * cos - y * sin, curve.centerMm[1] + x * sin + y * cos];
+  });
 }
 
 function nearlyEqual(left: number, right: number): boolean {
   return Math.abs(left - right) <= 1e-7;
+}
+
+function svgNumber(value: number): string {
+  if (Math.abs(value) < 1e-12) return '0';
+  return Number(value.toFixed(9)).toString();
 }

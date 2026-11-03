@@ -64,6 +64,68 @@ pub struct ProfileLoop {
     pub parent_index: Option<usize>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Type)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ProfileSketchGeometry {
+    #[specta(rename_all = "camelCase")]
+    Polygon { points_mm: Vec<[f64; 2]> },
+    #[specta(rename_all = "camelCase")]
+    Circle { center_mm: [f64; 2], radius_mm: f64 },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfileSketchLoop {
+    pub geometry: ProfileSketchGeometry,
+    pub role: ProfileLoopRole,
+    pub parent_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Type)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ProfileDisplayCurve {
+    #[specta(rename_all = "camelCase")]
+    Line {
+        start_mm: [f64; 2],
+        end_mm: [f64; 2],
+    },
+    #[specta(rename_all = "camelCase")]
+    Circle { center_mm: [f64; 2], radius_mm: f64 },
+    #[specta(rename_all = "camelCase")]
+    CircularArc {
+        center_mm: [f64; 2],
+        radius_mm: f64,
+        start_angle_rad: f64,
+        sweep_angle_rad: f64,
+    },
+    #[specta(rename_all = "camelCase")]
+    Ellipse {
+        center_mm: [f64; 2],
+        major_radius_mm: f64,
+        minor_radius_mm: f64,
+        rotation_rad: f64,
+    },
+    #[specta(rename_all = "camelCase")]
+    EllipticalArc {
+        center_mm: [f64; 2],
+        major_radius_mm: f64,
+        minor_radius_mm: f64,
+        rotation_rad: f64,
+        start_angle_rad: f64,
+        sweep_angle_rad: f64,
+    },
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum ProfileEvidenceAccuracy {
@@ -138,6 +200,7 @@ pub struct ProfileDrawingProjectionResponse {
     pub units: String,
     pub projection_asset: ProfileAsset,
     pub display_edges: Vec<Vec<[f64; 2]>>,
+    pub display_curves: Vec<ProfileDisplayCurve>,
     pub warnings: Vec<String>,
 }
 
@@ -199,6 +262,8 @@ pub struct ProfileFeatureApplyRequest {
     pub expected_source: String,
     #[serde(default)]
     pub loops: Option<Vec<ProfileLoop>>,
+    #[serde(default)]
+    pub sketch_loops: Option<Vec<ProfileSketchLoop>>,
     pub plane: ProfilePlane,
     pub offset_mm: f64,
     pub clearance_mm: f64,
@@ -407,6 +472,12 @@ pub fn project_profile_drawing(
             AppError::parse(format!("Native drawing preview edges are invalid: {error}"))
         })?;
     let display_edges = validate_display_edges(report.display_edges)?;
+    let display_curves = validate_display_curves(report.display_curves)?;
+    if display_edges.is_empty() && display_curves.is_empty() {
+        return Err(AppError::validation(
+            "Exact drawing projection returned no display curves.",
+        ));
+    }
     if artifact_digest(&request.artifact_path)? != source_digest {
         return Err(AppError::conflict(
             "Projection source STEP changed while the exact drawing was being calculated; retry.",
@@ -438,7 +509,7 @@ pub fn project_profile_drawing(
     }
     let mut warnings = report.warnings;
     warnings.push(
-        "Drawing curves remain exact in the STEP asset. Display edges are sampled independently; they are not joined into closed profiles.".into(),
+        "The STEP asset preserves exact curves. Analytic display curves are exact; displayEdges contains sampled fallback curves only. Display geometry is never joined into closed profiles.".into(),
     );
     Ok(ProfileDrawingProjectionResponse {
         source_artifact_path: request.artifact_path,
@@ -452,6 +523,7 @@ pub fn project_profile_drawing(
             artifact_digest: asset_digest,
         },
         display_edges,
+        display_curves,
         warnings,
     })
 }
@@ -591,6 +663,8 @@ fn run_profile_native_command(
 struct ExactDrawingReport {
     display_edges: Vec<Vec<[f64; 2]>>,
     #[serde(default)]
+    display_curves: Vec<ProfileDisplayCurve>,
+    #[serde(default)]
     warnings: Vec<String>,
 }
 
@@ -609,11 +683,6 @@ fn validate_drawing_projection_request(request: &ProjectProfileDrawingRequest) -
 }
 
 fn validate_display_edges(edges: Vec<Vec<[f64; 2]>>) -> AppResult<Vec<Vec<[f64; 2]>>> {
-    if edges.is_empty() {
-        return Err(AppError::validation(
-            "Exact drawing projection returned no visible curves.",
-        ));
-    }
     for edge in &edges {
         if edge.len() < 2
             || edge
@@ -627,6 +696,73 @@ fn validate_display_edges(edges: Vec<Vec<[f64; 2]>>) -> AppResult<Vec<Vec<[f64; 
         }
     }
     Ok(edges)
+}
+
+fn validate_display_curves(
+    curves: Vec<ProfileDisplayCurve>,
+) -> AppResult<Vec<ProfileDisplayCurve>> {
+    let finite_point = |point: [f64; 2]| point.iter().all(|value| value.is_finite());
+    let valid = curves.iter().all(|curve| match curve {
+        ProfileDisplayCurve::Line { start_mm, end_mm } => {
+            finite_point(*start_mm) && finite_point(*end_mm)
+        }
+        ProfileDisplayCurve::Circle {
+            center_mm,
+            radius_mm,
+        } => finite_point(*center_mm) && radius_mm.is_finite() && *radius_mm > 0.0,
+        ProfileDisplayCurve::CircularArc {
+            center_mm,
+            radius_mm,
+            start_angle_rad,
+            sweep_angle_rad,
+        } => {
+            finite_point(*center_mm)
+                && radius_mm.is_finite()
+                && *radius_mm > 0.0
+                && start_angle_rad.is_finite()
+                && sweep_angle_rad.is_finite()
+                && *sweep_angle_rad != 0.0
+                && sweep_angle_rad.abs() <= std::f64::consts::TAU + 1.0e-8
+        }
+        ProfileDisplayCurve::Ellipse {
+            center_mm,
+            major_radius_mm,
+            minor_radius_mm,
+            rotation_rad,
+        } => {
+            finite_point(*center_mm)
+                && major_radius_mm.is_finite()
+                && minor_radius_mm.is_finite()
+                && *major_radius_mm >= *minor_radius_mm
+                && *minor_radius_mm > 0.0
+                && rotation_rad.is_finite()
+        }
+        ProfileDisplayCurve::EllipticalArc {
+            center_mm,
+            major_radius_mm,
+            minor_radius_mm,
+            rotation_rad,
+            start_angle_rad,
+            sweep_angle_rad,
+        } => {
+            finite_point(*center_mm)
+                && major_radius_mm.is_finite()
+                && minor_radius_mm.is_finite()
+                && *major_radius_mm >= *minor_radius_mm
+                && *minor_radius_mm > 0.0
+                && rotation_rad.is_finite()
+                && start_angle_rad.is_finite()
+                && sweep_angle_rad.is_finite()
+                && *sweep_angle_rad != 0.0
+                && sweep_angle_rad.abs() <= std::f64::consts::TAU + 1.0e-8
+        }
+    });
+    if !valid {
+        return Err(AppError::validation(
+            "Exact drawing projection contains an invalid analytic curve.",
+        ));
+    }
+    Ok(curves)
 }
 
 #[derive(Deserialize)]
@@ -968,9 +1104,11 @@ pub async fn apply_profile_feature(
     }
 
     let loops = request.loops.as_deref();
+    let sketch_loops = request.sketch_loops.as_deref();
     let source = build_profile_feature_source(
         &request.expected_source,
         loops,
+        sketch_loops,
         request.plane,
         request.offset_mm,
         request.clearance_mm,
@@ -985,7 +1123,8 @@ pub async fn apply_profile_feature(
         .reference
         .as_ref()
         .is_some_and(|reference| reference.accuracy == ProfileEvidenceAccuracy::ExactBrep)
-        || request.drawing_profile.is_some();
+        || request.drawing_profile.is_some()
+        || request.sketch_loops.is_some();
     let geometry_backend = if exact_profile {
         let program = crate::ecky_scheme::compile_to_core_program(&source).map_err(|error| {
             AppError::parse(format!("Exact profile source cannot be compiled: {error}"))
@@ -1074,7 +1213,8 @@ fn validate_feature_request(request: &ProfileFeatureApplyRequest) -> AppResult<(
         ));
     }
     if let Some(drawing) = request.drawing_profile.as_ref() {
-        if request.reference.is_some() || request.loops.is_some() {
+        if request.reference.is_some() || request.loops.is_some() || request.sketch_loops.is_some()
+        {
             return Err(AppError::validation(
                 "Choose one profile source: drawing, CAD reference, or manual outline.",
             ));
@@ -1087,8 +1227,16 @@ fn validate_feature_request(request: &ProfileFeatureApplyRequest) -> AppResult<(
         validate_drawing_primitives(&drawing.primitives)?;
         return Ok(());
     }
+    if request.loops.is_some() && request.sketch_loops.is_some() {
+        return Err(AppError::validation(
+            "Choose polygon loops or typed sketch loops, not both.",
+        ));
+    }
     match request.reference.as_ref() {
         Some(reference) => {
+            if request.sketch_loops.is_some() {
+                return Err(AppError::validation("Typed sketch loops are manual geometry and cannot include a CAD or mesh reference."));
+            }
             if !reference.tolerance_mm.is_finite()
                 || !(1.0e-6..=1.0).contains(&reference.tolerance_mm)
             {
@@ -1191,10 +1339,16 @@ fn validate_feature_request(request: &ProfileFeatureApplyRequest) -> AppResult<(
                 }
             }
         }
-        None => validate_profile_loops(request.loops.as_deref().ok_or_else(|| {
-            AppError::validation("Manual profile requires at least one closed loop.")
-        })?)
-        .map(|_| ()),
+        None => {
+            if let Some(sketch_loops) = request.sketch_loops.as_deref() {
+                validate_profile_sketch_loops(sketch_loops).map(|_| ())
+            } else {
+                validate_profile_loops(request.loops.as_deref().ok_or_else(|| {
+                    AppError::validation("Manual profile requires at least one closed loop.")
+                })?)
+                .map(|_| ())
+            }
+        }
     }
 }
 
@@ -1747,6 +1901,7 @@ fn classify_loops(mut loops: Vec<Vec<[f64; 2]>>) -> AppResult<Vec<ProfileLoop>> 
 fn build_profile_feature_source(
     source: &str,
     loops: Option<&[ProfileLoop]>,
+    sketch_loops: Option<&[ProfileSketchLoop]>,
     plane: ProfilePlane,
     offset: f64,
     clearance: f64,
@@ -1773,6 +1928,9 @@ fn build_profile_feature_source(
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"")
         )
+    } else if let Some(sketch_loops) = sketch_loops {
+        validate_profile_sketch_loops(sketch_loops)?;
+        sketch_profile_expression(sketch_loops)?
     } else {
         profile_expression(&validate_profile_loops(loops.ok_or_else(|| {
             AppError::validation("Profile loops are required for approximate or manual geometry.")
@@ -1924,6 +2082,146 @@ fn profile_expression(loops: &[ProfileLoop]) -> AppResult<String> {
     } else {
         format!("(union {})", regions.join(" "))
     })
+}
+
+fn validate_profile_sketch_loops(loops: &[ProfileSketchLoop]) -> AppResult<()> {
+    if loops.is_empty() {
+        return Err(AppError::validation(
+            "Manual sketch needs at least one closed loop.",
+        ));
+    }
+    if loops.len() > 256 {
+        return Err(AppError::validation(
+            "Manual sketch supports at most 256 closed loops.",
+        ));
+    }
+    let primitives = loops
+        .iter()
+        .enumerate()
+        .map(|(index, loop_)| {
+            let id = format!("sketch-loop-{index}");
+            match &loop_.geometry {
+                ProfileSketchGeometry::Polygon { points_mm } => {
+                    crate::services::drawing_import::DrawingPrimitive::Polyline {
+                        id,
+                        points_mm: points_mm.clone(),
+                        closed: true,
+                        residual_mm: 0.0,
+                    }
+                }
+                ProfileSketchGeometry::Circle {
+                    center_mm,
+                    radius_mm,
+                } => crate::services::drawing_import::DrawingPrimitive::Circle {
+                    id,
+                    center_mm: *center_mm,
+                    radius_mm: *radius_mm,
+                    residual_mm: 0.0,
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    let review = crate::services::drawing_import::review_profile_primitives(&primitives);
+    if let Some(diagnostic) = review.diagnostics.first() {
+        return Err(AppError::validation(diagnostic.clone()));
+    }
+    for (index, loop_) in loops.iter().enumerate() {
+        let id = format!("profile-sketch-loop-{index}");
+        let candidate = review
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .ok_or_else(|| {
+                AppError::validation("Manual sketch loop could not be assigned a profile region.")
+            })?;
+        let expected_role = match loop_.role {
+            ProfileLoopRole::Outer => crate::services::drawing_import::DrawingProfileRole::Outer,
+            ProfileLoopRole::Hole => crate::services::drawing_import::DrawingProfileRole::Hole,
+        };
+        let expected_parent = loop_
+            .parent_index
+            .map(|parent| format!("profile-sketch-loop-{parent}"));
+        if candidate.role != expected_role
+            || candidate.parent_id != expected_parent
+            || !candidate.issues.is_empty()
+        {
+            return Err(AppError::validation(
+                "Manual sketch loop role or parent does not match its geometric containment.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn sketch_profile_expression(loops: &[ProfileSketchLoop]) -> AppResult<String> {
+    let roots = loops
+        .iter()
+        .enumerate()
+        .filter(|(_, loop_)| loop_.role == ProfileLoopRole::Outer && loop_.parent_index.is_none())
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return Err(AppError::validation(
+            "Profile needs at least one outer boundary.",
+        ));
+    }
+    let regions = roots
+        .into_iter()
+        .map(|index| sketch_profile_region_expression(index, loops))
+        .collect::<AppResult<Vec<_>>>()?;
+    Ok(union_expression(regions))
+}
+
+fn sketch_profile_region_expression(
+    index: usize,
+    loops: &[ProfileSketchLoop],
+) -> AppResult<String> {
+    let outer = sketch_geometry_expression(&loops[index].geometry);
+    let holes = loops
+        .iter()
+        .enumerate()
+        .filter(|(_, loop_)| {
+            loop_.role == ProfileLoopRole::Hole && loop_.parent_index == Some(index)
+        })
+        .map(|(_, loop_)| sketch_geometry_expression(&loop_.geometry))
+        .collect::<Vec<_>>();
+    let region = if holes.is_empty() {
+        outer
+    } else {
+        format!("(profile :outer {outer} :holes ({}))", holes.join(" "))
+    };
+    let islands = loops
+        .iter()
+        .enumerate()
+        .filter(|(_, loop_)| {
+            loop_.role == ProfileLoopRole::Outer
+                && loop_.parent_index.is_some_and(|parent| {
+                    loops[parent].role == ProfileLoopRole::Hole
+                        && loops[parent].parent_index == Some(index)
+                })
+        })
+        .map(|(child, _)| sketch_profile_region_expression(child, loops))
+        .collect::<AppResult<Vec<_>>>()?;
+    Ok(if islands.is_empty() {
+        region
+    } else {
+        format!("(union {region} {})", union_expression(islands))
+    })
+}
+
+fn sketch_geometry_expression(geometry: &ProfileSketchGeometry) -> String {
+    match geometry {
+        ProfileSketchGeometry::Polygon { points_mm } => loop_expression(points_mm),
+        ProfileSketchGeometry::Circle {
+            center_mm,
+            radius_mm,
+        } => format!(
+            "(translate {} {} 0 (circle {}))",
+            number(center_mm[0]),
+            number(center_mm[1]),
+            number(*radius_mm)
+        ),
+    }
 }
 
 fn profile_region_expression(index: usize, loops: &[ProfileLoop]) -> AppResult<String> {
@@ -2223,7 +2521,25 @@ mod tests {
         );
         assert!(validate_display_edges(vec![vec![[0.0, 0.0]]]).is_err());
         assert!(validate_display_edges(vec![vec![[0.0, f64::NAN], [1.0, 1.0]]]).is_err());
-        assert!(validate_display_edges(Vec::new()).is_err());
+        assert!(validate_display_edges(Vec::new()).unwrap().is_empty());
+        assert!(
+            validate_display_curves(vec![ProfileDisplayCurve::CircularArc {
+                center_mm: [0.0, 0.0],
+                radius_mm: 5.0,
+                start_angle_rad: 0.25,
+                sweep_angle_rad: -4.0,
+            }])
+            .is_ok()
+        );
+        assert!(
+            validate_display_curves(vec![ProfileDisplayCurve::CircularArc {
+                center_mm: [0.0, 0.0],
+                radius_mm: 5.0,
+                start_angle_rad: 0.0,
+                sweep_angle_rad: 7.0,
+            }])
+            .is_err()
+        );
     }
 
     #[test]
@@ -2346,7 +2662,7 @@ mod tests {
         );
         assert_eq!(response.units, "mm");
         assert_eq!(response.visibility, ProfileDrawingVisibility::AllEdges);
-        assert!(!response.display_edges.is_empty());
+        assert!(!response.display_edges.is_empty() || !response.display_curves.is_empty());
         assert!(response.display_edges.iter().all(|edge| edge.len() >= 2));
         assert!(response
             .projection_asset
@@ -2495,6 +2811,7 @@ mod tests {
         let source = build_profile_feature_source(
             "(model (part body (box 1 1 1)))",
             Some(&loops),
+            None,
             ProfilePlane::Xz,
             3.0,
             0.0,
@@ -2510,6 +2827,53 @@ mod tests {
         assert!(source.contains(":holes"));
         assert!(source.contains("profile_feature_depth"));
         assert!(source.contains("(rotate 90 0 0"));
+    }
+
+    #[test]
+    fn given_manual_circle_and_hole_when_profile_built_then_keeps_analytic_geometry() {
+        let loops = vec![
+            ProfileSketchLoop {
+                geometry: ProfileSketchGeometry::Circle {
+                    center_mm: [12.0, 8.0],
+                    radius_mm: 20.0,
+                },
+                role: ProfileLoopRole::Outer,
+                parent_index: None,
+            },
+            ProfileSketchLoop {
+                geometry: ProfileSketchGeometry::Circle {
+                    center_mm: [12.0, 8.0],
+                    radius_mm: 4.0,
+                },
+                role: ProfileLoopRole::Hole,
+                parent_index: Some(0),
+            },
+        ];
+        validate_profile_sketch_loops(&loops).unwrap();
+        let expression = sketch_profile_expression(&loops).unwrap();
+        assert!(expression.contains("(circle 20)"));
+        assert!(expression.contains("(circle 4)"));
+        assert!(!expression.contains("polygon"));
+        let source = build_profile_feature_source(
+            "(model (part body (box 1 1 1)))",
+            None,
+            Some(&loops),
+            ProfilePlane::Xy,
+            0.0,
+            1.0,
+            7.0,
+            "manual_circle_part",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(source.contains("(offset manual_circle_part_clearance"));
+        assert!(source.contains("(circle 20)"));
+        assert!(source.contains("(circle 4)"));
+        crate::ecky_scheme::compile_to_core_program(&source)
+            .expect("analytic circle profile compiles without tessellated feature geometry");
     }
 
     #[test]
@@ -2530,6 +2894,7 @@ mod tests {
         };
         let source = build_profile_feature_source(
             "(model (part body (box 1 1 1)))",
+            None,
             None,
             ProfilePlane::Xy,
             3.0,
@@ -2730,6 +3095,7 @@ mod tests {
                 base_message_id: Some(base_message_id),
                 expected_source: base_source.into(),
                 loops: None,
+                sketch_loops: None,
                 plane: ProfilePlane::Xy,
                 offset_mm: 3.0,
                 clearance_mm: 1.0,
@@ -2855,6 +3221,7 @@ mod tests {
                 base_message_id: applied.draft.message_id.clone(),
                 expected_source: source.clone(),
                 loops: None,
+                sketch_loops: None,
                 plane: ProfilePlane::Xy,
                 offset_mm: 0.0,
                 clearance_mm: 0.0,
@@ -2925,6 +3292,80 @@ mod tests {
                 .any(|radius| (*radius - photo_hole_radius).abs() < 1.0e-6),
             "native STEP lacks the fitted {:.6} mm hole: {photo_radii:?}",
             photo_hole_radius
+        );
+
+        let manual_circle = apply_profile_feature(
+            ProfileFeatureApplyRequest {
+                thread_id: "profile-apply".into(),
+                base_message_id: photo_applied.draft.message_id.clone(),
+                expected_source: photo_applied.source.clone(),
+                loops: None,
+                sketch_loops: Some(vec![
+                    ProfileSketchLoop {
+                        geometry: ProfileSketchGeometry::Circle {
+                            center_mm: [31.0, 17.0],
+                            radius_mm: 15.0,
+                        },
+                        role: ProfileLoopRole::Outer,
+                        parent_index: None,
+                    },
+                    ProfileSketchLoop {
+                        geometry: ProfileSketchGeometry::Circle {
+                            center_mm: [31.0, 17.0],
+                            radius_mm: 5.0,
+                        },
+                        role: ProfileLoopRole::Hole,
+                        parent_index: Some(0),
+                    },
+                ]),
+                plane: ProfilePlane::Xy,
+                offset_mm: 0.0,
+                clearance_mm: 1.0,
+                depth_mm: 7.0,
+                part_name: "manual_circle_part".into(),
+                reference: None,
+                drawing_profile: None,
+            },
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("manual analytic circle profile applies through normal version lifecycle");
+        assert_eq!(
+            manual_circle.draft.status,
+            crate::contracts::MessageStatus::Success
+        );
+        assert!(manual_circle.draft.message_id.is_some());
+        assert!(manual_circle
+            .source
+            .contains("(translate 31 17 0 (circle 15))"));
+        assert!(manual_circle
+            .source
+            .contains("(translate 31 17 0 (circle 5))"));
+        let manual_step = manual_circle
+            .draft
+            .artifact_bundle
+            .as_ref()
+            .and_then(|bundle| {
+                bundle
+                    .export_artifacts
+                    .iter()
+                    .find(|artifact| artifact.format.eq_ignore_ascii_case("step"))
+            })
+            .map(|artifact| Path::new(&artifact.path))
+            .expect("native STEP export for manual analytic circle");
+        let manual_radii = circle_radii(&std::fs::read_to_string(manual_step).unwrap());
+        assert!(
+            manual_radii
+                .iter()
+                .any(|radius| (*radius - 16.0).abs() < 1.0e-6),
+            "outer circle clearance must stay analytic at r=16 mm: {manual_radii:?}"
+        );
+        assert!(
+            manual_radii
+                .iter()
+                .any(|radius| (*radius - 4.0).abs() < 1.0e-6),
+            "hole clearance must stay analytic at r=4 mm: {manual_radii:?}"
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3106,7 +3547,7 @@ mod tests {
                 artifact_digest(&drawing.projection_asset.artifact_path).unwrap(),
                 drawing.projection_asset.artifact_digest
             );
-            assert!(!drawing.display_edges.is_empty());
+            assert!(!drawing.display_edges.is_empty() || !drawing.display_curves.is_empty());
             assert!(drawing.display_edges.iter().all(|edge| edge.len() >= 2));
 
             let derived = derive_profile_geometry(
@@ -3132,6 +3573,7 @@ mod tests {
                     base_message_id: Some(base_message_id),
                     expected_source: base_source.into(),
                     loops: None,
+                    sketch_loops: None,
                     plane,
                     offset_mm: 0.0,
                     clearance_mm: 0.0,
@@ -3341,6 +3783,34 @@ mod tests {
     }
 
     #[test]
+    fn given_curve_aware_profile_contracts_when_serialized_then_preserves_analytic_names() {
+        let manual: ProfileSketchGeometry = serde_json::from_value(serde_json::json!({
+            "kind": "circle",
+            "centerMm": [12.0, 8.0],
+            "radiusMm": 4.0
+        }))
+        .unwrap();
+        assert_eq!(
+            manual,
+            ProfileSketchGeometry::Circle {
+                center_mm: [12.0, 8.0],
+                radius_mm: 4.0,
+            }
+        );
+        let curve = serde_json::to_value(ProfileDisplayCurve::CircularArc {
+            center_mm: [2.0, 3.0],
+            radius_mm: 7.0,
+            start_angle_rad: 0.25,
+            sweep_angle_rad: -4.0,
+        })
+        .unwrap();
+        assert_eq!(curve["kind"], "circularArc");
+        assert_eq!(curve["startAngleRad"], 0.25);
+        assert_eq!(curve["sweepAngleRad"], -4.0);
+        assert!(curve.get("start_angle_rad").is_none());
+    }
+
+    #[test]
     fn given_profile_with_hole_clearance_and_offset_when_rendered_then_produces_mesh() {
         struct Resolver(std::path::PathBuf);
         impl PathResolver for Resolver {
@@ -3369,6 +3839,7 @@ mod tests {
         let source = build_profile_feature_source(
             "(model (part body (box 1 1 1)))",
             Some(&loops),
+            None,
             ProfilePlane::Xy,
             2.0,
             0.2,

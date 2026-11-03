@@ -4,9 +4,12 @@ import {
   normalizeProfileLoops,
   profileLoopArea,
   profileDrawingBounds,
+  profileDisplayCurveArcPath,
+  profileBounds,
   profileLoopError,
   profileGeometrySettingsMatch,
   profileLoopsForApply,
+  profileSketchLoopsForApply,
   profilePlacementForOperation,
   profileRequestIsCurrent,
   finishProfileViewRequest,
@@ -59,6 +62,53 @@ test('normalizing a one-vertex draft does not mistake its only point for a closi
 
 test('profile validation rejects open rings with too few distinct vertices', () => {
   assert.equal(profileLoopError([{ ...square, points: [[0, 0], [4, 0]] }]), 'Profile 1 needs at least three vertices.');
+});
+
+test('analytic circles keep exact sketch geometry through normalization, bounds, and apply conversion', () => {
+  const circle: ProfileLoop = {
+    points: [[-5, 0], [0, -5], [5, 0], [0, 5]],
+    analyticCircle: { kind: 'circle', centerMm: [0, 0], radiusMm: 5 },
+    role: 'outer',
+    parentIndex: null,
+  };
+  const normalized = normalizeProfileLoops([circle]);
+  assert.deepEqual(normalized[0]?.analyticCircle, { kind: 'circle', centerMm: [0, 0], radiusMm: 5 });
+  assert.equal(profileLoopArea(normalized[0]!), Math.PI * 25);
+  const bounds = profileBounds(normalized);
+  assert.equal(bounds.width, 12.4);
+  assert.equal(bounds.height, 12.4);
+  assert.ok(bounds.minX < -5);
+  assert.ok(bounds.minY < -5);
+  assert.deepEqual(profileSketchLoopsForApply(normalized), [{
+    role: 'outer',
+    parentIndex: null,
+    geometry: { kind: 'circle', centerMm: [0, 0], radiusMm: 5 },
+  }]);
+  assert.equal(profileLoopError(normalized), null);
+});
+
+test('analytic projection curve bounds include circle and ellipse extents without sampled edges', () => {
+  const bounds = profileDrawingBounds([], [
+    { kind: 'circle', centerMm: [0, 0], radiusMm: 5 },
+    { kind: 'ellipse', centerMm: [20, 10], majorRadiusMm: 8, minorRadiusMm: 4, rotationRad: Math.PI / 2 },
+  ]);
+  assert.ok(bounds);
+  assert.ok(bounds.minX <= -5);
+  assert.ok(bounds.minY <= -5);
+  assert.ok(bounds.width >= 33);
+  assert.ok(bounds.height >= 16);
+});
+
+test('projection arc paths preserve major sweeps and ellipse rotation', () => {
+  const circleArc = profileDisplayCurveArcPath({
+    kind: 'circularArc', centerMm: [0, 0], radiusMm: 3, startAngleRad: 0, sweepAngleRad: Math.PI * 1.5,
+  });
+  assert.match(circleArc, /^M 3 0 A 3 3 0 1 0 /);
+  const ellipseArc = profileDisplayCurveArcPath({
+    kind: 'ellipticalArc', centerMm: [1, 2], majorRadiusMm: 8, minorRadiusMm: 4,
+    rotationRad: Math.PI / 4, startAngleRad: 0.2, sweepAngleRad: -1.1,
+  });
+  assert.match(ellipseArc, / A 8 4 -45 0 1 /);
 });
 
 test('profile evidence must be re-derived when operation or tolerance changes', () => {

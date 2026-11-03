@@ -8376,8 +8376,72 @@ std::vector<std::array<double, 2>> sample_profile_edge(const TopoDS_Edge& edge,
     return points;
 }
 
+std::optional<std::string> exact_display_curve_json(const TopoDS_Edge& edge) {
+    BRepAdaptor_Curve curve(edge);
+    Standard_Real first = curve.FirstParameter();
+    Standard_Real last = curve.LastParameter();
+    const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+    const Standard_Real start = reversed ? last : first;
+    const Standard_Real sweep = reversed ? first - last : last - first;
+    std::ostringstream output;
+    output << std::setprecision(17);
+    const auto point = [&](const gp_Pnt& value) {
+        output << '[' << value.X() << ',' << value.Y() << ']';
+    };
+    switch (curve.GetType()) {
+        case GeomAbs_Line: {
+            output << "{\"kind\":\"line\",\"startMm\":";
+            point(curve.Value(start));
+            output << ",\"endMm\":";
+            point(curve.Value(start + sweep));
+            output << '}';
+            return output.str();
+        }
+        case GeomAbs_Circle: {
+            const gp_Circ circle = curve.Circle();
+            const gp_Pnt center = circle.Location();
+            const double radius = circle.Radius();
+            if (std::abs(std::abs(sweep) - 2.0 * M_PI) <= 1.0e-8) {
+                output << "{\"kind\":\"circle\",\"centerMm\":";
+                point(center);
+                output << ",\"radiusMm\":" << radius << '}';
+            } else {
+                output << "{\"kind\":\"circularArc\",\"centerMm\":";
+                point(center);
+                output << ",\"radiusMm\":" << radius << ",\"startAngleRad\":" << start
+                       << ",\"sweepAngleRad\":" << sweep << '}';
+            }
+            return output.str();
+        }
+        case GeomAbs_Ellipse: {
+            const gp_Elips ellipse = curve.Ellipse();
+            const gp_Pnt center = ellipse.Location();
+            const gp_Dir x_axis = ellipse.Position().XDirection();
+            const double rotation = std::atan2(x_axis.Y(), x_axis.X());
+            if (std::abs(std::abs(sweep) - 2.0 * M_PI) <= 1.0e-8) {
+                output << "{\"kind\":\"ellipse\",\"centerMm\":";
+                point(center);
+                output << ",\"majorRadiusMm\":" << ellipse.MajorRadius()
+                       << ",\"minorRadiusMm\":" << ellipse.MinorRadius()
+                       << ",\"rotationRad\":" << rotation << '}';
+            } else {
+                output << "{\"kind\":\"ellipticalArc\",\"centerMm\":";
+                point(center);
+                output << ",\"majorRadiusMm\":" << ellipse.MajorRadius()
+                       << ",\"minorRadiusMm\":" << ellipse.MinorRadius()
+                       << ",\"rotationRad\":" << rotation << ",\"startAngleRad\":" << start
+                       << ",\"sweepAngleRad\":" << sweep << '}';
+            }
+            return output.str();
+        }
+        default:
+            return std::nullopt;
+    }
+}
+
 void write_profile_drawing_file(const fs::path& path,
                                 const std::vector<std::vector<std::array<double, 2>>>& edges,
+                                const std::vector<std::string>& curves,
                                 const std::vector<std::string>& warnings) {
     std::ostringstream output;
     output << std::setprecision(17) << "{\"displayEdges\":[";
@@ -8389,6 +8453,11 @@ void write_profile_drawing_file(const fs::path& path,
             output << '[' << edges[edge][point][0] << ',' << edges[edge][point][1] << ']';
         }
         output << ']';
+    }
+    output << "],\"displayCurves\":[";
+    for (std::size_t curve = 0; curve < curves.size(); ++curve) {
+        if (curve > 0) output << ',';
+        output << curves[curve];
     }
     output << "],\"warnings\":[";
     for (std::size_t index = 0; index < warnings.size(); ++index) {
@@ -8566,8 +8635,10 @@ void project_exact_drawing(const ProfileDrawingRequest& request, const fs::path&
     TopoDS_Compound exact_edges;
     builder.MakeCompound(exact_edges);
     std::vector<std::vector<std::array<double, 2>>> display_edges;
+    std::vector<std::string> display_curves;
     std::size_t point_degenerate_edges = 0;
     display_edges.reserve(static_cast<std::size_t>(unique_edges.Extent()));
+    display_curves.reserve(static_cast<std::size_t>(unique_edges.Extent()));
     for (int index = 1; index <= unique_edges.Extent(); ++index) {
         const TopoDS_Edge edge = TopoDS::Edge(unique_edges(index));
         TopLoc_Location location;
@@ -8581,9 +8652,13 @@ void project_exact_drawing(const ProfileDrawingRequest& request, const fs::path&
             throw EvalError("exact drawing projection HLR edge has no exact 3D curve");
         }
         builder.Add(exact_edges, edge);
-        bool point_degenerate = false;
-        display_edges.push_back(sample_profile_edge(edge, request.tolerance_mm, point_degenerate));
-        if (point_degenerate) ++point_degenerate_edges;
+        if (auto analytic = exact_display_curve_json(edge)) {
+            display_curves.push_back(std::move(*analytic));
+        } else {
+            bool point_degenerate = false;
+            display_edges.push_back(sample_profile_edge(edge, request.tolerance_mm, point_degenerate));
+            if (point_degenerate) ++point_degenerate_edges;
+        }
     }
     fs::create_directories(output_dir);
     write_step_file(output_dir / "projection.step", {exact_edges});
@@ -8594,7 +8669,8 @@ void project_exact_drawing(const ProfileDrawingRequest& request, const fs::path&
     if (request.visibility == "allEdges") {
         prepared.warnings.push_back("All projected edges shown, including edges hidden behind other geometry.");
     }
-    write_profile_drawing_file(output_dir / "display-edges.json", display_edges, prepared.warnings);
+    write_profile_drawing_file(
+        output_dir / "display-edges.json", display_edges, display_curves, prepared.warnings);
 }
 
 ProfileDerivationRequest parse_profile_derivation_request(yyjson_val* root) {

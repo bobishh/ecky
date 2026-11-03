@@ -11,7 +11,10 @@
     profileReferenceForApply,
     profilePointFromPointer,
     profileDrawingBounds,
+    profileCirclePoints,
+    profileDisplayCurveArcPath,
     removeProfileLoop,
+    profileSketchLoopsForApply,
     type ProfileApplyInput,
     type ProfileApplyOutcome,
     type ProfileDeriveInput,
@@ -192,6 +195,7 @@
   let currentLoops = $derived(currentEdit.loops);
   let selectedLoopIndex = $derived(currentEdit.selectedLoopIndex);
   let selectedPointIndex = $derived(currentEdit.selectedPointIndex);
+  let selectedLoop = $derived(currentLoops[selectedLoopIndex] ?? null);
   let draftLoopIndex = $derived(currentEdit.draftLoopIndex);
   let drawing = $derived(currentEdit.drawing);
   let visibleViews = $derived(viewLayout === 'allThree' ? PROFILE_VIEWS : [selectedView]);
@@ -1053,7 +1057,9 @@
     setError('');
     setStatus(activeTool === 'polyline'
       ? 'Click three or more points in the selected view, then close the loop.'
-      : `Click two points in the selected view to create an approximate ${activeTool}.`);
+      : activeTool === 'circle'
+        ? 'Click the circle center, then a point on its radius. Circle remains analytic.'
+        : 'Click two opposite corners to create a rectangle.');
   }
 
   function addDrawingPoint(event: MouseEvent, view: ProfileView): void {
@@ -1082,11 +1088,16 @@
     } else {
       const [cx, cy] = draft.points[0]!;
       const radius = Math.hypot(point[0] - cx, point[1] - cy);
-      const points = Array.from({ length: 48 }, (_, index) => {
-        const angle = (2 * Math.PI * index) / 48;
-        return [cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)] as ProfilePoint;
-      });
-      loops[draftIndex] = { ...draft, points };
+      if (radius <= 0) {
+        setError('Circle radius must be greater than zero.');
+        return;
+      }
+      const points = profileCirclePoints([cx, cy], radius);
+      loops[draftIndex] = {
+        ...draft,
+        points,
+        analyticCircle: { kind: 'circle', centerMm: [cx, cy] as ProfilePoint, radiusMm: radius },
+      };
       patchProfileEditor(selectedView, { drawing: false, draftLoopIndex: null });
     }
     replaceLoops(loops);
@@ -1190,7 +1201,7 @@
     const loops = evidence?.loops ?? (view === selectedView ? currentLoops : profileEditorFor(view).loops);
     const profileBoundsForView = loops.length ? profileBounds(loops) : null;
     const drawing = projectionDrawingForView(view);
-    const drawingBoundsForView = drawing ? profileDrawingBounds(drawing.displayEdges) : null;
+    const drawingBoundsForView = drawing ? profileDrawingBounds(drawing.displayEdges, drawing.displayCurves) : null;
     if (profileBoundsForView && drawingBoundsForView) {
       const minX = Math.min(profileBoundsForView.minX, drawingBoundsForView.minX);
       const minY = Math.min(profileBoundsForView.minY, drawingBoundsForView.minY);
@@ -1318,6 +1329,26 @@
     patchProfileEditor(selectedView, { loops: normalizeProfileLoops(loops) });
   }
 
+  function updateCircleGeometry(field: 'x' | 'y' | 'radius', value: string): void {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || (field === 'radius' && parsed <= 0)) return;
+    const loops = [...startEdit()];
+    const loop = loops[selectedLoopIndex];
+    if (!loop?.analyticCircle) return;
+    const centerMm: ProfilePoint = [...loop.analyticCircle.centerMm];
+    let radiusMm = loop.analyticCircle.radiusMm;
+    if (field === 'x') centerMm[0] = parsed;
+    else if (field === 'y') centerMm[1] = parsed;
+    else radiusMm = parsed;
+    rememberUndo();
+    loops[selectedLoopIndex] = {
+      ...loop,
+      points: profileCirclePoints(centerMm, radiusMm),
+      analyticCircle: { kind: 'circle', centerMm, radiusMm },
+    };
+    patchProfileEditor(selectedView, { loops: normalizeProfileLoops(loops), selectedPointIndex: null });
+  }
+
   function removeSelectedLoop(): void {
     const loops = [...startEdit()];
     if (!loops[selectedLoopIndex]) return;
@@ -1407,18 +1438,19 @@
     const drawingProfile = photoProfileReady && currentPhoto?.recognition && acceptedPhotoPrimitives
       ? { evidenceId: currentPhoto.recognition.evidenceId, primitives: acceptedPhotoPrimitives }
       : undefined;
-    const loops = drawingProfile ? undefined : profileLoopsForApply(
+    const sketchLoops = drawingProfile ? undefined : profileSketchLoopsForApply(currentLoops);
+    const loops = drawingProfile || sketchLoops ? undefined : profileLoopsForApply(
       currentEvidence,
       convertedSelectedEvidence,
       currentLoops,
     );
-    const validation = loops ? profileLoopError(loops) : null;
+    const validation = drawingProfile ? null : profileLoopError(currentLoops);
     if (validation) {
       setError(validation);
       return;
     }
 
-    const reference = profileReferenceForApply(
+    const reference = sketchLoops ? null : profileReferenceForApply(
       currentEvidence,
       convertedSelectedEvidence,
     );
@@ -1433,6 +1465,7 @@
     try {
       const outcome = await onApply({
         ...(loops ? { loops } : {}),
+        ...(sketchLoops ? { sketchLoops } : {}),
         plane: currentEdit.placementPlane,
         offsetMm,
         clearanceMm,
@@ -1716,7 +1749,7 @@
             <select aria-label="Drawing tool" bind:value={activeTool} disabled={drawing || currentPending !== null || Boolean(currentPhoto)}>
               <option value="polyline">Polyline</option>
               <option value="rectangle">Rectangle</option>
-              <option value="circle">Circle · approximate</option>
+              <option value="circle">Circle</option>
             </select>
           </label>
           <label class="snap-control">
@@ -1744,13 +1777,21 @@
           {#if currentLoops.length > 0}
             <label>
               Selected loop
-              <select aria-label="Selected loop" bind:value={selectedLoopIndex} disabled={currentPending !== null || drawing}>
+              <select aria-label="Selected loop" value={selectedLoopIndex} onchange={(event) => patchProfileEditor(selectedView, { selectedLoopIndex: Number(event.currentTarget.value), selectedPointIndex: null })} disabled={currentPending !== null || drawing}>
                 {#each currentLoops as loop, index (`${index}-${loop.role}`)}
-                  <option value={index}>{loop.role === 'hole' ? 'Hole' : 'Outer'} {index + 1} · {loop.points.length} pts</option>
+                  <option value={index}>{loop.role === 'hole' ? 'Hole' : 'Outer'} {index + 1}{loop.analyticCircle ? ` · circle r=${loop.analyticCircle.radiusMm.toFixed(2)} mm` : ` · ${loop.points.length} pts`}</option>
                 {/each}
               </select>
             </label>
             <button class="text-button" type="button" onclick={removeSelectedLoop} disabled={currentPending !== null || drawing}>Remove selected loop</button>
+          {/if}
+          {#if selectedLoop?.analyticCircle}
+            <div class="vertex-fields" aria-label="Edit analytic circle">
+              <label>Center X (mm)<input aria-label="Circle center X (mm)" type="number" step="0.01" value={selectedLoop.analyticCircle.centerMm[0]} onchange={(event) => updateCircleGeometry('x', event.currentTarget.value)} disabled={currentPending !== null} /></label>
+              <label>Center Y (mm)<input aria-label="Circle center Y (mm)" type="number" step="0.01" value={selectedLoop.analyticCircle.centerMm[1]} onchange={(event) => updateCircleGeometry('y', event.currentTarget.value)} disabled={currentPending !== null} /></label>
+              <label>Radius (mm)<input aria-label="Circle radius (mm)" type="number" min="0.001" step="0.01" value={selectedLoop.analyticCircle.radiusMm} onchange={(event) => updateCircleGeometry('radius', event.currentTarget.value)} disabled={currentPending !== null} /></label>
+            </div>
+            <p class="inline-hint">Circle stays analytic in the applied feature.</p>
           {/if}
           {#if selectedVertex}
             <div class="vertex-fields" aria-label="Selected vertex coordinates">
@@ -1925,6 +1966,20 @@
                 {/each}
               {/if}
               {#if projectionDrawing && !photo}
+                {#each projectionDrawing.displayCurves as curve, curveIndex (`projected-curve-${view}-${curveIndex}`)}
+                  {#if curve.kind === 'line'}
+                    <line class="projected-line" data-testid="projected-line" x1={curve.startMm[0]} y1={-curve.startMm[1]} x2={curve.endMm[0]} y2={-curve.endMm[1]} />
+                  {:else if curve.kind === 'circle'}
+                    <circle class="projected-circle" data-testid="projected-circle" cx={curve.centerMm[0]} cy={-curve.centerMm[1]} r={curve.radiusMm} />
+                  {:else if curve.kind === 'circularArc'}
+                    <path class="projected-circular-arc" data-testid="projected-circular-arc" d={profileDisplayCurveArcPath(curve)} />
+                  {:else if curve.kind === 'ellipse'}
+                    {@const rotationDegrees = (-curve.rotationRad * 180) / Math.PI}
+                    <ellipse class="projected-ellipse" data-testid="projected-ellipse" cx={curve.centerMm[0]} cy={-curve.centerMm[1]} rx={curve.majorRadiusMm} ry={curve.minorRadiusMm} transform={`rotate(${rotationDegrees} ${curve.centerMm[0]} ${-curve.centerMm[1]})`} />
+                  {:else}
+                    <path class="projected-elliptical-arc" data-testid="projected-elliptical-arc" d={profileDisplayCurveArcPath(curve)} />
+                  {/if}
+                {/each}
                 {#each projectionDrawing.displayEdges as edge, edgeIndex (`projected-edge-${view}-${edgeIndex}`)}
                   {@const edgePoints = edge.map(([x, y]) => `${x},${-y}`).join(' ')}
                   <polyline class="projected-edge" data-testid="projected-edge" points={edgePoints} />
@@ -1932,8 +1987,12 @@
               {/if}
               {#each viewLoops as loop, loopIndex (`${view}-${loopIndex}-${loop.points.length}-${loop.role}`)}
                 {@const pathPoints = loop.points.map(([x, y]) => `${x},${-y}`).join(' ')}
-                <polygon points={pathPoints} class={[loop.role, loop.role === 'hole' && 'hole', profileEditorFor(view).selectedLoopIndex === loopIndex && 'selected-loop', profileEditorFor(view).drawing && loopIndex === profileEditorFor(view).draftLoopIndex && 'open-draft']} fill-rule="evenodd" />
-                {#if selectedView === view && !isViewExact && !drawing}
+                {#if loop.analyticCircle}
+                  <circle class={['analytic-profile-circle', loop.role === 'hole' && 'hole', profileEditorFor(view).selectedLoopIndex === loopIndex && 'selected-loop']} data-testid="analytic-profile-circle" cx={loop.analyticCircle.centerMm[0]} cy={-loop.analyticCircle.centerMm[1]} r={loop.analyticCircle.radiusMm} />
+                {:else}
+                  <polygon points={pathPoints} class={[loop.role, loop.role === 'hole' && 'hole', profileEditorFor(view).selectedLoopIndex === loopIndex && 'selected-loop', profileEditorFor(view).drawing && loopIndex === profileEditorFor(view).draftLoopIndex && 'open-draft']} fill-rule="evenodd" />
+                {/if}
+                {#if selectedView === view && !isViewExact && !drawing && !loop.analyticCircle}
                   {#each loop.points as point, pointIndex (`${view}-${loopIndex}-${pointIndex}`)}
                     <circle
                       cx={point[0]}
@@ -1964,7 +2023,7 @@
           <span>Image coordinates in pixels · set scale and recognize before applying.</span>
         {:else if currentProjectionDrawing && !currentEvidence}
           <span class="evidence-tag exact">EXACT CAD PROJECTION</span>
-          <span>{selectedView.toUpperCase()} · {currentProjectionDrawing.visibility === 'allEdges' ? 'all edges, including occluded' : 'visible edges only'} · {currentProjectionDrawing.displayEdges.length} projected edges · preview only · build a closed profile before applying</span>
+          <span>{selectedView.toUpperCase()} · {currentProjectionDrawing.visibility === 'allEdges' ? 'all edges, including occluded' : 'visible edges only'} · {currentProjectionDrawing.displayEdges.length + currentProjectionDrawing.displayCurves.length} projected edges · preview only · build a closed profile before applying</span>
         {:else if currentEvidence}
           <span class={['evidence-tag', { exact: isExactProfile }]}>{isExactProfile ? 'EXACT CAD PROFILE' : 'APPROXIMATE PROFILE'}</span>
           <span>
@@ -2226,10 +2285,14 @@
 
   .grid-line { fill: none; stroke: #29343d; stroke-width: 0.55; vector-effect: non-scaling-stroke; }
   .axis-line { stroke: #59636a; stroke-width: 0.8; vector-effect: non-scaling-stroke; }
-  .sketch-pane polygon { fill: color-mix(in srgb, var(--profile-primary) 22%, transparent); stroke: var(--profile-muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .sketch-pane polygon,
+  .analytic-profile-circle { fill: color-mix(in srgb, var(--profile-primary) 22%, transparent); stroke: var(--profile-muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
   .sketch-pane polygon.selected-loop { stroke: var(--profile-secondary); stroke-width: 1.5; }
-  .sketch-pane polygon.hole { fill: color-mix(in srgb, #aa5b50 20%, transparent); stroke: #c78274; }
+  .analytic-profile-circle.selected-loop { stroke: var(--profile-secondary); stroke-width: 1.5; }
+  .sketch-pane polygon.hole,
+  .analytic-profile-circle.hole { fill: color-mix(in srgb, #aa5b50 20%, transparent); stroke: #c78274; }
   .projected-edge { fill: none; stroke: #82b1a2; stroke-width: 1.05; vector-effect: non-scaling-stroke; pointer-events: none; }
+  .projected-line, .projected-circle, .projected-circular-arc, .projected-ellipse, .projected-elliptical-arc { fill: none; stroke: #82b1a2; stroke-width: 1.05; vector-effect: non-scaling-stroke; pointer-events: none; }
   .sketch-pane polygon.open-draft { fill: none; stroke-dasharray: 4 3; }
   .drawing-region { fill: color-mix(in srgb, var(--profile-secondary) 16%, transparent); stroke: var(--profile-secondary); stroke-width: 1.2; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; pointer-events: none; }
   .drawing-pick-point { fill: #f1c879; stroke: #17120a; stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }

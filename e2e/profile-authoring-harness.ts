@@ -7,6 +7,7 @@ type ProfileMockOptions = {
   failedProfileView?: 'front' | 'top' | 'side';
   structuredProjectionError?: boolean;
   nativeProjectionDirectory?: string;
+  analyticProjectionCurves?: boolean;
   missingArtifact?: boolean;
   applyMode?: 'success' | 'render-error' | 'validation-error';
   drawingMode?: 'success' | 'recognition-error' | 'review-error';
@@ -33,7 +34,7 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
         }
       }
       if (raw === null) throw new Error(`No native projection edges found for ${view} in ${options.nativeProjectionDirectory}.`);
-      return [view, JSON.parse(raw) as { displayEdges: number[][][]; warnings?: string[] }] as const;
+      return [view, JSON.parse(raw) as { displayEdges: number[][][]; displayCurves?: any[]; warnings?: string[] }] as const;
     }))
     : [];
   const images = {
@@ -43,7 +44,7 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
   await page.addInitScript((payload) => {
     const mockOptions = payload.options;
     const imageDataUrls = payload.images;
-    const nativeProjectionByView = Object.fromEntries(payload.nativeProjectionEntries ?? []) as Record<string, { displayEdges: number[][][]; warnings?: string[] }>;
+    const nativeProjectionByView = Object.fromEntries(payload.nativeProjectionEntries ?? []) as Record<string, { displayEdges: number[][][]; displayCurves?: any[]; warnings?: string[] }>;
     const design = {
       title: 'Flange fixture',
       versionName: 'V1',
@@ -329,6 +330,13 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
           units: 'mm',
           projectionAsset: { artifactPath: `/mock/profile-projections/${request.view}.step`, artifactDigest: `sha256:projection-${request.view}` },
           displayEdges: nativeProjection?.displayEdges ?? fixtureDisplayEdges,
+          displayCurves: nativeProjection?.displayCurves ?? (mockOptions.analyticProjectionCurves ? [
+              { kind: 'line', startMm: [-20, 0], endMm: [20, 0] },
+              { kind: 'circle', centerMm: [0, 0], radiusMm: 5 },
+              { kind: 'circularArc', centerMm: [8, 0], radiusMm: 3, startAngleRad: 0, sweepAngleRad: Math.PI * 1.5 },
+              { kind: 'ellipse', centerMm: [0, 0], majorRadiusMm: 10, minorRadiusMm: 5, rotationRad: 0.25 },
+              { kind: 'ellipticalArc', centerMm: [0, 0], majorRadiusMm: 8, minorRadiusMm: 4, rotationRad: 0.5, startAngleRad: 0.2, sweepAngleRad: -1.1 },
+            ] : []),
           warnings: nativeProjection?.warnings ?? [],
         };
       }

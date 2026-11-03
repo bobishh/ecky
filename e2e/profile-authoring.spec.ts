@@ -25,6 +25,45 @@ test('manual rectangle applies as a normal model version without section referen
   await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.projectionRequests.some((request: any) => request.preferredMessageId === 'profile-version-2'));
 });
 
+test('manual circle remains analytic through radius edits and feature apply', async ({ page }) => {
+  await installProfileMocks(page);
+  const workspace = await openSketch(page, false);
+  const canvas = workspace.getByTestId('profile-view-front');
+  const bounds = await canvas.boundingBox();
+  if (!bounds) throw new Error('Profile canvas is not visible.');
+
+  await workspace.getByLabel('Drawing tool').selectOption('circle');
+  await workspace.getByRole('button', { name: 'Draw profile' }).click();
+  await canvas.click({ position: { x: bounds.width * 0.4, y: bounds.height * 0.5 } });
+  await canvas.click({ position: { x: bounds.width * 0.6, y: bounds.height * 0.5 } });
+  const circle = canvas.locator('circle.analytic-profile-circle');
+  await expect(circle).toHaveCount(1);
+  await expect(canvas.locator('polygon.outer')).toHaveCount(0);
+
+  await workspace.getByLabel('Circle center X (mm)').fill('2.5');
+  await workspace.getByLabel('Circle center Y (mm)').fill('-1.25');
+  await workspace.getByLabel('Circle radius (mm)').fill('12');
+  await workspace.getByLabel('Circle radius (mm)').press('Tab');
+  await expect(circle).toHaveAttribute('r', '12');
+  await expect(circle).toHaveAttribute('cx', '2.5');
+  await expect(circle).toHaveAttribute('cy', '1.25');
+  await workspace.getByLabel('Clearance (mm)').fill('1.25');
+  await workspace.getByLabel('Depth (mm)').fill('7');
+  await workspace.getByRole('button', { name: 'Apply profile' }).click();
+  await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.applyCalls.length === 1);
+  const applyCall = await page.evaluate(() => (window as any).__PROFILE_AUTHORING__.applyCalls[0]);
+  expect(applyCall.loops).toBeUndefined();
+  expect(applyCall.reference).toBeNull();
+  expect(applyCall.sketchLoops).toHaveLength(1);
+  expect(applyCall.sketchLoops[0]).toMatchObject({
+    role: 'outer',
+    parentIndex: null,
+    geometry: { kind: 'circle', centerMm: [2.5, -1.25], radiusMm: 12 },
+  });
+  expect(applyCall.clearanceMm).toBe(1.25);
+  expect(applyCall.depthMm).toBe(7);
+});
+
 test('exact section applies profile asset while sampled display loops stay out of the request', async ({ page }) => {
   await installProfileMocks(page);
   const workspace = await openSketch(page);
@@ -110,6 +149,20 @@ test('exact projected edges stay open until a closed profile is built', async ({
     accuracy: 'approximatePolygon',
     profileAsset: null,
   });
+});
+
+test('projected circles, arcs, and ellipses render from analytic curves', async ({ page }) => {
+  await installProfileMocks(page, { analyticProjectionCurves: true });
+  const workspace = await openSketch(page, false);
+  await workspace.getByLabel('Derivation mode').selectOption('exactProjection');
+  await workspace.getByRole('button', { name: 'Project all three views' }).click();
+  const front = workspace.getByTestId('profile-view-front');
+  await expect(front.locator('circle.projected-circle')).toHaveAttribute('r', '5');
+  await expect(front.locator('path.projected-circular-arc')).toHaveCount(1);
+  await expect(front.locator('ellipse.projected-ellipse')).toHaveCount(1);
+  await expect(front.locator('path.projected-elliptical-arc')).toHaveCount(1);
+  await expect(front.locator('line.projected-line')).toHaveCount(1);
+  await expect(front.locator('polyline.projected-edge')).toHaveCount(4);
 });
 
 test('projection visibility defaults to all edges and existing drawings keep their recorded mode', async ({ page }) => {
@@ -198,6 +251,9 @@ test('native STEP projection output renders independently in front, top, and sid
     await expect(workspace.getByTestId(`profile-view-${view}`).getByText('ALL EDGES · PROJECTED', { exact: true })).toBeVisible();
     await expect(workspace.getByTestId(`profile-view-${view}`).locator('polygon.outer')).toHaveCount(0);
   }
+  await expect(workspace.getByTestId('profile-view-front').locator('circle.projected-circle')).toHaveCount(3);
+  await expect(workspace.getByTestId('profile-view-front').locator('path.projected-circular-arc')).toHaveCount(256);
+  await expect(workspace.getByTestId('profile-view-side').locator('path.projected-circular-arc')).toHaveCount(8);
   if (process.env.PROFILE_AUTHORING_PROJECTION_SCREENSHOT_PATH) {
     await page.screenshot({ path: process.env.PROFILE_AUTHORING_PROJECTION_SCREENSHOT_PATH, fullPage: true });
   }

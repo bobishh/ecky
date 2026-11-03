@@ -1077,7 +1077,8 @@ void given_exact_drawing_projection_when_step_has_surfaced_loose_face_then_retai
         ProfileDrawingRequest{face_only_step, "top", "allEdges", 0.01}, face_only_output);
     std::ifstream face_only_report_file(face_only_output / "display-edges.json");
     const std::string face_only_report(std::istreambuf_iterator<char>(face_only_report_file), {});
-    assert(face_only_report.find("\"displayEdges\":[[") != std::string::npos);
+    assert(face_only_report.find("\"kind\":\"line\"") != std::string::npos ||
+           face_only_report.find("\"displayEdges\":[[") != std::string::npos);
     STEPControl_Reader face_only_reader;
     assert(face_only_reader.ReadFile((face_only_output / "projection.step").string().c_str()) == IFSelect_RetDone);
     assert(face_only_reader.TransferRoots() > 0);
@@ -1140,7 +1141,9 @@ void given_native_profile_derivation_when_sectioned_or_projected_then_exact_loop
         std::ifstream file(drawing_projection / "display-edges.json");
         return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
     }();
-    assert(drawing_preview.find("\"displayEdges\":[[") != std::string::npos);
+    assert(drawing_preview.find("\"kind\":\"circle\"") != std::string::npos);
+    assert(drawing_preview.find("\"radiusMm\":12") != std::string::npos);
+    assert(drawing_preview.find("\"radiusMm\":4") != std::string::npos);
     const std::vector<double> drawing_radii = circular_edge_radii(
         read_step(drawing_projection / "projection.step"));
     assert(std::any_of(drawing_radii.begin(), drawing_radii.end(), [](double radius) {
@@ -1342,6 +1345,27 @@ void given_overlapping_exact_projection_edges_when_arranged_then_curves_split_an
     assert(std::abs(lengths[2] - 5.0) < 1.0e-7);
 }
 
+void given_exact_conic_arc_when_encoded_for_display_then_preserves_center_radii_and_sweep() {
+    const gp_Circ circle(gp_Ax2(gp_Pnt(3, 4, 0), gp_Dir(0, 0, 1)), 7.0);
+    const TopoDS_Edge circular_arc = BRepBuilderAPI_MakeEdge(circle, 0.25, 4.5).Edge();
+    const std::string circular = exact_display_curve_json(circular_arc).value();
+    assert(circular.find("\"kind\":\"circularArc\"") != std::string::npos);
+    assert(circular.find("\"centerMm\":[3,4]") != std::string::npos);
+    assert(circular.find("\"radiusMm\":7") != std::string::npos);
+    assert(circular.find("\"startAngleRad\":0.25") != std::string::npos);
+    assert(circular.find("\"sweepAngleRad\":4.25") != std::string::npos);
+
+    const gp_Elips ellipse(gp_Ax2(gp_Pnt(-2, 5, 0), gp_Dir(0, 0, 1)), 9.0, 4.0);
+    const TopoDS_Edge elliptical_arc = BRepBuilderAPI_MakeEdge(ellipse, -0.5, 1.25).Edge();
+    const std::string elliptical = exact_display_curve_json(elliptical_arc).value();
+    assert(elliptical.find("\"kind\":\"ellipticalArc\"") != std::string::npos);
+    assert(elliptical.find("\"centerMm\":[-2,5]") != std::string::npos);
+    assert(elliptical.find("\"majorRadiusMm\":9") != std::string::npos);
+    assert(elliptical.find("\"minorRadiusMm\":4") != std::string::npos);
+    assert(elliptical.find("\"startAngleRad\":5.7831853071795862") != std::string::npos);
+    assert(elliptical.find("\"sweepAngleRad\":1.75") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -1368,6 +1392,7 @@ int main() {
     given_fused_capsule_cutter_when_cut_repeats_then_authored_faces_survive();
     given_annular_profile_when_offset_positive_or_negative_then_both_boundaries_move_and_hole_survives();
     given_overlapping_exact_projection_edges_when_arranged_then_curves_split_and_deduplicate();
+    given_exact_conic_arc_when_encoded_for_display_then_preserves_center_radii_and_sweep();
     given_exact_drawing_projection_when_step_has_surfaced_loose_face_then_retains_all_geometry();
     given_native_profile_derivation_when_sectioned_or_projected_then_exact_loops_respect_material_occupancy();
 }
