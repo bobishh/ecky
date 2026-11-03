@@ -155,6 +155,7 @@
   let photoPickMode = $state<'region' | 'rectification' | 'calibration' | null>(null);
   let photoRegionStart = $state<DrawingPoint | null>(null);
   let photoRegionDraft = $state<DrawingRegion | null>(null);
+  let photoPickOriginalPoints = $state<DrawingPoint[] | null>(null);
   let photoImportPending = $state(false);
   let photoRequestIds = $state<Record<ProfileView, number>>({ front: 0, top: 0, side: 0 });
   let selectedProfilePrimitiveId = $state<string | null>(null);
@@ -208,11 +209,69 @@
   );
   let isConvertedPolygon = $derived(convertedSelectedEvidence && currentEvidence?.accuracy === 'exactBrep');
   let currentPending = $derived(pendingScopeKey === scopeKey ? pending : null);
+  let recognitionReadinessReason = $derived(drawingRecognitionReadiness(
+    currentPhoto,
+    photoPickMode,
+    photoImportPending,
+    currentPending,
+    tolerance,
+  ));
   let currentViewsPending = $derived(PROFILE_VIEWS.some(viewPendingFor));
   let currentErrorText = $derived(errorScopeKey === scopeKey ? errorText : '');
   let currentStatusText = $derived(statusScopeKey === scopeKey ? statusText : '');
   let canUndo = $derived(currentEdit.undoItems.length > 0 && currentPending === null);
   let loopError = $derived(isExactProfile ? null : profileLoopError(currentLoops));
+
+  function drawingRecognitionReadiness(
+    photo: PhotoViewState | null,
+    pickMode: typeof photoPickMode,
+    photoOpening: boolean,
+    profileOperation: string | null,
+    toleranceText: string,
+  ): string | null {
+    if (!photo) return 'Add a drawing photo first.';
+    if (photo.pending) return 'Recognition is running.';
+    if (photoOpening) return 'Wait for the drawing photo to finish opening.';
+    if (profileOperation) return 'Wait for the current profile operation to finish.';
+    if (pickMode === 'region') return 'Finish the image crop, or cancel photo picking.';
+    if (pickMode === 'rectification') {
+      return `Pick rectangle corner ${Math.min(photo.rectificationPoints.length + 1, 4)} of 4, or cancel perspective correction.`;
+    }
+    if (pickMode === 'calibration') {
+      return `Pick scale point ${Math.min(photo.calibrationPoints.length + 1, 2)} of 2, or cancel photo picking.`;
+    }
+    if (photo.calibrationPoints.length !== 2) {
+      return `Pick 2 scale points on the image (${photo.calibrationPoints.length}/2 picked).`;
+    }
+    const knownDistanceMm = Number(photo.knownDistanceMm);
+    if (!Number.isFinite(knownDistanceMm) || knownDistanceMm <= 0) {
+      return 'Enter a positive known length in millimeters.';
+    }
+    const calibration = {
+      startPx: photo.calibrationPoints[0]!,
+      endPx: photo.calibrationPoints[1]!,
+      distanceMm: knownDistanceMm,
+    };
+    const calibrationError = validateDrawingCalibration(calibration);
+    if (calibrationError) return calibrationError;
+    if (photo.rectificationPoints.length > 0 && photo.rectificationPoints.length !== 4) {
+      return `Pick all 4 rectangle corners, or cancel perspective correction (${photo.rectificationPoints.length}/4 picked).`;
+    }
+    if (photo.rectificationPoints.length === 4) {
+      const aspectRatio = Number(photo.aspectRatio);
+      if (!Number.isFinite(aspectRatio) || aspectRatio <= 0) {
+        return 'Enter a positive width-to-height ratio, or pick four corners again.';
+      }
+    }
+    if (photo.region.widthPx < 4 || photo.region.heightPx < 4) {
+      return 'Select an image crop at least 4 pixels wide and high.';
+    }
+    const toleranceMm = Number(toleranceText);
+    if (!Number.isFinite(toleranceMm) || toleranceMm <= 0) {
+      return 'Enter a positive tolerance in millimeters.';
+    }
+    return null;
+  }
   let deriveOperation = $derived<ProfileGeometryOperation>({ kind: 'section', plane: sectionPlane, offsetMm: Number(sectionOffset) });
   let deriveAvailable = $derived(
     deriveMode === 'meshSection' ? sourceAvailable : exactCadAvailable,
@@ -370,6 +429,7 @@
       selectedView = view;
       patchProfileEditor(view, { placementPlane: VIEW_PLANE[view], placementOffset: '0' });
       photoPickMode = null;
+      photoPickOriginalPoints = null;
       setStatus(`Photo assigned to ${view.toUpperCase()}. Drag to crop, then set its scale.`);
     } catch (error) {
       if (requestScope === scopeKey && requestId === photoImportRequestId) {
@@ -429,6 +489,7 @@
     photoRegionStart = null;
     photoRegionDraft = null;
     photoPickMode = null;
+    photoPickOriginalPoints = null;
   }
 
   function pickPhotoPoint(event: MouseEvent, view: ProfileView): void {
@@ -441,6 +502,7 @@
       updatePhoto(view, { rectificationPoints: points }, true);
       if (points.length === 4) {
         photoPickMode = null;
+        photoPickOriginalPoints = null;
         setStatus('Four rectangle corners set. Enter its known width-to-height ratio.');
       }
     } else {
@@ -448,14 +510,21 @@
       updatePhoto(view, { calibrationPoints: points }, true);
       if (points.length === 2) {
         photoPickMode = null;
+        photoPickOriginalPoints = null;
         setStatus('Scale points set. Enter their known distance in millimeters.');
       }
     }
   }
 
   function beginPhotoPick(mode: 'region' | 'rectification' | 'calibration'): void {
-    const photo = currentPhoto;
+    if (photoPickMode) cancelPhotoPicking();
+    const photo = photoForView(selectedView);
     if (!photo) return;
+    photoPickOriginalPoints = mode === 'rectification'
+      ? photo.rectificationPoints.map(([x, y]) => [x, y])
+      : mode === 'calibration'
+        ? photo.calibrationPoints.map(([x, y]) => [x, y])
+        : null;
     if (photo.recognition) {
       updatePhoto(selectedView, {}, true);
       resetPaneCamera(selectedView);
@@ -466,6 +535,19 @@
     if (mode === 'region') setStatus(`Drag a crop on the ${selectedView.toUpperCase()} image pane.`);
     else if (mode === 'rectification') updatePhoto(selectedView, { rectificationPoints: [] }, true);
     else updatePhoto(selectedView, { calibrationPoints: [] }, true);
+  }
+
+  function cancelPhotoPicking(): void {
+    const mode = photoPickMode;
+    if (!mode) return;
+    const previousPoints = photoPickOriginalPoints?.map(([x, y]) => [x, y] as DrawingPoint) ?? [];
+    if (mode === 'rectification') updatePhoto(selectedView, { rectificationPoints: previousPoints }, true);
+    else if (mode === 'calibration') updatePhoto(selectedView, { calibrationPoints: previousPoints }, true);
+    photoPickMode = null;
+    photoPickOriginalPoints = null;
+    photoRegionStart = null;
+    photoRegionDraft = null;
+    setStatus('Incomplete photo pick discarded. Existing crop and completed measurements remain.');
   }
 
   function setPhotoRotation(value: string): void {
@@ -483,6 +565,7 @@
   function clearDrawingPhoto(): void {
     photoStates = { ...photoStates, [selectedView]: null };
     photoPickMode = null;
+    photoPickOriginalPoints = null;
     photoRegionStart = null;
     photoRegionDraft = null;
     resetPaneCamera(selectedView);
@@ -491,37 +574,26 @@
 
   async function recognizeDrawing(): Promise<void> {
     const photo = currentPhoto;
-    if (!photo || photo.pending || photoImportPending || photoPickMode) return;
-    const toleranceMm = finiteValue(tolerance, 'Tolerance');
-    if (toleranceMm === null || toleranceMm <= 0) {
-      setError('Tolerance must be greater than zero.');
+    if (!photo) return;
+    if (recognitionReadinessReason) {
+      setError(recognitionReadinessReason);
       return;
     }
+    const toleranceMm = Number(tolerance);
     const calibrationPoints = photo.calibrationPoints;
     const knownDistanceMm = Number(photo.knownDistanceMm);
-    const calibration: DrawingScaleCalibration | null = calibrationPoints.length === 2
-      ? { startPx: calibrationPoints[0]!, endPx: calibrationPoints[1]!, distanceMm: knownDistanceMm }
-      : null;
-    const calibrationError = validateDrawingCalibration(calibration);
-    if (calibrationError || !calibration) {
-      setError(calibrationError ?? 'Select two scale points and enter their known distance.');
-      return;
-    }
+    const calibration: DrawingScaleCalibration = {
+      startPx: calibrationPoints[0]!,
+      endPx: calibrationPoints[1]!,
+      distanceMm: knownDistanceMm,
+    };
     let rectification: DrawingRectification | undefined;
-    if (photo.rectificationPoints.length > 0) {
+    if (photo.rectificationPoints.length === 4) {
       const aspectRatio = Number(photo.aspectRatio);
-      if (photo.rectificationPoints.length !== 4 || !Number.isFinite(aspectRatio) || aspectRatio <= 0) {
-        setError('Pick four rectangle corners and enter a positive width-to-height ratio.');
-        return;
-      }
       rectification = {
         cornersPx: photo.rectificationPoints as DrawingRectification['cornersPx'],
         aspectRatio,
       };
-    }
-    if (photo.region.widthPx < 4 || photo.region.heightPx < 4) {
-      setError('Select a larger image region before recognition.');
-      return;
     }
 
     const view = selectedView;
@@ -1020,8 +1092,8 @@
 
   function selectView(view: ProfileView): void {
     if (view === selectedView) return;
+    if (photoPickMode) cancelPhotoPicking();
     selectedView = view;
-    photoPickMode = null;
     activePan = null;
     drag = null;
   }
@@ -1357,6 +1429,7 @@
 
       <section class="control-section drawing-photo-controls" aria-label="Drawing photo">
         <h3>Drawing photo · {selectedView.toUpperCase()}</h3>
+        <p class="inline-hint">Crop and perspective correction are optional. Full image works as-is; scale calibration is required.</p>
         <button class="action-button action-button--secondary" type="button" onclick={chooseDrawingPhoto} disabled={photoImportPending || currentPending !== null}>
           {photoImportPending ? 'Opening photo…' : currentPhoto ? 'Replace drawing photo' : 'Drawing photo'}
         </button>
@@ -1403,11 +1476,15 @@
             <input aria-label="Source image opacity" type="range" min="0.05" max="0.9" step="0.05" value={currentPhoto.imageOpacity} oninput={(event) => updatePhoto(selectedView, { imageOpacity: Number(event.currentTarget.value) })} />
           </label>
           <div class="photo-tool-row">
-            <button class="action-button" type="button" onclick={recognizeDrawing} disabled={currentPhoto.pending || photoPickMode !== null || currentPhoto.calibrationPoints.length !== 2 || !currentPhoto.knownDistanceMm}>
+            <button class="action-button" type="button" onclick={recognizeDrawing} disabled={recognitionReadinessReason !== null}>
               {currentPhoto.pending ? 'Recognizing…' : 'Recognize drawing'}
             </button>
             <button class="text-button" type="button" onclick={clearDrawingPhoto}>Clear photo</button>
+            {#if photoPickMode}
+              <button class="text-button" type="button" onclick={cancelPhotoPicking}>Cancel photo picking</button>
+            {/if}
           </div>
+          <p class="inline-hint" data-testid="drawing-recognition-readiness" aria-live="polite">{recognitionReadinessReason ?? 'Ready to recognize.'}</p>
           {#if currentPhoto.error}<p class="status-error" role="alert">{currentPhoto.error}</p>{/if}
           {#if currentPhoto.recognition}
             <div class="drawing-candidates" data-testid="drawing-profile-candidates" aria-label="Recognized profile candidates">

@@ -261,6 +261,10 @@ test('drawing photo import recognizes a calibrated plate and preserves analytic 
   await workspace.getByRole('button', { name: 'Select top projection' }).click();
   await workspace.getByRole('button', { name: 'Drawing photo' }).click();
   await expect(workspace.getByTestId('drawing-photo-source')).toBeVisible();
+  const recognizeButton = workspace.getByRole('button', { name: 'Recognize drawing' });
+  await expect(recognizeButton).toBeDisabled();
+  await expect(workspace.getByTestId('drawing-recognition-readiness')).toContainText('Pick 2 scale points');
+  await expect(workspace.getByText(/Crop and perspective correction are optional/i)).toBeVisible();
 
   const source = workspace.getByTestId('drawing-photo-source');
   const sourceBox = await source.boundingBox();
@@ -274,16 +278,45 @@ test('drawing photo import recognizes a calibrated plate and preserves analytic 
   await expect(workspace.getByText(/Crop: 576 × 384 px/)).toBeVisible();
 
   await workspace.getByRole('button', { name: 'Pick four corners' }).click();
+  await pickSourcePoint(0.1, 0.15);
+  await expect(workspace.getByTestId('drawing-recognition-readiness')).toContainText('Pick rectangle corner 2 of 4');
+  await workspace.getByRole('button', { name: 'Show front view' }).click();
+  await workspace.getByRole('button', { name: 'Show top view' }).click();
+  await expect(workspace.getByText('0/4 corners picked. Supply the known ratio to rectify a photographed rectangle.')).toBeVisible();
+  await expect(workspace.getByText(/Crop: 576 × 384 px/)).toBeVisible();
+
+  await workspace.getByRole('button', { name: 'Pick four corners' }).click();
   for (const point of [[0.1, 0.15], [0.9, 0.15], [0.9, 0.85], [0.1, 0.85]]) {
     await pickSourcePoint(point[0]!, point[1]!);
   }
   await workspace.getByLabel('Known rectangle aspect ratio').fill('1.6');
+  await workspace.getByRole('button', { name: 'Pick four corners' }).click();
+  await pickSourcePoint(0.2, 0.2);
+  await workspace.getByRole('button', { name: 'Cancel photo picking' }).click();
+  await expect(workspace.getByText('4/4 corners picked. Supply the known ratio to rectify a photographed rectangle.')).toBeVisible();
+
+  await workspace.getByRole('button', { name: 'Pick scale points' }).click();
+  await pickSourcePoint(0.1, 0.25);
+  await expect(workspace.getByTestId('drawing-recognition-readiness')).toContainText('Pick scale point 2 of 2');
+  await workspace.getByRole('button', { name: 'Cancel photo picking' }).click();
+  await expect(workspace.getByText('0/2 scale points picked. Calibration uses one uniform scale.')).toBeVisible();
 
   await workspace.getByRole('button', { name: 'Pick scale points' }).click();
   await pickSourcePoint(0.1, 0.25);
   await pickSourcePoint(0.9, 0.25);
+  await expect(recognizeButton).toBeDisabled();
+  await expect(workspace.getByTestId('drawing-recognition-readiness')).toContainText('Enter a positive known length');
+  await workspace.getByLabel('Known length (mm)').fill('0');
+  await expect(recognizeButton).toBeDisabled();
   await workspace.getByLabel('Known length (mm)').fill('80');
+  await expect(recognizeButton).toBeEnabled();
   await expect(workspace.getByText('Reference distance: 80 mm')).toBeVisible();
+  await workspace.getByRole('button', { name: 'Pick scale points' }).click();
+  await pickSourcePoint(0.2, 0.25);
+  await workspace.getByRole('button', { name: 'Cancel photo picking' }).click();
+  await expect(workspace.getByText('2/2 scale points picked. Calibration uses one uniform scale.')).toBeVisible();
+  await expect(workspace.getByLabel('Known length (mm)')).toHaveValue('80');
+  await expect(recognizeButton).toBeEnabled();
 
   await workspace.getByRole('button', { name: 'Recognize drawing' }).click();
   await expect(workspace.getByTestId('drawing-profile-candidates')).toContainText('plate-outline');
