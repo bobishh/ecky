@@ -956,6 +956,225 @@ void given_fused_capsule_cutter_when_cut_repeats_then_authored_faces_survive() {
     assert(matched_faces >= 3);
 }
 
+void given_annular_profile_when_offset_positive_or_negative_then_both_boundaries_move_and_hole_survives() {
+    auto annular_face = []() {
+        const gp_Ax2 axis(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
+        const TopoDS_Wire outer = BRepBuilderAPI_MakeWire(
+            BRepBuilderAPI_MakeEdge(gp_Circ(axis, 10.0)).Edge()).Wire();
+        const TopoDS_Wire hole = BRepBuilderAPI_MakeWire(
+            BRepBuilderAPI_MakeEdge(gp_Circ(axis, 4.0)).Edge()).Wire();
+        BRepBuilderAPI_MakeFace builder(outer);
+        builder.Add(hole);
+        assert(builder.IsDone());
+        return builder.Face();
+    };
+    auto assert_offset = [&](double amount, double outer_radius, double hole_radius) {
+        const TopoDS_Shape result = offset_shape(annular_face(), amount);
+        assert(result.ShapeType() == TopAbs_FACE);
+        assert(BRepCheck_Analyzer(result).IsValid());
+        TopTools_IndexedMapOfShape wires;
+        TopExp::MapShapes(result, TopAbs_WIRE, wires);
+        assert(wires.Extent() == 2);
+
+        std::vector<double> radii;
+        for (TopExp_Explorer edges(result, TopAbs_EDGE); edges.More(); edges.Next()) {
+            const BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
+            if (curve.GetType() == GeomAbs_Circle) radii.push_back(curve.Circle().Radius());
+        }
+        assert(radii.size() == 2);
+        assert(std::any_of(radii.begin(), radii.end(), [&](double radius) {
+            return std::abs(radius - outer_radius) < 1.0e-6;
+        }));
+        if (!std::any_of(radii.begin(), radii.end(), [&](double radius) {
+                return std::abs(radius - hole_radius) < 1.0e-6;
+            })) {
+            std::fprintf(stderr, "offset %.1f expected hole radius %.1f; found:", amount, hole_radius);
+            for (double radius : radii) std::fprintf(stderr, " %.6f", radius);
+            std::fprintf(stderr, "\n");
+            std::abort();
+        }
+
+        GProp_GProps properties;
+        BRepGProp::SurfaceProperties(result, properties);
+        const double expected_area = M_PI * (outer_radius * outer_radius - hole_radius * hole_radius);
+        assert(std::abs(properties.Mass() - expected_area) < 1.0e-5);
+    };
+    assert_offset(1.0, 11.0, 3.0);
+    assert_offset(-1.0, 9.0, 5.0);
+}
+
+void given_native_profile_derivation_when_sectioned_or_projected_then_exact_loops_respect_material_occupancy() {
+    const fs::path root = fs::temp_directory_path() /
+        ("ecky-direct-occt-profile-derive-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(root);
+    const auto read_step = [](const fs::path& path) {
+        STEPControl_Reader reader;
+        assert(reader.ReadFile(path.string().c_str()) == IFSelect_RetDone);
+        assert(reader.TransferRoots() > 0);
+        return reader.OneShape();
+    };
+    const auto loop_report = [&](const fs::path& directory) {
+        std::ifstream file(directory / "display-loops.json");
+        return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    };
+    const auto role_count = [](const std::string& report, const std::string& role) {
+        const std::string needle = "\"role\":\"" + role + "\"";
+        std::size_t count = 0;
+        std::size_t position = 0;
+        while ((position = report.find(needle, position)) != std::string::npos) {
+            ++count;
+            position += needle.size();
+        }
+        return count;
+    };
+    const auto derive = [&](const fs::path& source, std::string kind, std::string plane_or_view,
+                            double offset, const std::string& label) {
+        ProfileDerivationRequest request;
+        request.source_path = source;
+        request.kind = std::move(kind);
+        request.plane_or_view = std::move(plane_or_view);
+        request.offset_mm = offset;
+        request.tolerance_mm = 0.05;
+        const fs::path output = root / label;
+        derive_exact_profile(request, output);
+        return output;
+    };
+
+    const gp_Ax2 axis(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
+    const TopoDS_Shape outer = BRepPrimAPI_MakeCylinder(axis, 12.0, 8.0).Shape();
+    const TopoDS_Shape inner = BRepPrimAPI_MakeCylinder(axis, 4.0, 8.0).Shape();
+    BRepAlgoAPI_Cut ring_cut(outer, inner);
+    ring_cut.Build();
+    assert(ring_cut.IsDone() && BRepCheck_Analyzer(ring_cut.Shape()).IsValid());
+    const fs::path ring_step = root / "annular-tube.step";
+    write_step_file(ring_step, {ring_cut.Shape()});
+
+    const fs::path xy = derive(ring_step, "section", "xy", 3.0, "section-xy");
+    const std::string xy_report = loop_report(xy);
+    assert(role_count(xy_report, "outer") == 1);
+    assert(role_count(xy_report, "hole") == 1);
+    const TopoDS_Shape xy_profile = read_step(xy / "profile.step");
+    const std::vector<double> xy_radii = circular_edge_radii(xy_profile);
+    assert(std::any_of(xy_radii.begin(), xy_radii.end(), [](double radius) {
+        return std::abs(radius - 12.0) < 1.0e-6;
+    }));
+    assert(std::any_of(xy_radii.begin(), xy_radii.end(), [](double radius) {
+        return std::abs(radius - 4.0) < 1.0e-6;
+    }));
+
+    for (const std::string& plane : {"xz", "yz"}) {
+        const fs::path output = derive(ring_step, "section", plane, 0.0, "section-" + plane);
+        const std::string report = loop_report(output);
+        assert(role_count(report, "outer") == 2);
+        assert(role_count(report, "hole") == 0);
+        const TopoDS_Shape profile = read_step(output / "profile.step");
+        std::size_t face_count = 0;
+        for (TopExp_Explorer faces(profile, TopAbs_FACE); faces.More(); faces.Next()) ++face_count;
+        assert(face_count == 2);
+    }
+
+    const fs::path ring_projection = derive(ring_step, "projection", "top", 0.0, "projection-ring-top");
+    const std::string ring_projection_report = loop_report(ring_projection);
+    assert(role_count(ring_projection_report, "outer") == 1);
+    assert(role_count(ring_projection_report, "hole") == 1);
+    const std::vector<double> projected_radii = circular_edge_radii(
+        read_step(ring_projection / "profile.step"));
+    assert(std::any_of(projected_radii.begin(), projected_radii.end(), [](double radius) {
+        return std::abs(radius - 12.0) < 1.0e-6;
+    }));
+    assert(std::any_of(projected_radii.begin(), projected_radii.end(), [](double radius) {
+        return std::abs(radius - 4.0) < 1.0e-6;
+    }));
+    for (const std::string& view : {"front", "side"}) {
+        const fs::path output = derive(ring_step, "projection", view, 0.0, "projection-" + view);
+        const std::string report = loop_report(output);
+        assert(role_count(report, "outer") == 1);
+        assert(role_count(report, "hole") == 0);
+    }
+
+    const TopoDS_Shape base = BRepPrimAPI_MakeCylinder(axis, 12.0, 8.0).Shape();
+    const TopoDS_Shape boss = BRepPrimAPI_MakeCylinder(axis, 5.0, 3.0).Shape();
+    gp_Trsf raise_boss;
+    raise_boss.SetTranslation(gp_Vec(0, 0, 8.0));
+    const TopoDS_Shape raised_boss = BRepBuilderAPI_Transform(boss, raise_boss, Standard_True).Shape();
+    BRepAlgoAPI_Fuse boss_fuse(base, raised_boss);
+    boss_fuse.Build();
+    assert(boss_fuse.IsDone() && BRepCheck_Analyzer(boss_fuse.Shape()).IsValid());
+    const fs::path boss_step = root / "raised-boss.step";
+    write_step_file(boss_step, {boss_fuse.Shape()});
+    const fs::path boss_projection = derive(boss_step, "projection", "top", 0.0, "projection-boss-top");
+    const std::string boss_report = loop_report(boss_projection);
+    assert(role_count(boss_report, "outer") == 1);
+    assert(role_count(boss_report, "hole") == 0);
+
+    BRep_Builder compound_builder;
+    TopoDS_Compound two_rings;
+    compound_builder.MakeCompound(two_rings);
+    compound_builder.Add(two_rings, ring_cut.Shape());
+    gp_Trsf shift_ring;
+    shift_ring.SetTranslation(gp_Vec(30, 0, 0));
+    compound_builder.Add(two_rings, BRepBuilderAPI_Transform(
+        ring_cut.Shape(), shift_ring, Standard_True).Shape());
+    const fs::path compound_step = root / "two-rings.step";
+    write_step_file(compound_step, {two_rings});
+    const fs::path compound_projection = derive(
+        compound_step, "projection", "top", 0.0, "projection-two-rings");
+    const std::string compound_report = loop_report(compound_projection);
+    assert(role_count(compound_report, "outer") == 2);
+    assert(role_count(compound_report, "hole") == 2);
+    std::size_t compound_face_count = 0;
+    const TopoDS_Shape compound_profile = read_step(compound_projection / "profile.step");
+    for (TopExp_Explorer faces(compound_profile, TopAbs_FACE); faces.More(); faces.Next()) {
+        ++compound_face_count;
+    }
+    assert(compound_face_count == 2);
+
+    ExecutionContext context;
+    const Command import_profile = command(
+        1, "import-profile", {text_arg((compound_projection / "profile.step").string())});
+    const SlotValue imported_profile = evaluate_command(
+        import_profile, {}, "body", false, context);
+    assert(imported_profile.kind == SlotValue::Kind::Shape);
+    assert(imported_profile.shape.ShapeType() == TopAbs_COMPOUND);
+
+    const std::map<std::uint64_t, SlotValue> imported_slots{{1, imported_profile}};
+    const SlotValue offset_profile = evaluate_command(
+        command(2, "offset", {number(1.0), ref(1)}), imported_slots, "body", false, context);
+    assert(BRepCheck_Analyzer(offset_profile.shape).IsValid());
+    const std::vector<double> expanded_radii = circular_edge_radii(offset_profile.shape);
+    const auto outer_offsets = std::count_if(expanded_radii.begin(), expanded_radii.end(), [](double radius) {
+        return std::abs(radius - 13.0) < 1.0e-6;
+    });
+    if (outer_offsets != 2) {
+        std::fprintf(stderr, "expected two expanded outer radii at 13 mm; found:");
+        for (double radius : expanded_radii) std::fprintf(stderr, " %.6f", radius);
+        std::fprintf(stderr, "\n");
+        std::abort();
+    }
+    assert(std::count_if(expanded_radii.begin(), expanded_radii.end(), [](double radius) {
+        return std::abs(radius - 3.0) < 1.0e-6;
+    }) == 2);
+
+    const std::map<std::uint64_t, SlotValue> offset_slots{{2, offset_profile}};
+    const SlotValue extruded = evaluate_command(
+        command(3, "extrude", {ref(2), number(5.0)}), offset_slots, "body", false, context);
+    assert(BRepCheck_Analyzer(extruded.shape).IsValid());
+    std::size_t exported_solids = 0;
+    for (TopExp_Explorer solids(extruded.shape, TopAbs_SOLID); solids.More(); solids.Next()) {
+        ++exported_solids;
+    }
+    assert(exported_solids == 2);
+    const fs::path extruded_step = root / "two-rings-extruded.step";
+    write_step_file(extruded_step, {extruded.shape});
+    std::size_t roundtrip_solids = 0;
+    for (TopExp_Explorer solids(read_step(extruded_step), TopAbs_SOLID); solids.More(); solids.Next()) {
+        ++roundtrip_solids;
+    }
+    assert(roundtrip_solids == 2);
+    fs::remove_all(root);
+}
+
 }  // namespace
 
 int main() {
@@ -980,4 +1199,6 @@ int main() {
     given_partial_union_side_outputs_when_render_fails_then_none_publish_and_corruption_recomputes();
     given_boolean_cutter_when_face_is_generated_then_authored_support_surface_survives();
     given_fused_capsule_cutter_when_cut_repeats_then_authored_faces_survive();
+    given_annular_profile_when_offset_positive_or_negative_then_both_boundaries_move_and_hole_survives();
+    given_native_profile_derivation_when_sectioned_or_projected_then_exact_loops_respect_material_occupancy();
 }

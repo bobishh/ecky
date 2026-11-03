@@ -8,6 +8,7 @@ use crate::contracts::{
 use crate::models::{AppState, PathResolver};
 
 const CAPTURE_SESSION_TTL_SECS: u64 = 60 * 60;
+const DEFAULT_CAPTURE_PREVIEW_SCALE: f64 = 1.0;
 
 #[tauri::command]
 #[specta::specta]
@@ -52,7 +53,7 @@ pub async fn start_capture_session(
         mesh_preview: None,
         derived_stl_path: None,
         crop_bounds: None,
-        preview_scale: 0.05,
+        preview_scale: DEFAULT_CAPTURE_PREVIEW_SCALE,
         target_source: target.source,
         target_source_language: target.source_language,
         started_from_empty: target.started_from_empty,
@@ -156,7 +157,7 @@ pub async fn adopt_latest_capture_run(
             mesh_preview: Some(preview),
             derived_stl_path: None,
             crop_bounds: None,
-            preview_scale: 0.05,
+            preview_scale: DEFAULT_CAPTURE_PREVIEW_SCALE,
             target_source: target.source,
             target_source_language: target.source_language,
             started_from_empty: target.started_from_empty,
@@ -673,6 +674,11 @@ mod capture_target_tests {
         assert_eq!(target.source, "(solid existing)");
         assert_eq!(target.source_language, "ecky");
         assert!(!target.started_from_empty);
+    }
+
+    #[test]
+    fn new_and_adopted_capture_runs_default_to_metric_scale() {
+        assert_eq!(DEFAULT_CAPTURE_PREVIEW_SCALE, 1.0);
     }
 }
 

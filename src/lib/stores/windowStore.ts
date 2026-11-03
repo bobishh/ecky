@@ -136,7 +136,7 @@ const ALL_WINDOW_IDS: WindowId[] = [
   'activity',
 ];
 
-const HIDDEN_WINDOW_IDS = new Set<WindowId>(['sketch']);
+const HIDDEN_WINDOW_IDS = new Set<WindowId>();
 const TRANSIENT_WINDOW_IDS = new Set<WindowId>(['docs']);
 let windowSafeInsets: ViewportInsets = {};
 

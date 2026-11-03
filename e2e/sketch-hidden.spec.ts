@@ -218,18 +218,21 @@ endsolid mock
     await expect(page.locator('.workbench')).toBeVisible();
   });
 
-  test('Given workbench loads When dock renders Then Sketch launcher and window stay hidden', async ({ page }) => {
-    await expect(page.getByRole('button', { name: 'SKETCH', exact: true })).toHaveCount(0);
-    await expect(page.locator('[data-window-id="sketch"]')).toHaveCount(0);
+  test('Given workbench loads When dock renders Then Sketch is available without detached preview', async ({ page }) => {
+    await expect(page.getByRole('button', { name: 'Sketch', exact: true })).toBeVisible();
+    await expect(page.getByTestId('profile-workspace')).toBeVisible();
     await expect(page.getByLabel('Sketch preview status')).toHaveCount(0);
   });
 
-  test('Given stale Sketch layout When thread layout restores Then supported windows restore without Sketch', async ({
+  test('Given stale sketch preview data When thread layout restores Then only profile editor appears', async ({
     page,
   }) => {
     await page.waitForFunction(() => (window as any).__LAYOUT_REQUESTS__ > 0);
 
     await expect(page.locator('[data-window-id="params"]')).toBeVisible();
-    await expect(page.locator('[data-window-id="sketch"]')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Sketch', exact: true })).toBeVisible();
+    await expect(page.getByTestId('profile-workspace')).toBeVisible();
+    await expect(page.getByLabel('Sketch preview status')).toHaveCount(0);
+    await expect(page.getByText('diagnostic sketch preview')).toHaveCount(0);
   });
 });

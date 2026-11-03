@@ -807,7 +807,12 @@ fn decorated_dome_pair(command: &OcctCommand, commands: &[OcctCommand]) -> bool 
         }
         false
     };
-    let is_import = |op| matches!(op, OcctOp::ImportStl | OcctOp::ImportStep);
+    let is_import = |op| {
+        matches!(
+            op,
+            OcctOp::ImportStl | OcctOp::ImportStep | OcctOp::ImportProfile
+        )
+    };
     let is_analytic_clip = |op| op == OcctOp::Intersection;
     (contains(*left, is_import) && contains(*right, is_analytic_clip))
         || (contains(*right, is_import) && contains(*left, is_analytic_clip))
@@ -1642,6 +1647,7 @@ fn runner_op_supported(op: OcctOp) -> bool {
             | OcctOp::MakeFace
             | OcctOp::ImportStl
             | OcctOp::ImportStep
+            | OcctOp::ImportProfile
             | OcctOp::Solidify
             | OcctOp::Extrude
             | OcctOp::Revolve
@@ -1942,6 +1948,7 @@ fn runner_op_token(op: OcctOp) -> &'static str {
         OcctOp::MakeFace => "make-face",
         OcctOp::ImportStl => "import-stl",
         OcctOp::ImportStep => "import-step",
+        OcctOp::ImportProfile => "import-profile",
         OcctOp::Extrude => "extrude",
         OcctOp::Revolve => "revolve",
         OcctOp::Loft => "loft",
@@ -3282,6 +3289,35 @@ mod tests {
         }
     }
 
+    fn profile_face_step_fixture_plan() -> OcctPlan {
+        let program = crate::ecky_scheme::compile_to_core_program(
+            r#"(model (part body (profile :outer (circle 10) :holes (circle 4))))"#,
+        )
+        .expect("compile annular profile fixture");
+        crate::ecky_cad_host::direct_occt::plan_core_program(&program)
+            .expect("plan annular profile fixture")
+    }
+
+    fn multi_profile_face_step_fixture_plan() -> OcctPlan {
+        let program = crate::ecky_scheme::compile_to_core_program(
+            r#"(model (part body (linear-array 2 30 0 0 (profile :outer (circle 10) :holes (circle 4)))))"#,
+        )
+        .expect("compile multi-region annular profile fixture");
+        crate::ecky_cad_host::direct_occt::plan_core_program(&program)
+            .expect("plan multi-region annular profile fixture")
+    }
+
+    fn import_profile_offset_extrusion_plan(step_path: &Path) -> OcctPlan {
+        let source = format!(
+            "(model (part body (extrude (offset 1 (import-profile {:?})) 5)))",
+            step_path.to_string_lossy()
+        );
+        let program = crate::ecky_scheme::compile_to_core_program(&source)
+            .expect("compile profile extrusion");
+        crate::ecky_cad_host::direct_occt::plan_core_program(&program)
+            .expect("plan profile extrusion")
+    }
+
     fn multi_solid_step_fixture_plan() -> OcctPlan {
         OcctPlan {
             parameters: Vec::new(),
@@ -3370,6 +3406,147 @@ mod tests {
         assert_eq!(report.stages[1].execution_count, 1);
         assert_eq!(report.stages[2].name, "solidify");
         assert_eq!(report.stages[2].execution_count, 0);
+
+        let _ = fs::remove_dir_all(fixture_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_runner_import_profile_offsets_outer_and_hole_then_exports_exact_step_when_available() {
+        let Some((fixture_root, _)) = run_real_runner_plan_json(
+            "live-runner-profile-face-fixture",
+            &profile_face_step_fixture_plan(),
+        ) else {
+            return;
+        };
+        let fixture_step = fixture_root.join("bundle").join("model.step");
+        assert!(
+            fixture_step.is_file(),
+            "profile face fixture STEP was not exported"
+        );
+
+        let plan = import_profile_offset_extrusion_plan(&fixture_step);
+        let Some((root, topology)) = run_real_runner_plan_json("live-runner-import-profile", &plan)
+        else {
+            let _ = fs::remove_dir_all(fixture_root);
+            return;
+        };
+        let output_dir = root.join("bundle");
+        assert!(
+            output_dir.join("model.step").is_file(),
+            "exact profile extrusion STEP missing"
+        );
+        assert!(
+            output_dir.join("model.stl").is_file(),
+            "profile extrusion preview missing"
+        );
+
+        let edges = topology["parts"][0]["edges"]
+            .as_array()
+            .expect("edge topology");
+        let radii = edges
+            .iter()
+            .filter_map(|edge| edge["exactGeometry"]["radius"].as_f64())
+            .collect::<Vec<_>>();
+        assert!(
+            radii.iter().any(|radius| (*radius - 11.0).abs() < 1.0e-6),
+            "outer circle did not expand: {radii:?}"
+        );
+        assert!(
+            radii.iter().any(|radius| (*radius - 3.0).abs() < 1.0e-6),
+            "hole did not shrink: {radii:?}"
+        );
+
+        let expected_annular_area = std::f64::consts::PI * (11.0_f64.powi(2) - 3.0_f64.powi(2));
+        let annular_faces = topology["parts"][0]["faces"]
+            .as_array()
+            .expect("face topology")
+            .iter()
+            .filter(|face| {
+                face["exactGeometry"]["kind"] == "planeFace"
+                    && face["area"]
+                        .as_f64()
+                        .is_some_and(|area| (area - expected_annular_area).abs() < 1.0e-5)
+            })
+            .count();
+        assert!(
+            annular_faces >= 2,
+            "profile hole was not retained on both end faces"
+        );
+
+        let _ = fs::remove_dir_all(fixture_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_runner_import_profile_offsets_and_extrudes_disconnected_regions_when_available() {
+        let Some((fixture_root, _)) = run_real_runner_plan_json(
+            "live-runner-multi-profile-face-fixture",
+            &multi_profile_face_step_fixture_plan(),
+        ) else {
+            return;
+        };
+        let fixture_step = fixture_root.join("bundle").join("model.step");
+        assert!(
+            fixture_step.is_file(),
+            "multi-region profile fixture STEP was not exported"
+        );
+
+        let plan = import_profile_offset_extrusion_plan(&fixture_step);
+        let Some((root, topology)) =
+            run_real_runner_plan_json("live-runner-import-multi-profile", &plan)
+        else {
+            let _ = fs::remove_dir_all(fixture_root);
+            return;
+        };
+        let output_dir = root.join("bundle");
+        assert!(
+            output_dir.join("model.step").is_file(),
+            "multi-region exact extrusion STEP missing"
+        );
+        assert!(
+            output_dir.join("model.stl").is_file(),
+            "multi-region extrusion preview missing"
+        );
+
+        let edges = topology["parts"][0]["edges"]
+            .as_array()
+            .expect("edge topology");
+        let radii = edges
+            .iter()
+            .filter_map(|edge| edge["exactGeometry"]["radius"].as_f64())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            radii
+                .iter()
+                .filter(|radius| (**radius - 11.0).abs() < 1.0e-6)
+                .count(),
+            4
+        );
+        assert_eq!(
+            radii
+                .iter()
+                .filter(|radius| (**radius - 3.0).abs() < 1.0e-6)
+                .count(),
+            4
+        );
+
+        let expected_annular_area = std::f64::consts::PI * (11.0_f64.powi(2) - 3.0_f64.powi(2));
+        let annular_faces = topology["parts"][0]["faces"]
+            .as_array()
+            .expect("face topology")
+            .iter()
+            .filter(|face| {
+                face["exactGeometry"]["kind"] == "planeFace"
+                    && face["area"]
+                        .as_f64()
+                        .is_some_and(|area| (area - expected_annular_area).abs() < 1.0e-5)
+            })
+            .count();
+        assert!(
+            annular_faces >= 4,
+            "both regions must retain annular end faces"
+        );
 
         let _ = fs::remove_dir_all(fixture_root);
         let _ = fs::remove_dir_all(root);
@@ -6115,6 +6292,7 @@ mod tests {
             OcctOp::MakeFace,
             OcctOp::ImportStl,
             OcctOp::ImportStep,
+            OcctOp::ImportProfile,
             OcctOp::Solidify,
             OcctOp::Extrude,
             OcctOp::Revolve,
@@ -6208,7 +6386,8 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         // External imports need immutable on-disk payloads, so generated-source A/B
         // fixtures cannot own them. Real-runner STEP tests cover this op separately.
-        let external_asset_ops = std::collections::BTreeSet::from(["import-step"]);
+        let external_asset_ops =
+            std::collections::BTreeSet::from(["import-step", "import-profile"]);
         let missing = runner_supported_ops()
             .into_iter()
             .map(runner_op_token)

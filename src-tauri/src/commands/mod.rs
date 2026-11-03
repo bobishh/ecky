@@ -23,6 +23,7 @@ pub mod jev_classifications;
 pub mod library_panel;
 pub mod macro_ast;
 pub mod mission_evaluation;
+pub mod profile;
 pub mod project_mirror;
 pub mod provider_writer;
 pub mod render;

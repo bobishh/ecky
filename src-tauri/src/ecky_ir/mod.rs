@@ -306,7 +306,14 @@ pub(crate) fn is_ecky_rust_only_cad_head(head: &str) -> bool {
 fn is_direct_occt_required_cad_head(head: &str) -> bool {
     matches!(
         head,
-        "text" | "svg" | "import-stl" | "import-step" | "helical-ridge" | "chamfer" | "fillet"
+        "text"
+            | "svg"
+            | "import-stl"
+            | "import-step"
+            | "import-profile"
+            | "helical-ridge"
+            | "chamfer"
+            | "fillet"
     ) || crate::ecky_language_surface::ECKY_RUST_DIRECT_ONLY_CAD_OPS.contains(&head)
 }
 
@@ -319,6 +326,7 @@ fn is_direct_occt_required_core_op(op: &CoreOperation) -> bool {
             | CoreOperation::Surface(CoreSurfaceOp::Chamfer | CoreSurfaceOp::Fillet)
     ) || matches!(op, CoreOperation::Custom(name)
         if name == "import-step"
+            || name == "import-profile"
             || name == "helical-ridge"
             || crate::ecky_language_surface::ECKY_RUST_DIRECT_ONLY_CAD_OPS.contains(&name.as_str()))
 }

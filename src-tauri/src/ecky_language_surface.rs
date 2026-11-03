@@ -197,7 +197,8 @@ pub const ECKY_RUST_ONLY_CAD_OPS: &[&str] = &[
 // EckyRust direct-OCCT-only surface: rendered natively (no mesh path) and
 // rejected by FreeCAD interop. Unlike `wall-pattern` (mesh), these are BREP
 // ops the interop backend cannot express.
-pub const ECKY_RUST_DIRECT_ONLY_CAD_OPS: &[&str] = &["hull", "voronoi-cell", "import-step"];
+pub const ECKY_RUST_DIRECT_ONLY_CAD_OPS: &[&str] =
+    &["hull", "voronoi-cell", "import-step", "import-profile"];
 pub const WALL_PATTERN_MODES: &[&str] = &[
     "ribs",
     "rings",
@@ -1348,7 +1349,10 @@ fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEnt
         "mesh" | "polyhedron" | "heightfield" | "protrude" | "wall-pattern" | "mesh-anchor"
     ) {
         "native mesh only; rejected by FreeCAD interop"
-    } else if matches!(name, "hull" | "voronoi-cell" | "import-step") {
+    } else if matches!(
+        name,
+        "hull" | "voronoi-cell" | "import-step" | "import-profile"
+    ) {
         "native direct OCCT only; rejected by FreeCAD interop"
     } else if matches!(name, "sampled-radial-loft") {
         "native direct OCCT and FreeCAD interop; not the mesh runtime"
@@ -1390,6 +1394,7 @@ fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEnt
         "svg" => ref_entry(name, "cadOp", "(svg path-or-data)", "sketch/solid", "Imports SVG profile/path data where backend lowering supports it.", true, support, "(svg iconData)", &[]),
         "import-stl" => ref_entry(name, "cadOp", "(import-stl path [:target-triangles n :max-error d [:preserve-boundaries #t|#f]])", "mesh/solid", "Imports an STL file as geometry. Optional preparation keywords keep the raw source and derive a bounded indexed mesh.", true, support, "(import-stl \"/tmp/part.stl\" :target-triangles 4000 :max-error 0.05 :preserve-boundaries #t)", &["Use absolute paths from attachments or app artifacts.", "Preparation keywords require both `:target-triangles` and `:max-error`."]),
         "import-step" => ref_entry(name, "cadOp", "(import-step path)", "solid/BRep", "Imports an exact STEP payload through native Direct OCCT.", true, support, "(import-step \"/absolute/path/component.step\")", &["Prefer locked `import-component` packages; raw paths are not portable dependencies."]),
+        "import-profile" => ref_entry(name, "cadOp", "(import-profile path)", "sketch", "Imports exact planar profile regions with their outer and inner wires from a content-addressed STEP asset. Positive offsets expand outer boundaries and shrink holes.", true, support, "(import-profile \"/absolute/path/profile-assets/<digest>.step\")", &["The STEP asset must contain one or more valid faces in local XY at Z=0.", "Use for exact imported profile assets; ordinary solid STEP imports remain `import-step`."]),
         "path" => ref_entry(name, "cadOp", "(path segment...)", "path", "Builds a path from path segments.", true, support, "(path (polyline points))", &[]),
         "polyline" => ref_entry(name, "cadOp", "(polyline points)", "path/sketch", "Builds a connected line path from points.", true, support, "(polyline ((0 0) (10 0) (10 5)))", &[]),
         "bezier-path" => ref_entry(name, "cadOp", "(bezier-path points)", "path", "Builds a cubic Bézier path from control points; native lowering uses a fixed 16 samples per cubic, so the path is an approximation.", true, support, "(bezier-path ((0 0 0) (8 0 0) (8 8 12) (16 8 12)))", &["Do not claim an exact curve from a native plan."]),

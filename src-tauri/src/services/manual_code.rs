@@ -244,7 +244,7 @@ fn merge_field(parsed: UiField, existing: Option<&UiField>) -> UiField {
     }
 }
 
-fn reconcile_controls(
+pub(crate) fn reconcile_controls(
     source: &str,
     current_ui_spec: &UiSpec,
     current_parameters: &DesignParams,
@@ -666,6 +666,31 @@ pub async fn apply_manual_code(
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<ManualCodeApplyResponse> {
+    apply_manual_code_inner(request, state, app, None).await
+}
+
+pub(crate) async fn apply_manual_code_guarded(
+    request: ManualCodeApplyRequest,
+    expected_head_id: Option<String>,
+    expected_source: String,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<ManualCodeApplyResponse> {
+    apply_manual_code_inner(
+        request,
+        state,
+        app,
+        Some((expected_head_id, expected_source)),
+    )
+    .await
+}
+
+async fn apply_manual_code_inner(
+    request: ManualCodeApplyRequest,
+    state: &AppState,
+    app: &dyn PathResolver,
+    head_guard: Option<(Option<String>, String)>,
+) -> AppResult<ManualCodeApplyResponse> {
     let (ui_spec, parameters, parser_matched) =
         reconcile_controls(&request.source, &request.ui_spec, &request.parameters);
     let thread_title = {
@@ -684,14 +709,21 @@ pub async fn apply_manual_code(
     }
 
     let message_id = if request.persist {
-        Some(
-            add_manual_version(
-                version_request(&request.thread_id, &design, MessageStatus::Working),
-                state,
-                app,
-            )
-            .await?,
-        )
+        let version = version_request(&request.thread_id, &design, MessageStatus::Working);
+        let id = match head_guard {
+            Some((expected_head_id, expected_source)) => {
+                crate::services::design::add_manual_version_guarded(
+                    version,
+                    expected_head_id.as_deref(),
+                    &expected_source,
+                    state,
+                    app,
+                )
+                .await?
+            }
+            None => add_manual_version(version, state, app).await?,
+        };
+        Some(id)
     } else {
         None
     };

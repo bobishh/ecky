@@ -12,11 +12,12 @@ test('dock metadata preserves work sequence, groups, stable names, short labels,
 
   assert.deepEqual(
     controls.map(({ id }) => id),
-    ['projects', 'params', 'dialogue', 'code', 'docs', 'library', 'capture', 'draw', 'settings'],
+    ['projects', 'params', 'dialogue', 'sketch', 'code', 'docs', 'library', 'capture', 'draw', 'settings'],
   );
   assert.deepEqual(
     controls.map(({ group }) => group),
     [
+      'persistent',
       'persistent',
       'persistent',
       'persistent',
@@ -34,6 +35,7 @@ test('dock metadata preserves work sequence, groups, stable names, short labels,
       'Projects',
       'Parameters',
       'Dialogue',
+      'Sketch',
       'Code inspector',
       'Ecky IR docs',
       'Reusable component library',

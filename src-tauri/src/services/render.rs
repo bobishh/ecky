@@ -2242,7 +2242,7 @@ fn render_model_unlocked(
                     } else if uses_direct_occt_required {
                         Err(attach_diagnostic_context(
                             unsupported_required_direct_occt_error(
-                                "Direct OCCT did not produce a native bundle for native-required CAD ops like `chamfer`, `fillet`, `text`, `svg`, `import-stl`, `import-step`, or `helical-ridge`.".to_string()
+                                "Direct OCCT did not produce a native bundle for native-required CAD ops like `chamfer`, `fillet`, `text`, `svg`, `import-stl`, `import-step`, `import-profile`, or `helical-ridge`.".to_string()
                             ),
                             Some(macro_code),
                             parameters,

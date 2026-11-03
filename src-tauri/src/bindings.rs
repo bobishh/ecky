@@ -164,6 +164,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::fem::get_cached_fem_convergence_intent,
         crate::commands::fem::run_fem_topology_optimization,
         crate::commands::sketch::generate_sketch_draft_source,
+        crate::commands::profile::derive_profile_geometry,
+        crate::commands::profile::apply_profile_feature,
         crate::commands::sketch::suggest_sketch_features,
         crate::commands::sketch::generate_sketch_draft_preview,
         crate::commands::sketch::submit_sketch_preview,

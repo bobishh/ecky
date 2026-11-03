@@ -11794,6 +11794,7 @@ fn infer_value_kind(name: &str) -> CoreValueKind {
         | "slot_arc"
         | "polygon"
         | "profile"
+        | "import-profile"
         | "make-face"
         | "text"
         | "svg"

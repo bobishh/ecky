@@ -1,9 +1,12 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Section.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepClass_FaceClassifier.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepIntCurveSurface_Inter.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -42,15 +45,20 @@
 #include <BOPAlgo_PaveFiller.hxx>
 #include <BOPAlgo_Tools.hxx>
 #include <ShapeFix_Face.hxx>
+#include <ShapeAnalysis_FreeBounds.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
+#include <GCPnts_QuasiUniformDeflection.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <GCE2d_MakeSegment.hxx>
 #include <GeomAbs_JoinType.hxx>
+#include <HLRAlgo_Projector.hxx>
+#include <HLRBRep_Algo.hxx>
+#include <HLRBRep_HLRToShape.hxx>
 #include <GeomAbs_Shape.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
@@ -89,6 +97,7 @@
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_HSequenceOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <algorithm>
 #include <array>
@@ -3741,8 +3750,104 @@ TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path, 
 }
 
 TopoDS_Shape offset_shape(const TopoDS_Shape& profile, double amount) {
+    if (profile.ShapeType() == TopAbs_COMPOUND) {
+        if (TopExp_Explorer(profile, TopAbs_SOLID).More()) {
+            throw EvalError("offset compound profile cannot contain solids");
+        }
+        std::vector<TopoDS_Shape> regions;
+        for (TopExp_Explorer faces(profile, TopAbs_FACE); faces.More(); faces.Next()) {
+            regions.push_back(offset_shape(faces.Current(), amount));
+        }
+        if (regions.empty()) throw EvalError("offset compound profile has no face regions");
+        BRep_Builder builder;
+        TopoDS_Compound result;
+        builder.MakeCompound(result);
+        for (const TopoDS_Shape& region : regions) builder.Add(result, region);
+        if (!BRepCheck_Analyzer(result).IsValid()) {
+            throw EvalError("offset produced an invalid multi-region profile");
+        }
+        return result;
+    }
+    if (profile.ShapeType() == TopAbs_FACE) {
+        const TopoDS_Face source_face = TopoDS::Face(profile);
+        TopTools_IndexedMapOfShape source_wires;
+        TopExp::MapShapes(source_face, TopAbs_WIRE, source_wires);
+        if (source_wires.Extent() == 0) {
+            throw EvalError("offset face has no boundary wires");
+        }
+
+        const TopoDS_Wire source_outer = BRepTools::OuterWire(source_face);
+        if (source_outer.IsNull()) throw EvalError("offset face has no outer boundary wire");
+        const auto enclosed_area = [](const TopoDS_Wire& wire) {
+            BRepBuilderAPI_MakeFace face_builder(wire);
+            if (!face_builder.IsDone()) throw EvalError("offset boundary is not a closed planar wire");
+            GProp_GProps properties;
+            BRepGProp::SurfaceProperties(face_builder.Face(), properties);
+            return std::abs(properties.Mass());
+        };
+        const auto offset_wire_with_area_direction = [&](const TopoDS_Wire& source_wire,
+                                                         double signed_distance,
+                                                         bool should_increase_area) {
+            const double original_area = enclosed_area(source_wire);
+            const auto attempt = [&](double signed_amount) -> std::optional<TopoDS_Wire> {
+                BRepOffsetAPI_MakeOffset wire_offset(source_wire, GeomAbs_Arc, false);
+                wire_offset.Perform(signed_amount);
+                if (!wire_offset.IsDone() || wire_offset.Shape().IsNull()) return std::nullopt;
+                TopTools_IndexedMapOfShape offset_wires;
+                TopExp::MapShapes(wire_offset.Shape(), TopAbs_WIRE, offset_wires);
+                if (offset_wires.Extent() != 1) return std::nullopt;
+                const TopoDS_Wire candidate = TopoDS::Wire(offset_wires(1));
+                const double candidate_area = enclosed_area(candidate);
+                const bool moves_as_requested = should_increase_area
+                    ? candidate_area > original_area
+                    : candidate_area < original_area;
+                if (!moves_as_requested) return std::nullopt;
+                return candidate;
+            };
+
+            if (signed_distance == 0.0) return source_wire;
+            if (const auto requested = attempt(signed_distance)) return *requested;
+            if (const auto reversed = attempt(-signed_distance)) return *reversed;
+            throw EvalError("offset collapsed, split, or moved a profile boundary in the wrong direction");
+        };
+        TopoDS_Wire outer_wire;
+        std::vector<TopoDS_Wire> inner_wires;
+        for (int index = 1; index <= source_wires.Extent(); ++index) {
+            const TopoDS_Wire source_wire = TopoDS::Wire(source_wires(index));
+            const bool is_outer = source_wire.IsSame(source_outer);
+            const bool should_increase_area = is_outer ? amount > 0.0 : amount < 0.0;
+            const TopoDS_Wire offset_wire = offset_wire_with_area_direction(
+                source_wire, amount, should_increase_area);
+            if (is_outer) outer_wire = offset_wire;
+            else inner_wires.push_back(offset_wire);
+        }
+        if (outer_wire.IsNull()) throw EvalError("offset could not preserve the outer boundary");
+
+        BRepBuilderAPI_MakeFace face_builder(outer_wire);
+        for (const TopoDS_Wire& inner_wire : inner_wires) face_builder.Add(inner_wire);
+        if (!face_builder.IsDone()) {
+            throw EvalError("offset boundaries could not form one planar profile face");
+        }
+        ShapeFix_Face face_fixer(face_builder.Face());
+        face_fixer.FixOrientation();
+        face_fixer.Perform();
+        TopoDS_Shape result = face_fixer.Face();
+        TopTools_IndexedMapOfShape face_wires;
+        TopExp::MapShapes(result, TopAbs_WIRE, face_wires);
+        if (face_wires.Extent() != source_wires.Extent()) {
+            throw EvalError("offset collapsed or changed a profile boundary wire");
+        }
+        if (!BRepCheck_Analyzer(result).IsValid()) {
+            throw EvalError("offset produced an invalid profile face");
+        }
+        return result;
+    }
+
     BRepOffsetAPI_MakeOffset offset(first_wire(profile, "offset"), GeomAbs_Arc, false);
     offset.Perform(amount);
+    if (!offset.IsDone()) {
+        throw EvalError("offset could not build a closed profile wire");
+    }
     TopoDS_Shape offset_result = offset.Shape();
     return BRepBuilderAPI_MakeFace(first_wire(offset_result, "offset")).Shape();
 }
@@ -6058,6 +6163,64 @@ SlotValue evaluate_command(
         }
         return shape;
     }
+    if (op == "import-profile") {
+        if (command.args.size() != 1 ||
+            (command.args[0].kind != Arg::Kind::Text && command.args[0].kind != Arg::Kind::Symbol)) {
+            throw EvalError(op + " expects a file path");
+        }
+        TopoDS_Shape imported;
+        {
+            StageExecutionTimer import_timer(context, "import");
+            STEPControl_Reader reader;
+            if (reader.ReadFile(command.args[0].text_value.c_str()) != IFSelect_RetDone) {
+                throw EvalError(op + " could not read STEP profile");
+            }
+            if (reader.TransferRoots() <= 0) {
+                throw EvalError(op + " transferred zero STEP roots");
+            }
+            imported = reader.OneShape();
+            if (imported.IsNull()) {
+                throw EvalError(op + " produced a null STEP shape");
+            }
+        }
+
+        std::vector<TopoDS_Face> faces;
+        for (TopExp_Explorer explorer(imported, TopAbs_FACE); explorer.More(); explorer.Next()) {
+            faces.push_back(TopoDS::Face(explorer.Current()));
+        }
+        if (faces.empty() || TopExp_Explorer(imported, TopAbs_SOLID).More()) {
+            throw EvalError(op + " expects one or more planar STEP faces and no solids");
+        }
+
+        std::vector<TopoDS_Face> profile_faces;
+        profile_faces.reserve(faces.size());
+        for (TopoDS_Face profile_face : faces) {
+            BRepAdaptor_Surface surface(profile_face, Standard_True);
+            if (surface.GetType() != GeomAbs_Plane) {
+                throw EvalError(op + " requires planar STEP faces");
+            }
+            const gp_Pln plane = surface.Plane();
+            const gp_Dir normal = plane.Axis().Direction();
+            if (std::abs(std::abs(normal.Z()) - 1.0) > 1.0e-7 ||
+                std::abs(plane.Location().Z()) > 1.0e-7) {
+                throw EvalError(op + " requires profile faces in the local XY plane");
+            }
+            if (BRepTools::OuterWire(profile_face).IsNull() ||
+                !BRepCheck_Analyzer(profile_face).IsValid()) {
+                throw EvalError(op + " received an invalid STEP profile face");
+            }
+            profile_faces.push_back(ensure_face_normal_up(profile_face));
+        }
+        if (profile_faces.size() == 1) return profile_faces.front();
+        BRep_Builder builder;
+        TopoDS_Compound compound;
+        builder.MakeCompound(compound);
+        for (const TopoDS_Face& profile_face : profile_faces) builder.Add(compound, profile_face);
+        if (!BRepCheck_Analyzer(compound).IsValid()) {
+            throw EvalError(op + " received invalid multi-region STEP geometry");
+        }
+        return compound;
+    }
     if (op == "import-indexed-mesh") {
         return SlotValue::manifold_value(make_indexed_manifold(command, context));
     }
@@ -6655,7 +6818,7 @@ std::string command_cache_key(
     ecky::ExecutionIdentityInput input = execution_identity_base(command.op, context);
     for (std::size_t index = 0; index < command.args.size(); ++index) {
         const Arg& arg = command.args[index];
-        const bool imported_payload = (command.op == "import-stl" || command.op == "import-step") && index == 0 &&
+        const bool imported_payload = (command.op == "import-stl" || command.op == "import-step" || command.op == "import-profile") && index == 0 &&
             (arg.kind == Arg::Kind::Text || arg.kind == Arg::Kind::Symbol);
         input.resolved_args.push_back(imported_payload ? "import-payload" : canonical_semantic_arg(arg, dependencies));
         if (imported_payload) input.import_payloads.push_back(read_binary_file(arg.text_value));
@@ -7792,6 +7955,512 @@ void write_step_file(const fs::path& path, const std::vector<TopoDS_Shape>& shap
     if (!output) throw IoError("failed to normalize STEP timestamp");
 }
 
+struct DerivedProfileLoop {
+    TopoDS_Wire wire;
+    std::string role;
+    std::optional<std::size_t> parent_index;
+    gp_Pnt interior_point;
+    std::vector<std::array<double, 2>> display_points;
+};
+
+TopoDS_Shape transform_shape_to_profile_plane(const TopoDS_Shape& shape,
+                                              const gp_Pnt& origin,
+                                              const gp_Dir& normal,
+                                              const gp_Dir& x_direction) {
+    const gp_Ax3 source_frame(origin, normal, x_direction);
+    gp_Trsf transform;
+    transform.SetTransformation(source_frame);
+    return BRepBuilderAPI_Transform(shape, transform, Standard_True).Shape();
+}
+
+bool profile_point_inside_solid(const TopoDS_Shape& shape, const gp_Pnt& point, double tolerance) {
+    for (TopExp_Explorer solids(shape, TopAbs_SOLID); solids.More(); solids.Next()) {
+        BRepClass3d_SolidClassifier classifier(solids.Current(), point, tolerance);
+        if (classifier.State() == TopAbs_IN) return true;
+    }
+    return false;
+}
+
+bool profile_projection_ray_hits_solid(const TopoDS_Shape& shape,
+                                       double x,
+                                       double y,
+                                       double tolerance) {
+    Bnd_Box bounds;
+    BRepBndLib::Add(shape, bounds, Standard_False);
+    if (bounds.IsVoid()) return false;
+    Standard_Real min_x, min_y, min_z, max_x, max_y, max_z;
+    bounds.Get(min_x, min_y, min_z, max_x, max_y, max_z);
+    const double margin = std::max(1.0, (max_z - min_z) * 0.1);
+    const double ray_start = min_z - margin;
+    const double ray_end = max_z + margin;
+    const gp_Lin ray(gp_Pnt(x, y, ray_start), gp_Dir(0, 0, 1));
+
+    for (TopExp_Explorer solids(shape, TopAbs_SOLID); solids.More(); solids.Next()) {
+        std::vector<double> hits{ray_start, ray_end};
+        BRepIntCurveSurface_Inter intersection;
+        intersection.Init(solids.Current(), ray, std::max(tolerance, 1.0e-7));
+        for (; intersection.More(); intersection.Next()) {
+            hits.push_back(intersection.Pnt().Z());
+        }
+        std::sort(hits.begin(), hits.end());
+        hits.erase(std::unique(hits.begin(), hits.end(), [&](double left, double right) {
+            return std::abs(left - right) <= std::max(tolerance, 1.0e-8);
+        }), hits.end());
+        for (std::size_t index = 1; index < hits.size(); ++index) {
+            if (hits[index] - hits[index - 1] <= std::max(tolerance, 1.0e-8)) continue;
+            const gp_Pnt midpoint(x, y, (hits[index] + hits[index - 1]) / 2.0);
+            BRepClass3d_SolidClassifier classifier(solids.Current(), midpoint, tolerance);
+            if (classifier.State() == TopAbs_IN) return true;
+        }
+    }
+    return false;
+}
+
+bool profile_face_contains(const TopoDS_Face& face, const gp_Pnt& point, double tolerance) {
+    BRepClass_FaceClassifier classifier(face, point, tolerance);
+    return classifier.State() == TopAbs_IN;
+}
+
+gp_Pnt profile_wire_interior_sample(const TopoDS_Wire& wire, double tolerance) {
+    BRepBuilderAPI_MakeFace face_builder(wire);
+    if (!face_builder.IsDone()) throw EvalError("profile contour cannot form a planar face");
+    const TopoDS_Face face = face_builder.Face();
+    for (TopExp_Explorer edges(wire, TopAbs_EDGE); edges.More(); edges.Next()) {
+        const TopoDS_Edge edge = TopoDS::Edge(edges.Current());
+        BRepAdaptor_Curve curve(edge);
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        if (!std::isfinite(first) || !std::isfinite(last) || first == last) continue;
+        const double parameter = first + (last - first) * 0.5;
+        gp_Pnt point;
+        gp_Vec tangent;
+        curve.D1(parameter, point, tangent);
+        tangent.SetZ(0.0);
+        if (tangent.SquareMagnitude() <= Precision::SquareConfusion()) continue;
+        tangent.Normalize();
+        const gp_Vec normal(-tangent.Y(), tangent.X(), 0.0);
+        const double step = std::max(10.0 * tolerance, 1.0e-6);
+        gp_Pnt positive = point.Translated(normal * step);
+        gp_Pnt negative = point.Translated(normal * -step);
+        if (profile_face_contains(face, positive, tolerance)) return positive;
+        if (profile_face_contains(face, negative, tolerance)) return negative;
+    }
+    GProp_GProps properties;
+    BRepGProp::SurfaceProperties(face, properties);
+    const gp_Pnt center = properties.CentreOfMass();
+    if (profile_face_contains(face, center, tolerance)) return center;
+    throw EvalError("profile contour has no stable interior sample");
+}
+
+std::vector<TopoDS_Wire> connect_profile_edges(const TopoDS_Shape& edges_shape, double tolerance) {
+    Handle(TopTools_HSequenceOfShape) edges = new TopTools_HSequenceOfShape();
+    TopTools_IndexedMapOfShape unique_edges;
+    TopExp::MapShapes(edges_shape, TopAbs_EDGE, unique_edges);
+    for (int index = 1; index <= unique_edges.Extent(); ++index) {
+        edges->Append(unique_edges(index));
+    }
+    if (edges->IsEmpty()) {
+        throw EvalError("profile derivation found no closed boundaries (OCCT returned zero contour edges)");
+    }
+
+    Handle(TopTools_HSequenceOfShape) wires = new TopTools_HSequenceOfShape();
+    ShapeAnalysis_FreeBounds::ConnectEdgesToWires(edges, tolerance, Standard_False, wires);
+    std::vector<TopoDS_Wire> result;
+    std::size_t connected_edge_count = 0;
+    for (int index = 1; index <= wires->Length(); ++index) {
+        const TopoDS_Wire wire = TopoDS::Wire(wires->Value(index));
+        if (!BRep_Tool::IsClosed(wire)) {
+            std::size_t wire_edge_count = 0;
+            std::ostringstream contour;
+            for (TopExp_Explorer wire_edges(wire, TopAbs_EDGE); wire_edges.More(); wire_edges.Next()) {
+                ++wire_edge_count;
+                BRepAdaptor_Curve curve(TopoDS::Edge(wire_edges.Current()));
+                const gp_Pnt start = curve.Value(curve.FirstParameter());
+                const gp_Pnt end = curve.Value(curve.LastParameter());
+                contour << " [" << start.X() << ',' << start.Y() << " -> "
+                        << end.X() << ',' << end.Y() << ']';
+            }
+            throw EvalError("profile derivation found an open or branched contour (edges=" +
+                            std::to_string(wire_edge_count) + ")" + contour.str());
+        }
+        for (TopExp_Explorer wire_edges(wire, TopAbs_EDGE); wire_edges.More(); wire_edges.Next()) {
+            ++connected_edge_count;
+        }
+        result.push_back(wire);
+    }
+    if (result.empty() || connected_edge_count != static_cast<std::size_t>(edges->Length())) {
+        throw EvalError("profile derivation could not connect every contour edge exactly once (edges=" +
+                        std::to_string(edges->Length()) + ", connected=" +
+                        std::to_string(connected_edge_count) + ")");
+    }
+    return result;
+}
+
+template <typename Occupancy>
+std::vector<DerivedProfileLoop> classify_profile_loops(const std::vector<TopoDS_Wire>& wires,
+                                                        const Occupancy& occupied,
+                                                        double tolerance) {
+    struct Boundary {
+        TopoDS_Wire wire;
+        TopoDS_Face face;
+        gp_Pnt interior;
+        bool inside_occupied;
+        bool outside_occupied;
+        double area;
+    };
+    std::vector<Boundary> boundaries;
+    boundaries.reserve(wires.size());
+    const double sample_step = std::max(20.0 * tolerance, 2.0e-6);
+    for (const TopoDS_Wire& wire : wires) {
+        BRepBuilderAPI_MakeFace face_builder(wire);
+        if (!face_builder.IsDone()) throw EvalError("derived contour is not a planar closed loop");
+        const TopoDS_Face face = face_builder.Face();
+        const gp_Pnt interior = profile_wire_interior_sample(wire, tolerance);
+
+        bool sampled = false;
+        bool inside_occupied = false;
+        bool outside_occupied = false;
+        for (TopExp_Explorer edges(wire, TopAbs_EDGE); edges.More() && !sampled; edges.Next()) {
+            BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
+            const double first = curve.FirstParameter();
+            const double last = curve.LastParameter();
+            if (!std::isfinite(first) || !std::isfinite(last) || first == last) continue;
+            const double parameter = first + (last - first) * 0.5;
+            gp_Pnt point;
+            gp_Vec tangent;
+            curve.D1(parameter, point, tangent);
+            tangent.SetZ(0.0);
+            if (tangent.SquareMagnitude() <= Precision::SquareConfusion()) continue;
+            tangent.Normalize();
+            const gp_Vec normal(-tangent.Y(), tangent.X(), 0.0);
+            gp_Pnt positive = point.Translated(normal * sample_step);
+            gp_Pnt negative = point.Translated(normal * -sample_step);
+            const bool positive_inside = profile_face_contains(face, positive, tolerance);
+            const bool negative_inside = profile_face_contains(face, negative, tolerance);
+            if (positive_inside == negative_inside) continue;
+            const bool positive_occupied = occupied(positive);
+            const bool negative_occupied = occupied(negative);
+            if (positive_inside) {
+                inside_occupied = positive_occupied;
+                outside_occupied = negative_occupied;
+            } else {
+                inside_occupied = negative_occupied;
+                outside_occupied = positive_occupied;
+            }
+            sampled = true;
+        }
+        if (!sampled) throw EvalError("profile contour side could not be classified safely");
+        if (inside_occupied == outside_occupied) {
+            throw EvalError("derived contour does not separate solid material from empty space");
+        }
+        GProp_GProps properties;
+        BRepGProp::SurfaceProperties(face, properties);
+        boundaries.push_back({wire, face, interior, inside_occupied, outside_occupied,
+                              std::abs(properties.Mass())});
+    }
+
+    std::vector<DerivedProfileLoop> loops;
+    loops.reserve(boundaries.size());
+    for (std::size_t index = 0; index < boundaries.size(); ++index) {
+        const Boundary& boundary = boundaries[index];
+        DerivedProfileLoop loop;
+        loop.wire = boundary.wire;
+        loop.role = boundary.inside_occupied ? "outer" : "hole";
+        loop.interior_point = boundary.interior;
+        if (loop.role == "hole") {
+            double parent_area = std::numeric_limits<double>::infinity();
+            for (std::size_t candidate = 0; candidate < boundaries.size(); ++candidate) {
+                if (boundaries[candidate].inside_occupied &&
+                    boundaries[candidate].area > boundary.area &&
+                    profile_face_contains(boundaries[candidate].face, boundary.interior, tolerance) &&
+                    boundaries[candidate].area < parent_area) {
+                    loop.parent_index = candidate;
+                    parent_area = boundaries[candidate].area;
+                }
+            }
+            if (!loop.parent_index.has_value()) {
+                throw EvalError("derived hole contour has no containing outer profile");
+            }
+        }
+        loops.push_back(std::move(loop));
+    }
+    return loops;
+}
+
+TopoDS_Shape build_profile_faces(std::vector<DerivedProfileLoop>& loops) {
+    std::vector<TopoDS_Face> faces;
+    for (std::size_t index = 0; index < loops.size(); ++index) {
+        if (loops[index].role != "outer") continue;
+        const TopoDS_Wire outer = TopoDS::Wire(loops[index].wire.Oriented(TopAbs_FORWARD));
+        BRepBuilderAPI_MakeFace face_builder(outer);
+        for (std::size_t hole_index = 0; hole_index < loops.size(); ++hole_index) {
+            if (loops[hole_index].role == "hole" && loops[hole_index].parent_index == index) {
+                face_builder.Add(TopoDS::Wire(loops[hole_index].wire.Oriented(TopAbs_REVERSED)));
+            }
+        }
+        if (!face_builder.IsDone()) throw EvalError("derived exact profile could not form a face with holes");
+        ShapeFix_Face face_fixer(face_builder.Face());
+        face_fixer.FixOrientation();
+        face_fixer.Perform();
+        const TopoDS_Face face = face_fixer.Face();
+        if (!BRepCheck_Analyzer(face).IsValid()) {
+            throw EvalError("derived exact profile face failed BRep validation");
+        }
+        faces.push_back(face);
+    }
+    if (faces.empty()) throw EvalError("profile derivation did not produce any material regions");
+    if (faces.size() == 1) return faces.front();
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (const TopoDS_Face& face : faces) builder.Add(compound, face);
+    if (!BRepCheck_Analyzer(compound).IsValid()) {
+        throw EvalError("derived multi-region exact profile failed BRep validation");
+    }
+    return compound;
+}
+
+std::vector<std::array<double, 2>> sample_profile_wire(const TopoDS_Wire& wire, double tolerance) {
+    std::vector<std::array<double, 2>> points;
+    for (BRepTools_WireExplorer edges(wire); edges.More(); edges.Next()) {
+        const TopoDS_Edge edge = edges.Current();
+        BRepAdaptor_Curve curve(edge);
+        GCPnts_QuasiUniformDeflection distribution(curve, tolerance, GeomAbs_C1);
+        if (!distribution.IsDone() || distribution.NbPoints() < 2) {
+            throw EvalError("exact profile display sampling did not converge");
+        }
+        const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+        const int count = distribution.NbPoints();
+        for (int sample = 0; sample < count; ++sample) {
+            const int point_index = reversed ? count - sample : sample + 1;
+            const gp_Pnt point = distribution.Value(point_index);
+            const std::array<double, 2> value{point.X(), point.Y()};
+            if (points.empty() ||
+                std::hypot(points.back()[0] - value[0], points.back()[1] - value[1]) > tolerance * 0.1) {
+                points.push_back(value);
+            }
+        }
+    }
+    if (points.size() > 1 &&
+        std::hypot(points.front()[0] - points.back()[0], points.front()[1] - points.back()[1]) <= tolerance * 0.1) {
+        points.pop_back();
+    }
+    if (points.size() < 3) throw EvalError("exact profile display loop has fewer than three points");
+    return points;
+}
+
+void write_profile_loops_file(const fs::path& path,
+                              std::vector<DerivedProfileLoop>& loops,
+                              double tolerance) {
+    for (DerivedProfileLoop& loop : loops) loop.display_points = sample_profile_wire(loop.wire, tolerance);
+    std::ostringstream output;
+    output << std::setprecision(17) << "{\"loops\":[";
+    for (std::size_t index = 0; index < loops.size(); ++index) {
+        if (index > 0) output << ',';
+        output << "{\"role\":\"" << loops[index].role << "\",\"parentIndex\":";
+        if (loops[index].parent_index.has_value()) output << *loops[index].parent_index;
+        else output << "null";
+        output << ",\"points\":[";
+        for (std::size_t point_index = 0; point_index < loops[index].display_points.size(); ++point_index) {
+            if (point_index > 0) output << ',';
+            output << '[' << loops[index].display_points[point_index][0] << ','
+                   << loops[index].display_points[point_index][1] << ']';
+        }
+        output << "]}";
+    }
+    output << "]}";
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file << output.str();
+    if (!file) throw IoError("failed to write exact profile display loops");
+}
+
+struct ProfileDerivationRequest {
+    fs::path source_path;
+    std::string kind;
+    std::string plane_or_view;
+    double offset_mm = 0.0;
+    double tolerance_mm = 0.5;
+};
+
+ProfileDerivationRequest parse_profile_derivation_request(yyjson_val* root) {
+    if (!yyjson_is_obj(root)) throw ParseError("profile derivation request must be a JSON object");
+    yyjson_val* source = yyjson_obj_get(root, "sourceArtifactPath");
+    yyjson_val* operation = yyjson_obj_get(root, "operation");
+    yyjson_val* tolerance = yyjson_obj_get(root, "toleranceMm");
+    if (!yyjson_is_str(source) || !yyjson_is_obj(operation) || !yyjson_is_num(tolerance)) {
+        throw ParseError("profile derivation request needs sourceArtifactPath, operation, and toleranceMm");
+    }
+    ProfileDerivationRequest request;
+    request.source_path = yyjson_get_str(source);
+    yyjson_val* kind = yyjson_obj_get(operation, "kind");
+    if (!yyjson_is_str(kind)) throw ParseError("profile derivation operation needs kind");
+    request.kind = yyjson_get_str(kind);
+    request.tolerance_mm = yyjson_get_num(tolerance);
+    if (!std::isfinite(request.tolerance_mm) || request.tolerance_mm <= 0.0) {
+        throw ParseError("profile derivation toleranceMm must be a positive finite number");
+    }
+    if (request.kind == "section") {
+        yyjson_val* plane = yyjson_obj_get(operation, "plane");
+        yyjson_val* offset = yyjson_obj_get(operation, "offsetMm");
+        if (!yyjson_is_str(plane) || !yyjson_is_num(offset)) {
+            throw ParseError("section operation needs plane and offsetMm");
+        }
+        request.plane_or_view = yyjson_get_str(plane);
+        request.offset_mm = yyjson_get_num(offset);
+        if (!std::isfinite(request.offset_mm) ||
+            (request.plane_or_view != "xy" && request.plane_or_view != "xz" && request.plane_or_view != "yz")) {
+            throw ParseError("section operation needs a valid plane and finite offsetMm");
+        }
+    } else if (request.kind == "projection") {
+        yyjson_val* view = yyjson_obj_get(operation, "view");
+        if (!yyjson_is_str(view)) throw ParseError("projection operation needs view");
+        request.plane_or_view = yyjson_get_str(view);
+        if (request.plane_or_view != "front" && request.plane_or_view != "top" && request.plane_or_view != "side") {
+            throw ParseError("projection operation needs front, top, or side view");
+        }
+    } else {
+        throw ParseError("profile derivation kind must be section or projection");
+    }
+    if (request.source_path.empty()) throw ParseError("sourceArtifactPath cannot be empty");
+    return request;
+}
+
+void derive_exact_profile(const ProfileDerivationRequest& request, const fs::path& output_dir) {
+    STEPControl_Reader reader;
+    if (reader.ReadFile(request.source_path.string().c_str()) != IFSelect_RetDone ||
+        reader.TransferRoots() <= 0) {
+        throw EvalError("profile source STEP could not be read or transferred");
+    }
+    TopoDS_Shape source = reader.OneShape();
+    if (source.IsNull() || !TopExp_Explorer(source, TopAbs_SOLID).More()) {
+        throw EvalError("exact profile derivation requires at least one STEP solid");
+    }
+
+    gp_Pnt frame_origin(0, 0, 0);
+    gp_Dir frame_normal(0, 0, 1);
+    gp_Dir frame_x(1, 0, 0);
+    if (request.kind == "section") {
+        if (request.plane_or_view == "xy") {
+            frame_origin.SetZ(request.offset_mm);
+        } else if (request.plane_or_view == "xz") {
+            frame_origin.SetY(request.offset_mm);
+            frame_normal = gp_Dir(0, -1, 0);
+            frame_x = gp_Dir(1, 0, 0);
+        } else {
+            frame_origin.SetX(request.offset_mm);
+            frame_normal = gp_Dir(1, 0, 0);
+            frame_x = gp_Dir(0, 1, 0);
+        }
+    } else if (request.plane_or_view == "front") {
+        frame_normal = gp_Dir(0, -1, 0);
+        frame_x = gp_Dir(1, 0, 0);
+    } else if (request.plane_or_view == "side") {
+        frame_normal = gp_Dir(1, 0, 0);
+        frame_x = gp_Dir(0, 1, 0);
+    }
+    source = transform_shape_to_profile_plane(source, frame_origin, frame_normal, frame_x);
+    const double connection_tolerance = std::max(1.0e-7, std::min(1.0e-3, request.tolerance_mm * 0.01));
+    const double classification_tolerance = std::max(1.0e-7, connection_tolerance * 0.1);
+
+    TopoDS_Shape exact_edges;
+    std::vector<TopoDS_Wire> wires;
+    if (request.kind == "section") {
+        Bnd_Box source_bounds;
+        BRepBndLib::Add(source, source_bounds, Standard_False);
+        Standard_Real min_x, min_y, min_z, max_x, max_y, max_z;
+        source_bounds.Get(min_x, min_y, min_z, max_x, max_y, max_z);
+        const double margin = std::max(1.0, std::max(max_x - min_x, max_y - min_y));
+        const TopoDS_Face plane_face = BRepBuilderAPI_MakeFace(
+            gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)),
+            min_x - margin, max_x + margin, min_y - margin, max_y + margin).Face();
+        BRepAlgoAPI_Section section(source, plane_face, Standard_False);
+        section.Build();
+        if (!section.IsDone() || section.Shape().IsNull()) {
+            throw EvalError("exact CAD section operation failed");
+        }
+        exact_edges = section.Shape();
+        TopTools_IndexedMapOfShape section_edges;
+        TopExp::MapShapes(exact_edges, TopAbs_EDGE, section_edges);
+        if (section_edges.Extent() == 0) {
+            throw EvalError("exact CAD section returned no edges at the requested plane; local Z range is " +
+                            std::to_string(min_z) + " to " + std::to_string(max_z));
+        }
+    } else {
+        Handle(HLRBRep_Algo) hidden_line = new HLRBRep_Algo();
+        hidden_line->Add(source);
+        hidden_line->Projector(HLRAlgo_Projector(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1))));
+        hidden_line->Update();
+        hidden_line->Hide();
+        HLRBRep_HLRToShape visible(hidden_line);
+        const auto material_boundary_edges = [&](const TopoDS_Shape& candidate_edges) {
+            TopTools_IndexedMapOfShape edges;
+            TopExp::MapShapes(candidate_edges, TopAbs_EDGE, edges);
+            std::vector<TopoDS_Edge> silhouette_edges;
+            for (int edge_index = 1; edge_index <= edges.Extent(); ++edge_index) {
+                const TopoDS_Edge edge = TopoDS::Edge(edges(edge_index));
+                BRepAdaptor_Curve curve(edge);
+                const double first = curve.FirstParameter();
+                const double last = curve.LastParameter();
+                if (!std::isfinite(first) || !std::isfinite(last) || first == last) continue;
+                bool bounds_material = false;
+                for (double ratio : {0.25, 0.5, 0.75}) {
+                    const double parameter = first + (last - first) * ratio;
+                    gp_Pnt point;
+                    gp_Vec tangent;
+                    curve.D1(parameter, point, tangent);
+                    tangent.SetZ(0.0);
+                    if (tangent.SquareMagnitude() <= Precision::SquareConfusion()) continue;
+                    tangent.Normalize();
+                    const gp_Vec normal(-tangent.Y(), tangent.X(), 0.0);
+                    const double step = std::max(20.0 * classification_tolerance, 2.0e-6);
+                    const bool positive = profile_projection_ray_hits_solid(
+                        source, point.X() + normal.X() * step, point.Y() + normal.Y() * step,
+                        classification_tolerance);
+                    const bool negative = profile_projection_ray_hits_solid(
+                        source, point.X() - normal.X() * step, point.Y() - normal.Y() * step,
+                        classification_tolerance);
+                    if (positive != negative) {
+                        bounds_material = true;
+                        break;
+                    }
+                }
+                if (bounds_material) silhouette_edges.push_back(edge);
+            }
+            BRep_Builder builder;
+            TopoDS_Compound silhouettes;
+            builder.MakeCompound(silhouettes);
+            for (const TopoDS_Edge& edge : silhouette_edges) builder.Add(silhouettes, edge);
+            return silhouettes;
+        };
+        exact_edges = material_boundary_edges(visible.VCompound());
+        try {
+            wires = connect_profile_edges(exact_edges, connection_tolerance);
+        } catch (const EvalError&) {
+            BRep_Builder visible_builder;
+            TopoDS_Compound visible_edges;
+            visible_builder.MakeCompound(visible_edges);
+            visible_builder.Add(visible_edges, visible.VCompound());
+            visible_builder.Add(visible_edges, visible.OutLineVCompound());
+            exact_edges = material_boundary_edges(visible_edges);
+        }
+    }
+
+    if (wires.empty()) wires = connect_profile_edges(exact_edges, connection_tolerance);
+    auto occupancy = [&](const gp_Pnt& point) {
+        if (request.kind == "section") {
+            return profile_point_inside_solid(source, point, classification_tolerance);
+        }
+        return profile_projection_ray_hits_solid(
+            source, point.X(), point.Y(), classification_tolerance);
+    };
+    std::vector<DerivedProfileLoop> loops = classify_profile_loops(
+        wires, occupancy, classification_tolerance);
+    TopoDS_Shape profile_shape = build_profile_faces(loops);
+    fs::create_directories(output_dir);
+    write_step_file(output_dir / "profile.step", {profile_shape});
+    write_profile_loops_file(output_dir / "display-loops.json", loops, request.tolerance_mm);
+}
+
 // Preview/export STL tessellation quality. Use FreeCAD-style adaptive angular
 // deflection so curved surfaces stay smooth at small scales and avoid
 // over-tessellating large parts. Linear deflection stays fixed.
@@ -8238,11 +8907,13 @@ int run(int argc, char** argv, ExecutionContext& context) {
     context.report_started_at = std::chrono::steady_clock::now();
     context.set_stage("parse-arguments");
     fs::path plan_path;
+    fs::path profile_request_path;
     fs::path out_dir;
     for (int index = 1; index < argc; ++index) {
         std::string arg = argv[index];
         if (arg == "--help") {
-            std::cout << "direct-occt-runner --plan PLAN --out DIR\n";
+            std::cout << "direct-occt-runner --plan PLAN --out DIR\n"
+                         "direct-occt-runner --derive-profile REQUEST.json --out DIR\n";
             return 0;
         }
         if (arg == "--version") {
@@ -8253,15 +8924,19 @@ int run(int argc, char** argv, ExecutionContext& context) {
             plan_path = argv[++index];
             continue;
         }
+        if (arg == "--derive-profile" && index + 1 < argc) {
+            profile_request_path = argv[++index];
+            continue;
+        }
         if (arg == "--out" && index + 1 < argc) {
             out_dir = argv[++index];
             continue;
         }
-        throw ParseError("usage: direct-occt-runner --plan PLAN --out DIR");
+        throw ParseError("usage: direct-occt-runner (--plan PLAN | --derive-profile REQUEST.json) --out DIR");
     }
 
-    if (plan_path.empty() || out_dir.empty()) {
-        throw ParseError("usage: direct-occt-runner --plan PLAN --out DIR");
+    if ((plan_path.empty() == profile_request_path.empty()) || out_dir.empty()) {
+        throw ParseError("usage: direct-occt-runner (--plan PLAN | --derive-profile REQUEST.json) --out DIR");
     }
 
     std::error_code runner_path_error;
@@ -8271,6 +8946,27 @@ int run(int argc, char** argv, ExecutionContext& context) {
                       runner_path_error.message());
     }
     context.runner_binary_digest = "sha256:" + ecky::sha256_hex(read_binary_file(runner_path));
+
+    if (!profile_request_path.empty()) {
+        context.set_stage("read-profile-request");
+        std::string request_text = read_text_file(profile_request_path);
+        yyjson_read_err request_error;
+        std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> request_document(
+            yyjson_read_opts(request_text.data(), request_text.size(), YYJSON_READ_NOFLAG, nullptr,
+                             &request_error),
+            yyjson_doc_free);
+        if (!request_document) {
+            throw ParseError("profile request JSON parse failed at byte " +
+                             std::to_string(request_error.pos) + ": " +
+                             std::string(request_error.msg ? request_error.msg : "unknown parse error"));
+        }
+        const ProfileDerivationRequest request = parse_profile_derivation_request(
+            yyjson_doc_get_root(request_document.get()));
+        context.set_stage("derive-exact-profile");
+        derive_exact_profile(request, out_dir);
+        context.set_stage("complete");
+        return 0;
+    }
 
     context.set_stage("read-plan");
     std::string plan_text = read_text_file(plan_path);

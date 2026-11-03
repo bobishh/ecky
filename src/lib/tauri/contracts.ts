@@ -1281,6 +1281,22 @@ async generateSketchDraftSource(request: SketchDraftRequest) : Promise<Result<Sk
     else return { status: "error", error: e  as any };
 }
 },
+async deriveProfileGeometry(request: ProfileGeometryRequest) : Promise<Result<ProfileGeometryResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("derive_profile_geometry", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async applyProfileFeature(request: ProfileFeatureApplyRequest) : Promise<Result<ProfileFeatureApplyResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("apply_profile_feature", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async suggestSketchFeatures(request: SketchSuggestionRequest) : Promise<Result<SketchSuggestionResponse, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("suggest_sketch_features", { request }) };
@@ -2205,6 +2221,18 @@ export type PreparePromptWorkspaceCaptureInput = { dataUrl: string; threadId?: s
 export type PreviewView = { viewId: string; label: string; offsets?: PreviewViewOffset[] }
 export type PreviewViewOffset = { partId: string; dx: number; dy: number; dz: number }
 export type PrimitiveBinding = { parameterKey: string; scale?: number; offset?: number; min?: number | null; max?: number | null }
+export type ProfileArtifactReference = { sourceArtifactPath: string; sourceArtifactDigest: string; operation: ProfileDerivationOperation; toleranceMm: number; accuracy: ProfileEvidenceAccuracy; profileAsset?: ProfileAsset | null }
+export type ProfileAsset = { artifactPath: string; artifactDigest: string }
+export type ProfileDerivationOperation = { kind: "section"; plane: ProfilePlane; offsetMm: number } | { kind: "projection"; view: ProfileView }
+export type ProfileEvidenceAccuracy = "exactBrep" | "approximateMesh" | "approximatePolygon"
+export type ProfileFeatureApplyRequest = { threadId: string; baseMessageId?: string | null; expectedSource: string; loops?: ProfileLoop[] | null; plane: ProfilePlane; offsetMm: number; clearanceMm: number; depthMm: number; partName: string; reference?: ProfileArtifactReference | null }
+export type ProfileFeatureApplyResponse = { source: string; draft: ManualCodeApplyResponse }
+export type ProfileGeometryRequest = { artifactPath: string; operation: ProfileDerivationOperation; toleranceMm: number }
+export type ProfileGeometryResponse = { sourceArtifactPath: string; sourceArtifactDigest: string; operation: ProfileDerivationOperation; toleranceMm: number; units: string; accuracy: ProfileEvidenceAccuracy; profileAsset: ProfileAsset | null; displayAccuracy: string; loops: ProfileLoop[]; warnings: string[] }
+export type ProfileLoop = { points: ([number, number])[]; role: ProfileLoopRole; parentIndex: number | null }
+export type ProfileLoopRole = "outer" | "hole"
+export type ProfilePlane = "xy" | "xz" | "yz"
+export type ProfileView = "front" | "top" | "side"
 export type ProjectEditorLink = { slug: string; folder: string; file: string }
 export type ProjectFolderApplyResult = { stateBefore: ProjectSyncState; noOp: boolean; threadId: string; messageId: string; manifest: ProjectManifest }
 export type ProjectFolderExportResult = { slug: string; folder: string; manifest: ProjectManifest }

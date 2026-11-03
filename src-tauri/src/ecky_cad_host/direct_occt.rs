@@ -177,6 +177,7 @@ pub enum OcctOp {
     MakeFace,
     ImportStl,
     ImportStep,
+    ImportProfile,
     Extrude,
     Revolve,
     Loft,
@@ -5008,6 +5009,7 @@ fn occt_op(op: &CoreOperation) -> AuthoringResult<OcctOp> {
         CoreOperation::Primitive(CorePrimitive::MakeFace) => Ok(OcctOp::MakeFace),
         CoreOperation::Primitive(CorePrimitive::Stl) => Ok(OcctOp::ImportStl),
         CoreOperation::Custom(name) if name == "import-step" => Ok(OcctOp::ImportStep),
+        CoreOperation::Custom(name) if name == "import-profile" => Ok(OcctOp::ImportProfile),
         CoreOperation::Surface(CoreSurfaceOp::Extrude) => Ok(OcctOp::Extrude),
         CoreOperation::Surface(CoreSurfaceOp::Revolve) => Ok(OcctOp::Revolve),
         CoreOperation::Surface(CoreSurfaceOp::Loft) => Ok(OcctOp::Loft),
@@ -7514,6 +7516,24 @@ mod tests {
                 .map(|command| command.op)
                 .collect::<Vec<_>>(),
             vec![OcctOp::ImportStl]
+        );
+    }
+
+    #[test]
+    fn plans_import_profile_offset_and_extrude_for_direct_occt() {
+        let program = compile(
+            r#"(model (part body (extrude (offset 1 (import-profile "/tmp/profile.step")) 8)))"#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        assert_eq!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>(),
+            vec![OcctOp::ImportProfile, OcctOp::Offset, OcctOp::Extrude]
         );
     }
 

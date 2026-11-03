@@ -156,11 +156,11 @@ test('fitVisibleWindowsToViewport reclamps an already-open window after viewport
   _resetWindowStoreForTest();
 });
 
-test('Sketch Workspace stays hidden from direct opens and stale persisted layouts', () => {
+test('Given a sketch workspace When opened or restored Then its window remains available', () => {
   _resetWindowStoreForTest();
 
   showWindow('sketch');
-  assert.equal(get(windowStore).sketch.visible, false);
+  assert.equal(get(windowStore).sketch.visible, true);
 
   const restored = _mergeDbLayout({
     schemaVersion: 1,
@@ -171,7 +171,7 @@ test('Sketch Workspace stays hidden from direct opens and stale persisted layout
     },
   });
   assert.equal(restored.params.visible, true);
-  assert.equal(restored.sketch.visible, false);
+  assert.equal(restored.sketch.visible, true);
 
   _resetWindowStoreForTest();
 });

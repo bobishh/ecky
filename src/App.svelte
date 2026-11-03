@@ -8,6 +8,8 @@
   import ConfigPanel from './lib/ConfigPanel.svelte';
   import ViewportWorkspace from './lib/workbench/ViewportWorkspace.svelte';
   import WorkbenchWindows from './lib/workbench/WorkbenchWindows.svelte';
+  import ProfileWorkspace from './lib/ProfileWorkspace.svelte';
+  import type { ProfileApplyInput, ProfileApplyOutcome, ProfileDeriveInput } from './lib/profileWorkspace';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import { safeSaveDialog } from './lib/safeSaveDialog';
@@ -290,6 +292,9 @@ import {
     getThreadMessageVersion,
     getVersionSource,
     applyCapturePreview as applyCapturePreviewCommand,
+    deriveProfileGeometry,
+    applyProfileFeature,
+    getWorkspaceProjection,
     importModelIntent,
     preparePromptAttachments,
     preparePromptWorkspaceCapture,
@@ -4698,6 +4703,42 @@ import {
         : activeArtifactBundle?.modelStlPath,
     ),
   );
+  const profileStepExport = $derived.by(() => {
+    const stepExports = (activeArtifactBundle?.exportArtifacts ?? [])
+      .filter((artifact) => ['step', 'stp'].includes(artifact.format.toLowerCase()));
+    return stepExports.find((artifact) => artifact.role === 'primary')
+      ?? (stepExports.length === 1 ? stepExports[0] : null);
+  });
+  const profileStepArtifactPath = $derived(profileStepExport?.path ?? null);
+  const profileStepAccuracyHint = $derived.by(() => {
+    const provenance = profileStepExport?.geometryProvenance ?? activeArtifactBundle?.geometryProvenance;
+    if (provenance?.representation === 'facetedPolyBrep' || (provenance?.sourceMeshDigests?.length ?? 0) > 0) {
+      return 'This STEP preserves a faceted scan or reconstruction. Projection is exact to its surface; physical dimensions remain approximate.';
+    }
+    return null;
+  });
+  const profileWorkingCopyMatchesSelectedVersion = $derived.by(() =>
+    Boolean(
+      $workingCopy.dirty
+      && $workingCopy.macroCode.trim()
+      && $workingCopy.sourceVersionId
+      && $workingCopy.sourceVersionId === $activeVersionId,
+    ),
+  );
+  const profileSelectedSource = $derived(
+    selectedVersionHistoryMessage?.output?.macroCode ?? activeVersionMessage?.output?.macroCode ?? '',
+  );
+  const profileSourceLanguage = $derived(
+    profileWorkingCopyMatchesSelectedVersion
+      ? $workingCopy.sourceLanguage
+      : selectedVersionHistoryMessage?.output?.sourceLanguage
+        ?? activeVersionMessage?.output?.sourceLanguage
+        ?? $workingCopy.sourceLanguage
+        ?? $config.defaultSourceLanguage,
+  );
+  const profileSource = $derived(
+    profileWorkingCopyMatchesSelectedVersion ? $workingCopy.macroCode : profileSelectedSource || $workingCopy.macroCode,
+  );
   const previewArtifactName = $derived.by<string | null>(() =>
     sketchPreviewStatus?.artifactName ||
     fileBasename(
@@ -5412,6 +5453,42 @@ import {
     }
   }
 
+  async function handleProfileDerive(input: ProfileDeriveInput) {
+    const artifactPath = input.source === 'mesh'
+      ? activeArtifactBundle?.modelStlPath
+      : profileStepArtifactPath;
+    if (!artifactPath) {
+      throw new Error(input.source === 'mesh'
+        ? 'Render or import a model before extracting a mesh section.'
+        : 'Exact profile derivation requires an existing STEP/BRep artifact. FCStd-only sources need a STEP export.');
+    }
+    return deriveProfileGeometry({ artifactPath, operation: input.operation, toleranceMm: input.toleranceMm });
+  }
+
+  async function handleProfileApply(input: ProfileApplyInput): Promise<ProfileApplyOutcome> {
+    const threadId = get(activeThreadId);
+    if (!threadId) throw new Error('Create or open a project before applying a profile.');
+    const result = await applyProfileFeature({
+      ...input,
+      threadId,
+      baseMessageId: get(activeVersionId),
+      expectedSource: profileSource,
+    });
+    if (get(activeThreadId) !== threadId) return { status: 'saved' };
+    if (result.draft.status === 'error') {
+      await refreshThreadHistoryProjection(threadId);
+      return {
+        status: 'error',
+        message: `Saved version failed to render: ${formatBackendError(result.draft.error ?? new Error('Open the saved version for details.'))}`,
+      };
+    }
+    if (result.draft.messageId) {
+      await projectWorkspaceProjection(await getWorkspaceProjection(threadId, result.draft.messageId));
+    }
+    session.setStatus('Profile saved as a model version.');
+    return { status: 'saved' };
+  }
+
   async function handleApplyComponentImport(input: LibraryComponentSelection & { label: string }) {
     const threadId = get(activeThreadId);
     const baseMessageId = get(activeVersionId);
@@ -5795,6 +5872,22 @@ import {
         freecadEnabled={activeAuthoringContext.geometryBackend === 'freecad'}
         onImportFreecadLibraryPart={handleImportFreecadLibraryPart}
         onApplyComponentImport={handleApplyComponentImport}
+      />
+    {/snippet}
+
+    {#snippet sketchContent()}
+      <ProfileWorkspace
+        scopeKey={`${$activeThreadId ?? ''}:${$activeVersionId ?? ''}:${profileSource}`}
+        sourceAvailable={Boolean(activeArtifactBundle?.modelStlPath)}
+        exactCadAvailable={Boolean(profileStepArtifactPath)}
+        sourceAccuracyHint={profileStepAccuracyHint}
+        disabledReason={!$activeThreadId
+          ? 'Create or open a project to apply a profile.'
+          : profileSourceLanguage !== 'ecky'
+            ? 'Profile authoring requires an Ecky source model.'
+            : undefined}
+        onDerive={handleProfileDerive}
+        onApply={handleProfileApply}
       />
     {/snippet}
 

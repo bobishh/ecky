@@ -39,6 +39,7 @@ const BASE_CONTROLS: readonly DockControl[] = [
   { id: 'projects', group: 'persistent', accessibleName: 'Projects', shortLabel: 'PROJ', iconId: 'projects' },
   { id: 'params', group: 'persistent', accessibleName: 'Parameters', shortLabel: 'PARAMS', iconId: 'params' },
   { id: 'dialogue', group: 'persistent', accessibleName: 'Dialogue', shortLabel: 'TALK', iconId: 'dialogue' },
+  { id: 'sketch', group: 'persistent', accessibleName: 'Sketch', shortLabel: 'SKETCH', iconId: 'sketch' },
   { id: 'code', group: 'persistent', accessibleName: 'Code inspector', shortLabel: 'CODE', iconId: 'code' },
   { id: 'docs', group: 'persistent', accessibleName: 'Ecky IR docs', shortLabel: 'DOCS', iconId: 'docs' },
   { id: 'library', group: 'persistent', accessibleName: 'Reusable component library', shortLabel: 'LIB', iconId: 'library' },

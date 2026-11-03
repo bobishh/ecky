@@ -484,6 +484,11 @@ mod tests {
         assert!(source_uses_direct_occt_required_cad_ops(
             r#"(model
                 (part body
+                  (import-profile "/tmp/profile.step")))"#
+        ));
+        assert!(source_uses_direct_occt_required_cad_ops(
+            r#"(model
+                (part body
                   (helical-ridge
                     :radius 20
                     :pitch 6

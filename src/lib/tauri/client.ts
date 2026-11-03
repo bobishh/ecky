@@ -17,6 +17,8 @@ import {
   type CaptureRun,
   type ApplyCapturePreviewResult,
   type ManualCodeApplyResponse,
+  type ProfileGeometryRequest,
+  type ProfileFeatureApplyRequest,
   type PersistControlDefaultsInput,
   type ExternalShapeSource,
   type ApplyExternalShapeEditInput,
@@ -1478,6 +1480,15 @@ export async function applyManualCode(input: {
     geometryBackend: input.geometryBackend ?? null,
   }));
   return normalizeManualCodeApplyResponse(response);
+}
+
+export async function deriveProfileGeometry(request: ProfileGeometryRequest) {
+  return invokeCommand(commands.deriveProfileGeometry(request));
+}
+
+export async function applyProfileFeature(request: ProfileFeatureApplyRequest) {
+  const response = await invokeCommand(commands.applyProfileFeature(request));
+  return { source: response.source, draft: normalizeManualCodeApplyResponse(response.draft) };
 }
 
 export async function applyCapturePreview(input: { runId: string }): Promise<{

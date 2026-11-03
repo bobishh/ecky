@@ -180,6 +180,34 @@ pub async fn add_manual_version(
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<String> {
+    add_manual_version_with_guard(request, None, state, app).await
+}
+
+pub(crate) async fn add_manual_version_guarded(
+    request: AddManualVersionRequest,
+    expected_head_id: Option<&str>,
+    expected_source: &str,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<String> {
+    add_manual_version_with_guard(
+        request,
+        Some((
+            expected_head_id.map(str::to_string),
+            expected_source.to_string(),
+        )),
+        state,
+        app,
+    )
+    .await
+}
+
+async fn add_manual_version_with_guard(
+    request: AddManualVersionRequest,
+    expected_head: Option<(Option<String>, String)>,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<String> {
     let AddManualVersionRequest {
         thread_id,
         title,
@@ -234,6 +262,22 @@ pub async fn add_manual_version(
         .as_secs();
     let configured_root = state.config.lock().unwrap().projects_root.clone();
     let db = state.db.lock().await;
+
+    if let Some((expected_head_id, expected_source)) = expected_head {
+        let current_head = db::get_thread_latest_version(&db, &thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        let actual_head_id = current_head.as_ref().map(|message| message.id.as_str());
+        let actual_source = current_head
+            .as_ref()
+            .and_then(|message| message.output.as_ref())
+            .map(|output| output.macro_code.as_str())
+            .unwrap_or_default();
+        if actual_head_id != expected_head_id.as_deref() || actual_source != expected_source {
+            return Err(AppError::conflict(
+                "Manual code target changed before the version was appended.",
+            ));
+        }
+    }
 
     let (engine_kind, source_language, geometry_backend) =
         resolve_manual_authoring_context(macro_dialect.clone(), source_language, geometry_backend);
@@ -643,6 +687,64 @@ params = {
                 .len()
         };
         assert_eq!(after, before + 1, "manual edit remains a new version");
+    }
+
+    #[tokio::test]
+    async fn guarded_manual_version_rejects_stale_profile_before_append() {
+        let root =
+            std::env::temp_dir().join(format!("ecky-profile-guard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::init_db(&root.join("history.sqlite")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        let resolver = TestPathResolver { root };
+        let baseline = "(model (part body (box 3 3 3)))";
+        let baseline_id = add_manual_version(
+            manual_request("thread-profile", "Bracket", baseline),
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("baseline version");
+        let intervening = "(model (part body (box 4 4 4)))";
+        let intervening_id = add_manual_version(
+            manual_request("thread-profile", "Bracket", intervening),
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("intervening version");
+        let before = {
+            let conn = state.db.lock().await;
+            crate::db::get_thread_messages(&conn, "thread-profile")
+                .expect("messages")
+                .len()
+        };
+
+        let error = add_manual_version_guarded(
+            manual_request(
+                "thread-profile",
+                "Bracket",
+                "(model (part stale (box 9 9 9)))",
+            ),
+            Some(&baseline_id),
+            baseline,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect_err("a stale profile must not append");
+
+        assert!(error
+            .message
+            .contains("target changed before the version was appended"));
+        let conn = state.db.lock().await;
+        let messages = crate::db::get_thread_messages(&conn, "thread-profile").expect("messages");
+        assert_eq!(messages.len(), before);
+        let head = crate::db::get_thread_latest_version(&conn, "thread-profile")
+            .expect("latest")
+            .expect("intervening head");
+        assert_eq!(head.id, intervening_id);
+        assert_eq!(head.output.expect("head output").macro_code, intervening);
     }
 
     #[tokio::test]
