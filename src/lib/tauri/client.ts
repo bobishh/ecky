@@ -19,6 +19,12 @@ import {
   type ManualCodeApplyResponse,
   type ProfileGeometryRequest,
   type ProfileFeatureApplyRequest,
+  type PrepareDrawingImageRequest,
+  type PreparedDrawingImage,
+  type RecognizeDrawingProfileRequest,
+  type DrawingRecognitionResponse,
+  type DrawingProfileReviewResponse,
+  type ReviewDrawingProfileRequest,
   type PersistControlDefaultsInput,
   type ExternalShapeSource,
   type ApplyExternalShapeEditInput,
@@ -1484,6 +1490,18 @@ export async function applyManualCode(input: {
 
 export async function deriveProfileGeometry(request: ProfileGeometryRequest) {
   return invokeCommand(commands.deriveProfileGeometry(request));
+}
+
+export async function prepareDrawingImage(request: PrepareDrawingImageRequest): Promise<PreparedDrawingImage> {
+  return invokeCommand(commands.prepareDrawingImage(request));
+}
+
+export async function recognizeDrawingProfile(request: RecognizeDrawingProfileRequest): Promise<DrawingRecognitionResponse> {
+  return invokeCommand(commands.recognizeDrawingProfile(request));
+}
+
+export async function reviewDrawingProfile(request: ReviewDrawingProfileRequest): Promise<DrawingProfileReviewResponse> {
+  return invokeCommand(commands.reviewDrawingProfile(request));
 }
 
 export async function applyProfileFeature(request: ProfileFeatureApplyRequest) {

@@ -1,345 +1,5 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
-
-type ProfileMockOptions = {
-  deriveMode?: 'success' | 'pending-error';
-  failedProjectionView?: 'front' | 'top' | 'side';
-  missingArtifact?: boolean;
-  applyMode?: 'success' | 'render-error' | 'validation-error';
-};
-
-async function installProfileMocks(page: Page, options: ProfileMockOptions = {}) {
-  await page.addInitScript((mockOptions) => {
-    const design = {
-      title: 'Flange fixture',
-      versionName: 'V1',
-      interactionMode: 'design',
-      macroCode: '(model (part flange (difference (box 30 30 5) (translate 15 15 -1 (cylinder 3 7)))))',
-      sourceLanguage: 'ecky',
-      geometryBackend: 'mesh',
-      uiSpec: { fields: [] },
-      initialParams: {},
-      postProcessing: null,
-    };
-    const artifactBundle = {
-      modelId: 'profile-model',
-      sourceKind: 'generated',
-      engineKind: 'ecky',
-      sourceLanguage: 'ecky',
-      geometryBackend: 'mesh',
-      contentHash: 'profile-model-hash',
-      artifactVersion: 1,
-      fcstdPath: mockOptions.missingArtifact ? null : '/mock/profile-model.step',
-      manifestPath: '/mock/profile-manifest.json',
-      macroPath: '/mock/model.ecky',
-      modelStlPath: mockOptions.missingArtifact ? null : '/mock/profile-model.stl',
-      exportArtifacts: mockOptions.missingArtifact ? [] : [
-        { label: 'STEP', format: 'step', path: '/mock/profile-model.step', role: 'primary' },
-      ],
-      viewerAssets: [],
-    };
-    const modelManifest = {
-      modelId: 'profile-model',
-      sourceKind: 'generated',
-      document: {
-      documentName: 'Flange fixture',
-      documentLabel: 'Flange fixture',
-        objectCount: 1,
-        warnings: [],
-      },
-      parts: [],
-      parameterGroups: [],
-      controlPrimitives: [],
-      controlRelations: [],
-      controlViews: [],
-      selectionTargets: [],
-      advisories: [],
-      measurementAnnotations: [],
-      warnings: [],
-      enrichmentState: { status: 'none', proposals: [] },
-    };
-    const version = {
-      id: 'profile-version-1',
-      role: 'assistant',
-      content: 'Flange fixture',
-      status: 'success',
-      output: design,
-      artifactBundle: mockOptions.missingArtifact ? null : artifactBundle,
-      modelManifest,
-      timestamp: 100,
-    };
-    const thread = {
-      id: 'profile-thread',
-      title: 'Flange fixture',
-      summary: '',
-      updatedAt: 100,
-      versionCount: 1,
-      pendingCount: 0,
-      queuedCount: 0,
-      errorCount: 0,
-      status: 'active',
-      engineKind: 'ecky',
-      sourceLanguage: 'ecky',
-      geometryBackend: 'mesh',
-      messages: [],
-    };
-    const config = {
-      engines: [],
-      selectedEngineId: '',
-      hasSeenOnboarding: true,
-      freecadCmd: '',
-      cadTextFontPath: '',
-      freecadLibraryRoots: [],
-      assets: [],
-      connectionType: null,
-      defaultEngineKind: 'ecky',
-      defaultGeometryBackend: 'mesh',
-      defaultSourceLanguage: 'ecky',
-      maxGenerationAttempts: 3,
-      maxVerifyAttempts: 0,
-      mcp: { mode: 'passive', autoAgents: [] },
-      voice: { sttLanguageCode: 'en-US' },
-    };
-    const capabilities = {
-      freecad: { available: false, detail: 'Unavailable in mock', path: null },
-      build123d: { available: false, detail: 'Unavailable in mock', path: null },
-      mesh: { available: true, detail: 'bundled', path: null },
-      recommendedAuthoringContext: {
-        engineKind: 'ecky',
-        sourceLanguage: 'ecky',
-        geometryBackend: 'mesh',
-      },
-    };
-    const messages = [version];
-    const mock = {
-      deriveCalls: [] as Array<Record<string, unknown>>,
-      applyCalls: [] as Array<Record<string, unknown>>,
-      projectionRequests: [] as Array<Record<string, unknown>>,
-      historyRefreshes: [] as Array<Record<string, unknown>>,
-      rejectPendingDerivation: null as null | (() => void),
-    };
-    const pendingDerivationRejectors: Array<(error: Error) => void> = [];
-    mock.rejectPendingDerivation = () => {
-      for (const reject of pendingDerivationRejectors.splice(0)) reject(new Error('Mock profile derivation failed.'));
-    };
-    (window as any).__PROFILE_AUTHORING__ = mock;
-    (window as any).__TAURI_INTERNALS__ = (window as any).__TAURI_INTERNALS__ || {};
-    (window as any).__TAURI_INTERNALS__.convertFileSrc = (path: string) => path;
-    const eventHandlers = new Map<string, number[]>();
-    let nextCallbackId = 1;
-    (window as any).__TAURI_INTERNALS__.transformCallback = (callback: unknown) => {
-      const callbackId = nextCallbackId++;
-      (window as any)[`_${callbackId}`] = callback;
-      return callbackId;
-    };
-
-    const workspaceProjection = (preferredMessageId?: string | null) => {
-      const selectedVersion = preferredMessageId
-        ? messages.find((message) => message.id === preferredMessageId) ?? messages[messages.length - 1]
-        : messages[messages.length - 1];
-      return {
-        thread: { ...thread, versionCount: messages.length },
-        messagesPage: {
-          messages,
-          nextBefore: null,
-          hasMore: false,
-          observedBytes: 0,
-          truncatedFields: [],
-        },
-        selectedVersion,
-        requestedMessageFound: Boolean(preferredMessageId && selectedVersion?.id === preferredMessageId),
-      };
-    };
-
-    (window as any).__TAURI_INTERNALS__.invoke = async (command: string, args?: Record<string, any>) => {
-      if (command === 'plugin:event|listen') {
-        const event = String(args?.event ?? '');
-        eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), Number(args?.handler)]);
-        return Number(args?.handler);
-      }
-      if (command === 'plugin:event|unlisten') return null;
-      if (command === 'get_boot_projection') {
-        return {
-          config,
-          history: [{ ...thread, versionCount: messages.length }],
-          workspace: workspaceProjection('profile-version-1'),
-          selectedPartId: null,
-        };
-      }
-      if (command === 'get_boot_runtime_projection') return { config, capabilities };
-      if (command === 'get_model_catalog_projection') return { config, models: [] };
-      if (command === 'get_active_agent_sessions') return [];
-      if (command === 'get_agent_terminal_snapshots') return [];
-      if (command === 'get_agent_activity') {
-        return { events: [], latestCursor: 0, oldestCursor: 0, hasMore: false, droppedCount: 0, retainedBytes: 0 };
-      }
-      if (command === 'get_thread_window_layout') {
-        return {
-          schemaVersion: 1,
-          rememberLayout: true,
-          windows: {
-            sketch: { visible: false, minimized: false, x: 100, y: 80, width: 760, height: 520, z: 5 },
-          },
-        };
-      }
-      if (command === 'save_thread_window_layout') return null;
-      if (command === 'get_thread_agent_state') {
-        return {
-          connectionState: 'disconnected',
-          agentLabel: null,
-          phase: null,
-          statusText: '',
-          busy: false,
-          waitingOnPrompt: false,
-          updatedAt: null,
-        };
-      }
-      if (command === 'derive_profile_geometry') {
-        const request = args?.request ?? {};
-        mock.deriveCalls.push(request);
-        if (mockOptions.deriveMode === 'pending-error') {
-          return new Promise((_resolve, reject) => pendingDerivationRejectors.push(reject));
-        }
-        if (request.operation.kind === 'projection' && mockOptions.failedProjectionView === request.operation.view) {
-          throw new Error(`Mock ${request.operation.view} projection failed.`);
-        }
-        return {
-          sourceArtifactPath: request.artifactPath,
-          sourceArtifactDigest: 'sha256:profile-source',
-          operation: request.operation,
-          toleranceMm: 0.5,
-          units: 'mm',
-          accuracy: request.operation.kind === 'section' && request.artifactPath.endsWith('.stl')
-            ? 'approximateMesh'
-            : 'exactBrep',
-          profileAsset: request.artifactPath.endsWith('.stl')
-            ? null
-            : {
-              artifactPath: `/mock/profile-assets/${request.operation.view ?? 'section'}.step`,
-              artifactDigest: `sha256:profile-${request.operation.view ?? 'section'}`,
-            },
-          loops: request.operation.view === 'front'
-            ? [
-              { role: 'outer', parentIndex: null, points: [[-14, -6], [14, -6], [14, 6], [-14, 6]] },
-              { role: 'hole', parentIndex: 0, points: [[-2, -2], [-2, 2], [2, 2], [2, -2]] },
-            ]
-            : request.operation.view === 'side'
-              ? [{ role: 'outer', parentIndex: null, points: [[-4, -14], [4, -14], [4, 14], [-4, 14]] }]
-              : [
-                { role: 'outer', parentIndex: null, points: [[-10, -10], [10, -10], [10, 10], [-10, 10]] },
-                { role: 'hole', parentIndex: 0, points: [[-2, -2], [-2, 2], [2, 2], [2, -2]] },
-              ],
-          displayAccuracy: 'approximateDisplayOnly',
-          warnings: request.artifactPath.endsWith('.stl')
-            ? ['Section is approximate because it was extracted from a mesh.']
-            : [],
-        };
-      }
-      if (command === 'apply_profile_feature') {
-        const request = args?.request ?? {};
-        mock.applyCalls.push(request);
-        if (mockOptions.applyMode === 'validation-error') {
-          throw new Error('Profile clearance or offset failed validation.');
-        }
-        const newVersion = {
-          ...version,
-          id: 'profile-version-2',
-          content: 'Applied profile feature',
-          status: mockOptions.applyMode === 'render-error' ? 'error' : 'success',
-          error: mockOptions.applyMode === 'render-error'
-            ? { code: 'render', message: 'Native render rejected profile.' }
-            : null,
-          timestamp: 200,
-          output: { ...design, title: request.partName ?? 'Flange fixture', versionName: 'Profile feature' },
-        };
-        messages.push(newVersion);
-        return {
-          source: '(model (part profile_feature (extrude profile 10)))',
-          draft: {
-            threadId: thread.id,
-            baseMessageId: 'profile-version-1',
-            messageId: newVersion.id,
-            status: mockOptions.applyMode === 'render-error' ? 'error' : 'success',
-            designOutput: newVersion.output,
-            artifactBundle,
-            modelManifest,
-            snapshotId: 'profile-snapshot-2',
-            parserMatched: true,
-            error: mockOptions.applyMode === 'render-error'
-              ? { code: 'render', message: 'Native render rejected profile.' }
-              : null,
-          },
-        };
-      }
-      if (command === 'get_workspace_projection') {
-        mock.projectionRequests.push(args ?? {});
-        return workspaceProjection(args?.preferredMessageId);
-      }
-      if (command === 'get_history') {
-        mock.historyRefreshes.push({ kind: 'summary' });
-        return [{ ...thread, versionCount: messages.length }];
-      }
-      if (command === 'get_thread_messages_page') {
-        mock.historyRefreshes.push({ kind: 'messages', threadId: args?.threadId });
-        return {
-          messages,
-          nextBefore: null,
-          hasMore: false,
-          observedBytes: 0,
-          truncatedFields: [],
-        };
-      }
-      if (command === 'get_thread_message_version') {
-        return messages.find((message) => message.id === args?.messageId) ?? null;
-      }
-      if (command === 'get_app_window_layout') return null;
-      if (command === 'save_app_window_layout') return null;
-      if (command === 'get_last_design') return null;
-      if (command === 'project_folder_render_activity') return [];
-      if (command === 'get_project_folder_snapshot') return null;
-      if (command === 'list_capture_runs') return [];
-      return null;
-    };
-  }, options);
-}
-
-async function openSketch(page: Page) {
-  await page.setViewportSize({ width: 1280, height: 720 });
-  await page.route(/\.stl(?:\?|$)/i, (route) => route.fulfill({
-    status: 200,
-    contentType: 'model/stl',
-    body: 'solid mock\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid mock\n',
-  }));
-  await page.goto('/');
-  await expect(page.locator('.boot-overlay')).toHaveCount(0);
-  const dock = page.getByRole('toolbar', { name: 'Workbench tools' });
-  await dock.getByRole('button', { name: 'Sketch', exact: true }).click();
-  const workspace = page.getByTestId('profile-workspace');
-  await expect(workspace.getByText('Profile authoring requires an Ecky source model.')).toHaveCount(0);
-  await workspace.getByRole('button', { name: 'All three views', exact: true }).click();
-  return workspace;
-}
-
-async function drawRectangle(workspace: Locator, view: 'front' | 'top' | 'side' = 'front') {
-  await workspace.getByLabel('Drawing tool').selectOption('rectangle');
-  await workspace.getByRole('button', { name: 'Draw profile' }).click();
-  const canvas = workspace.getByTestId(`profile-view-${view}`);
-  const bounds = await canvas.boundingBox();
-  if (!bounds) throw new Error('Profile canvas is not visible.');
-  const draftPolygon = canvas.locator('polygon.selected-loop');
-  const points = [
-    { x: bounds.width * 0.28, y: bounds.height * 0.3 },
-    { x: bounds.width * 0.72, y: bounds.height * 0.7 },
-  ];
-  for (const [index, position] of points.entries()) {
-    await canvas.click({ position });
-    await expect.poll(async () => {
-      const pathPoints = (await draftPolygon.getAttribute('points'))?.trim() ?? '';
-      return pathPoints ? pathPoints.split(/\s+/).length : 0;
-    })
-      .toBe(index === 0 ? 1 : 4);
-  }
-}
-
+import { expect, test } from '@playwright/test';
+import { drawRectangle, installProfileMocks, openSketch } from './profile-authoring-harness.js';
 test('manual rectangle applies as a normal model version without section reference', async ({ page }) => {
   await installProfileMocks(page);
   const workspace = await openSketch(page);
@@ -373,7 +33,7 @@ test('exact section applies profile asset while sampled display loops stay out o
   await workspace.getByLabel('Section plane').selectOption('xy');
   await workspace.getByLabel('Section offset (mm)').fill('3');
   await workspace.getByRole('button', { name: 'Extract exact section' }).click();
-  await expect(workspace.getByText('EXACT CAD PROFILE')).toBeVisible();
+  await expect(workspace.getByText('EXACT CAD PROFILE', { exact: true })).toBeVisible();
   await expect(workspace.getByText(/XY section · offset 3.00 mm/i)).toBeVisible();
   await expect(workspace.getByRole('button', { name: 'Apply profile' })).toBeEnabled();
   await workspace.getByRole('button', { name: 'Apply profile' }).click();
@@ -400,7 +60,7 @@ test('approximate mesh section uses STL and submits editable loops with approxim
 
   await workspace.getByLabel('Derivation mode').selectOption('meshSection');
   await workspace.getByRole('button', { name: 'Extract approximate section' }).click();
-  await expect(workspace.getByText('APPROXIMATE PROFILE')).toBeVisible();
+  await expect(workspace.getByText('APPROXIMATE PROFILE', { exact: true })).toBeVisible();
   await workspace.getByRole('button', { name: 'Apply profile' }).click();
 
   await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.applyCalls.length === 1);
@@ -424,12 +84,12 @@ test('exact projection requires explicit conversion before sampled loops can be 
   await workspace.getByLabel('Derivation mode').selectOption('exactProjection');
   await workspace.getByRole('button', { name: 'Project all three views' }).click();
   await expect(workspace.getByTestId('profile-view-front').locator('polygon.outer')).toBeVisible();
-  await expect(workspace.getByText('EXACT CAD PROFILE')).toBeVisible();
+  await expect(workspace.getByText('EXACT CAD PROFILE', { exact: true })).toBeVisible();
   await expect(workspace.getByRole('button', { name: 'Convert to editable approximate polygon' })).toBeVisible();
   await expect(workspace.locator('circle.vertex-handle')).toHaveCount(0);
 
   await workspace.getByRole('button', { name: 'Convert to editable approximate polygon' }).click();
-  await expect(workspace.getByText('APPROXIMATE PROFILE')).toBeVisible();
+  await expect(workspace.getByText('APPROXIMATE PROFILE', { exact: true })).toBeVisible();
   await expect(workspace.locator('circle.vertex-handle')).toHaveCount(8);
   await workspace.getByRole('button', { name: 'Apply profile' }).click();
 
@@ -593,4 +253,135 @@ test('without a model artifact Sketch remains available but derivation stays dis
   await expect(workspace.getByText(/supported STEP model is needed/i)).toBeVisible();
   await expect(workspace.getByRole('button', { name: 'Draw profile' })).toBeEnabled();
   await expect(workspace.getByRole('button', { name: 'Apply profile' })).toBeDisabled();
+});
+
+test('drawing photo import recognizes a calibrated plate and preserves analytic circle through apply', async ({ page }) => {
+  await installProfileMocks(page);
+  const workspace = await openSketch(page);
+  await workspace.getByRole('button', { name: 'Select top projection' }).click();
+  await workspace.getByRole('button', { name: 'Drawing photo' }).click();
+  await expect(workspace.getByTestId('drawing-photo-source')).toBeVisible();
+
+  const source = workspace.getByTestId('drawing-photo-source');
+  const sourceBox = await source.boundingBox();
+  if (!sourceBox) throw new Error('Drawing photo preview has no visible bounds.');
+  const pickSourcePoint = async (x: number, y: number) => page.mouse.click(sourceBox.x + sourceBox.width * x, sourceBox.y + sourceBox.height * y);
+  await workspace.getByRole('button', { name: 'Select image region' }).click();
+  await page.mouse.move(sourceBox.x + sourceBox.width * 0.05, sourceBox.y + sourceBox.height * 0.1);
+  await page.mouse.down();
+  await page.mouse.move(sourceBox.x + sourceBox.width * 0.95, sourceBox.y + sourceBox.height * 0.9);
+  await page.mouse.up();
+  await expect(workspace.getByText(/Crop: 576 × 384 px/)).toBeVisible();
+
+  await workspace.getByRole('button', { name: 'Pick four corners' }).click();
+  for (const point of [[0.1, 0.15], [0.9, 0.15], [0.9, 0.85], [0.1, 0.85]]) {
+    await pickSourcePoint(point[0]!, point[1]!);
+  }
+  await workspace.getByLabel('Known rectangle aspect ratio').fill('1.6');
+
+  await workspace.getByRole('button', { name: 'Pick scale points' }).click();
+  await pickSourcePoint(0.1, 0.25);
+  await pickSourcePoint(0.9, 0.25);
+  await workspace.getByLabel('Known length (mm)').fill('80');
+  await expect(workspace.getByText('Reference distance: 80 mm')).toBeVisible();
+
+  await workspace.getByRole('button', { name: 'Recognize drawing' }).click();
+  await expect(workspace.getByTestId('drawing-profile-candidates')).toContainText('plate-outline');
+  await expect(workspace.getByLabel('Calibrated distance (mm)')).toContainText('Recovered distance: 80.00 mm · image-derived, check dimensions.');
+  await expect(workspace.getByTestId('profile-view-top').locator('circle.drawing-circle')).toHaveCount(1);
+  await workspace.getByLabel('Recognized primitive').selectOption('hole-1');
+  await workspace.getByLabel('Circle radius (mm)').fill('4.9');
+  await expect(workspace.getByTestId('profile-view-top').locator('circle.drawing-circle')).toHaveAttribute('r', '4.9');
+  await workspace.getByRole('button', { name: 'Review corrections' }).click();
+  await workspace.getByRole('button', { name: 'Accept selected profile' }).click();
+  await expect(workspace.getByLabel('Profile plane', { exact: true })).toBeDisabled();
+  await expect(workspace.getByLabel('Profile plane offset (mm)')).toBeEnabled();
+  await workspace.getByLabel('Profile name').fill('photo-plate');
+  await workspace.getByLabel('Depth (mm)').fill('3');
+
+  if (process.env.DRAWING_PHOTO_SCREENSHOT_PATH) {
+    await workspace.getByRole('button', { name: 'Show top view' }).click();
+    await workspace.getByTestId('profile-view-top').getByRole('button', { name: 'FIT VIEW' }).click();
+    await workspace.getByLabel('Profile controls', { exact: true }).evaluate((sidebar: HTMLElement) => {
+      const opacity = sidebar.querySelector<HTMLInputElement>('[aria-label="Source image opacity"]');
+      if (opacity) {
+        opacity.value = '0.9';
+        opacity.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      const radius = sidebar.querySelector<HTMLElement>('[aria-label="Circle radius (mm)"]');
+      if (radius) {
+        const top = radius.getBoundingClientRect().top - sidebar.getBoundingClientRect().top;
+        sidebar.scrollTop += top - 160;
+      }
+    });
+    await page.screenshot({ path: process.env.DRAWING_PHOTO_SCREENSHOT_PATH });
+  }
+
+  await workspace.getByLabel('Recognized primitive').selectOption('plate-outline');
+  const outlineVertex = workspace.getByTestId('drawing-vertex-0');
+  const vertexBox = await outlineVertex.boundingBox();
+  if (!vertexBox) throw new Error('Recognized plate outline has no editable vertex handle.');
+  await page.mouse.move(vertexBox.x + vertexBox.width / 2, vertexBox.y + vertexBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(vertexBox.x + vertexBox.width / 2 + 18, vertexBox.y + vertexBox.height / 2 + 10, { steps: 2 });
+  await page.mouse.up();
+  await expect(workspace.getByLabel('Polyline vertex 1 X (mm)')).not.toHaveValue('0');
+  await workspace.getByRole('button', { name: 'Review corrections' }).click();
+
+  await workspace.getByLabel('Photo correction tool').selectOption('line');
+  await workspace.getByRole('button', { name: 'Draw correction' }).click();
+  const profilePane = workspace.getByTestId('profile-view-top');
+  const profileBox = await profilePane.boundingBox();
+  if (!profileBox) throw new Error('Calibrated profile canvas has no visible bounds.');
+  await page.mouse.click(profileBox.x + profileBox.width * 0.2, profileBox.y + profileBox.height * 0.2);
+  await page.mouse.click(profileBox.x + profileBox.width * 0.3, profileBox.y + profileBox.height * 0.3);
+  await workspace.getByRole('button', { name: 'Review corrections' }).click();
+  await workspace.getByRole('button', { name: 'Accept selected profile' }).click();
+  await workspace.getByRole('button', { name: 'Apply profile' }).click();
+
+  await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.applyCalls.length === 1);
+  const result = await page.evaluate(() => ({
+    prepared: (window as any).__PROFILE_AUTHORING__.preparedDrawingPath,
+    recognition: (window as any).__PROFILE_AUTHORING__.recognitionCalls[0],
+    apply: (window as any).__PROFILE_AUTHORING__.applyCalls[0],
+  }));
+  expect(result.prepared).toBe('/mock/plate-photo.png');
+  expect(result.recognition.view).toBe('top');
+  expect(result.recognition.region.widthPx).toBeCloseTo(576, 2);
+  expect(result.recognition.region.heightPx).toBeCloseTo(384, 2);
+  expect(result.recognition.region.rotationDegrees).toBe(0);
+  expect(result.recognition.rectification).toMatchObject({ aspectRatio: 1.6 });
+  expect(result.recognition.calibration.distanceMm).toBe(80);
+  expect(result.apply.drawingProfile.evidenceId).toBe('drawing-evidence-1');
+  expect(result.apply.drawingProfile.primitives).toHaveLength(3);
+  expect(result.apply.drawingProfile.primitives.find((primitive: any) => primitive.kind === 'polyline').pointsMm[0][0]).not.toBe(0);
+  expect(result.apply.drawingProfile.primitives.some((primitive: any) => primitive.id === 'user-line-1')).toBe(true);
+  expect(result.apply.drawingProfile.primitives.find((primitive: any) => primitive.kind === 'circle')).toMatchObject({
+    centerMm: [40, 25],
+    radiusMm: 4.9,
+  });
+  expect(result.apply.loops).toBeUndefined();
+  expect(result.apply.reference).toBeNull();
+  expect(await page.evaluate(() => (window as any).__PROFILE_AUTHORING__.reviewCalls.length)).toBe(3);
+});
+
+test('drawing recognition failure keeps the source photo and blocks profile apply', async ({ page }) => {
+  await installProfileMocks(page, { drawingMode: 'recognition-error' });
+  const workspace = await openSketch(page);
+  await workspace.getByRole('button', { name: 'Select top projection' }).click();
+  await workspace.getByRole('button', { name: 'Drawing photo' }).click();
+  const source = workspace.getByTestId('drawing-photo-source');
+  const sourceBox = await source.boundingBox();
+  if (!sourceBox) throw new Error('Drawing photo preview has no visible bounds.');
+
+  await workspace.getByRole('button', { name: 'Pick scale points' }).click();
+  await page.mouse.click(sourceBox.x + sourceBox.width * 0.15, sourceBox.y + sourceBox.height * 0.25);
+  await page.mouse.click(sourceBox.x + sourceBox.width * 0.85, sourceBox.y + sourceBox.height * 0.25);
+  await workspace.getByLabel('Known length (mm)').fill('80');
+  await workspace.getByRole('button', { name: 'Recognize drawing' }).click();
+
+  await expect(workspace.getByRole('alert')).toContainText('Mock drawing recognition failed.');
+  await expect(source).toBeVisible();
+  await expect(workspace.getByRole('button', { name: 'Apply profile' })).toBeDisabled();
+  expect(await page.evaluate(() => (window as any).__PROFILE_AUTHORING__.applyCalls.length)).toBe(0);
 });

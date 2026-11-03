@@ -10,6 +10,7 @@
   import WorkbenchWindows from './lib/workbench/WorkbenchWindows.svelte';
   import ProfileWorkspace from './lib/ProfileWorkspace.svelte';
   import type { ProfileApplyInput, ProfileApplyOutcome, ProfileDeriveInput } from './lib/profileWorkspace';
+  import type { PreparedDrawingImage, RecognizeDrawingProfileRequest, DrawingRecognitionResponse, ReviewDrawingProfileRequest, DrawingProfileReviewResponse } from './lib/tauri/contracts';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import { safeSaveDialog } from './lib/safeSaveDialog';
@@ -294,6 +295,9 @@ import {
     applyCapturePreview as applyCapturePreviewCommand,
     deriveProfileGeometry,
     applyProfileFeature,
+    prepareDrawingImage,
+    recognizeDrawingProfile,
+    reviewDrawingProfile,
     getWorkspaceProjection,
     importModelIntent,
     preparePromptAttachments,
@@ -5466,6 +5470,23 @@ import {
     return deriveProfileGeometry({ artifactPath, operation: input.operation, toleranceMm: input.toleranceMm });
   }
 
+  async function handleChooseDrawingPhoto(): Promise<PreparedDrawingImage | null> {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: 'Drawing image', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+    });
+    if (typeof selected !== 'string' || !selected.trim()) return null;
+    return prepareDrawingImage({ sourcePath: selected });
+  }
+
+  async function handleRecognizeDrawing(input: RecognizeDrawingProfileRequest): Promise<DrawingRecognitionResponse> {
+    return recognizeDrawingProfile(input);
+  }
+
+  async function handleReviewDrawing(input: ReviewDrawingProfileRequest): Promise<DrawingProfileReviewResponse> {
+    return reviewDrawingProfile(input);
+  }
+
   async function handleProfileApply(input: ProfileApplyInput): Promise<ProfileApplyOutcome> {
     const threadId = get(activeThreadId);
     if (!threadId) throw new Error('Create or open a project before applying a profile.');
@@ -5890,6 +5911,9 @@ import {
             : undefined}
         onDerive={handleProfileDerive}
         onApply={handleProfileApply}
+        onChooseDrawing={handleChooseDrawingPhoto}
+        onRecognizeDrawing={handleRecognizeDrawing}
+        onReviewDrawing={handleReviewDrawing}
       />
     {/snippet}
 

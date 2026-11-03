@@ -1297,6 +1297,30 @@ async applyProfileFeature(request: ProfileFeatureApplyRequest) : Promise<Result<
     else return { status: "error", error: e  as any };
 }
 },
+async prepareDrawingImage(request: PrepareDrawingImageRequest) : Promise<Result<PreparedDrawingImage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("prepare_drawing_image", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async recognizeDrawingProfile(request: RecognizeDrawingProfileRequest) : Promise<Result<DrawingRecognitionResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("recognize_drawing_profile", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async reviewDrawingProfile(request: ReviewDrawingProfileRequest) : Promise<Result<DrawingProfileReviewResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("review_drawing_profile", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async suggestSketchFeatures(request: SketchSuggestionRequest) : Promise<Result<SketchSuggestionResponse, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("suggest_sketch_features", { request }) };
@@ -1992,6 +2016,22 @@ export type DiagnosticContext = { partKey?: string | null; opName?: string | nul
 export type DiagnosticParamValue = { key: string; value: ParamValue }
 export type DisplacementSpec = { imageParam: string; projection: ProjectionType; depthMm: number; invert?: boolean }
 export type DocumentMetadata = { documentName: string; documentLabel: string; sourcePath?: string | null; objectCount?: number; warnings?: string[] }
+export type DrawingImageFormat = "png" | "jpeg" | "webp"
+export type DrawingImageIdentity = { artifactPath: string; digest: string; widthPx: number; heightPx: number; format: DrawingImageFormat }
+export type DrawingImportEvidence = { image: DrawingImageIdentity; view: SketchView; region: DrawingRegion; rectification: DrawingRectification | null; calibration: DrawingScaleCalibration; toleranceMm: number; extractorVersion: string }
+export type DrawingPrimitive = { kind: "line"; id: string; startMm: [number, number]; endMm: [number, number]; residualMm: number } | { kind: "circle"; id: string; centerMm: [number, number]; radiusMm: number; residualMm: number } | { kind: "polyline"; id: string; pointsMm: ([number, number])[]; closed: boolean; residualMm: number }
+export type DrawingProfileApplyInput = { evidenceId: string; primitives: DrawingPrimitive[] }
+export type DrawingProfileCandidate = { id: string; primitiveIds: string[]; role: DrawingProfileRole; parentId: string | null; closed: boolean; residualMm: number; issues: string[] }
+export type DrawingProfileReviewResponse = { evidenceId: string; profiles: DrawingProfileCandidate[]; diagnostics: string[] }
+export type DrawingProfileRole = "outer" | "hole"
+export type DrawingRecognitionResponse = { evidenceId: string; evidence: DrawingImportEvidence; primitives: DrawingPrimitive[]; profiles: DrawingProfileCandidate[]; diagnostics: string[]; transformedPreviewDataUrl: string; previewWidthPx: number; previewHeightPx: number;
+/**
+ * Row-major homogeneous matrix mapping normalized source-image pixels to preview pixels.
+ */
+sourceToPreviewTransform: [number, number, number, number, number, number, number, number, number]; millimetersPerPixel: number }
+export type DrawingRectification = { cornersPx: [([number, number]), ([number, number]), ([number, number]), ([number, number])]; aspectRatio: number }
+export type DrawingRegion = { leftPx: number; topPx: number; widthPx: number; heightPx: number; rotationDegrees: number }
+export type DrawingScaleCalibration = { startPx: [number, number]; endPx: [number, number]; distanceMm: number }
 export type Engine = { id: string; name: string; provider: string; apiKey: string; model: string; lightModel?: string; baseUrl: string; enabled?: boolean;
 /**
  * Per-model vision capability overrides. Keyed by model id. Absent key = `Auto`.
@@ -2217,7 +2257,9 @@ export type PortFrame = { origin: [number, number, number]; xAxis: [number, numb
 export type PortReference = { instanceId: string; portId: string }
 export type PortTypeDefinition = { typeId: string; displayName: string; base?: string | null; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[]; params?: ComponentParam[] }
 export type PostProcessingSpec = { displacement?: DisplacementSpec | null; lithophaneAttachments?: LithophaneAttachment[] }
+export type PrepareDrawingImageRequest = { sourcePath: string }
 export type PreparePromptWorkspaceCaptureInput = { dataUrl: string; threadId?: string | null; name?: string | null; explanation?: string | null }
+export type PreparedDrawingImage = { image: DrawingImageIdentity; previewDataUrl: string; previewWidthPx: number; previewHeightPx: number }
 export type PreviewView = { viewId: string; label: string; offsets?: PreviewViewOffset[] }
 export type PreviewViewOffset = { partId: string; dx: number; dy: number; dz: number }
 export type PrimitiveBinding = { parameterKey: string; scale?: number; offset?: number; min?: number | null; max?: number | null }
@@ -2225,7 +2267,7 @@ export type ProfileArtifactReference = { sourceArtifactPath: string; sourceArtif
 export type ProfileAsset = { artifactPath: string; artifactDigest: string }
 export type ProfileDerivationOperation = { kind: "section"; plane: ProfilePlane; offsetMm: number } | { kind: "projection"; view: ProfileView }
 export type ProfileEvidenceAccuracy = "exactBrep" | "approximateMesh" | "approximatePolygon"
-export type ProfileFeatureApplyRequest = { threadId: string; baseMessageId?: string | null; expectedSource: string; loops?: ProfileLoop[] | null; plane: ProfilePlane; offsetMm: number; clearanceMm: number; depthMm: number; partName: string; reference?: ProfileArtifactReference | null }
+export type ProfileFeatureApplyRequest = { threadId: string; baseMessageId?: string | null; expectedSource: string; loops?: ProfileLoop[] | null; plane: ProfilePlane; offsetMm: number; clearanceMm: number; depthMm: number; partName: string; reference?: ProfileArtifactReference | null; drawingProfile?: DrawingProfileApplyInput | null }
 export type ProfileFeatureApplyResponse = { source: string; draft: ManualCodeApplyResponse }
 export type ProfileGeometryRequest = { artifactPath: string; operation: ProfileDerivationOperation; toleranceMm: number }
 export type ProfileGeometryResponse = { sourceArtifactPath: string; sourceArtifactDigest: string; operation: ProfileDerivationOperation; toleranceMm: number; units: string; accuracy: ProfileEvidenceAccuracy; profileAsset: ProfileAsset | null; displayAccuracy: string; loops: ProfileLoop[]; warnings: string[] }
@@ -2290,12 +2332,14 @@ export type RasterTraceContour = { contourId: string; points: ([number, number])
 export type RasterTraceProvenance = { kind: string; asset: RasterTraceAssetIdentity; view: SketchView; calibration: RasterTraceCalibration; threshold: number; invert: boolean; contourId: string; extractorVersion: string }
 export type RasterTraceRequest = { imagePath: string; view: SketchView; calibration: RasterTraceCalibration; threshold: number; invert?: boolean }
 export type RasterTraceResponse = { asset: RasterTraceAssetIdentity; contours: RasterTraceContour[]; connectedComponentCount: number; extractorVersion: string; evidence?: string[] }
+export type RecognizeDrawingProfileRequest = { image: DrawingImageIdentity; view: SketchView; region: DrawingRegion; rectification: DrawingRectification | null; calibration: DrawingScaleCalibration; excludedRegions?: DrawingRegion[]; toleranceMm: number }
 export type RegistryReleaseSummary = { header: ComponentPackageHeader; license: string | null; archiveDigest: string; packageDigest: string }
 export type RejectViewportScreenshotInput = { requestId: string; error: string }
 export type ReopenedCaptureRun = { run: CaptureRun; session: CaptureSessionInfo }
 export type RepairVersionRuntimeIntent = { threadId: string; messageId: string; expectedArtifactIdentity?: string | null }
 export type RepairVersionRuntimeResponse = { snapshotId: string; artifactIdentity: string; workspace: WorkspaceProjection }
 export type ResolveViewportScreenshotInput = { requestId: string; dataUrl: string; width: number; height: number; camera: ViewportCameraState; source: string; threadId: string; messageId: string; modelId?: string | null; includeOverlays: boolean }
+export type ReviewDrawingProfileRequest = { evidenceId: string; primitives: DrawingPrimitive[] }
 export type RuntimeAuthoringContext = { engineKind: EngineKind; sourceLanguage: SourceLanguage; geometryBackend: GeometryBackend }
 export type RuntimeBackendCapability = { available: boolean; detail: string; path?: string | null }
 export type RuntimeCapabilities = { freecad: RuntimeBackendCapability; build123D: RuntimeBackendCapability; directOcct: RuntimeBackendCapability; mesh: RuntimeBackendCapability; recommendedAuthoringContext: RuntimeAuthoringContext }

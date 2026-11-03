@@ -1,14 +1,26 @@
 import { expect, type Locator, type Page } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 
 type ProfileMockOptions = {
   deriveMode?: 'success' | 'pending-error';
   failedProjectionView?: 'front' | 'top' | 'side';
   missingArtifact?: boolean;
   applyMode?: 'success' | 'render-error' | 'validation-error';
+  drawingMode?: 'success' | 'recognition-error' | 'review-error';
 };
 
 export async function installProfileMocks(page: Page, options: ProfileMockOptions = {}) {
-  await page.addInitScript((mockOptions) => {
+  const [sourceImage, transformedPreview] = await Promise.all([
+    readFile(new URL('./fixtures/plate-drawing-source.png', import.meta.url)),
+    readFile(new URL('./fixtures/plate-drawing-preview.png', import.meta.url)),
+  ]);
+  const images = {
+    source: `data:image/png;base64,${sourceImage.toString('base64')}`,
+    transformed: `data:image/png;base64,${transformedPreview.toString('base64')}`,
+  };
+  await page.addInitScript((payload) => {
+    const mockOptions = payload.options;
+    const imageDataUrls = payload.images;
     const design = {
       title: 'Flange fixture',
       versionName: 'V1',
@@ -116,6 +128,9 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
       projectionRequests: [] as Array<Record<string, unknown>>,
       historyRefreshes: [] as Array<Record<string, unknown>>,
       rejectPendingDerivation: null as null | (() => void),
+      preparedDrawingPath: null as string | null,
+      recognitionCalls: [] as Array<Record<string, any>>,
+      reviewCalls: [] as Array<Record<string, any>>,
     };
     const pendingDerivationRejectors: Array<(error: Error) => void> = [];
     mock.rejectPendingDerivation = () => {
@@ -157,6 +172,7 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
         return Number(args?.handler);
       }
       if (command === 'plugin:event|unlisten') return null;
+      if (command === 'plugin:dialog|open') return '/mock/plate-photo.png';
       if (command === 'get_boot_projection') {
         return {
           config,
@@ -191,6 +207,74 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
           busy: false,
           waitingOnPrompt: false,
           updatedAt: null,
+        };
+      }
+      if (command === 'prepare_drawing_image') {
+        const sourcePath = args?.sourcePath ?? args?.request?.sourcePath;
+        mock.preparedDrawingPath = sourcePath;
+        return {
+          image: { artifactPath: '/managed/plate-photo.png', digest: 'sha256:plate-photo', widthPx: 640, heightPx: 480, format: 'png' },
+          previewDataUrl: imageDataUrls.source,
+          previewWidthPx: 640,
+          previewHeightPx: 480,
+        };
+      }
+      if (command === 'recognize_drawing_profile') {
+        mock.recognitionCalls.push(args?.request ?? args ?? {});
+        if (mockOptions.drawingMode === 'recognition-error') throw new Error('Mock drawing recognition failed.');
+        const request = args?.request ?? args ?? {};
+        const evidence = {
+          image: request.image,
+          view: request.view,
+          region: request.region,
+          rectification: request.rectification ?? null,
+          calibration: request.calibration,
+          toleranceMm: request.toleranceMm,
+          extractorVersion: 'mock-centerline-1',
+        };
+        const sourceToPreviewTransform = [1.5625, 0, -100, 0, 1.4880952381, -107.1428571, 0, 0, 1];
+        const transformPoint = ([x, y]: number[]) => {
+          const w = sourceToPreviewTransform[6]! * x + sourceToPreviewTransform[7]! * y + sourceToPreviewTransform[8]!;
+          return [
+            (sourceToPreviewTransform[0]! * x + sourceToPreviewTransform[1]! * y + sourceToPreviewTransform[2]!) / w,
+            (sourceToPreviewTransform[3]! * x + sourceToPreviewTransform[4]! * y + sourceToPreviewTransform[5]!) / w,
+          ];
+        };
+        const calibrationStart = transformPoint(request.calibration.startPx);
+        const calibrationEnd = transformPoint(request.calibration.endPx);
+        const transformedCalibrationLength = Math.hypot(calibrationEnd[0]! - calibrationStart[0]!, calibrationEnd[1]! - calibrationStart[1]!);
+        return {
+          evidenceId: 'drawing-evidence-1',
+          evidence,
+          primitives: [
+            { kind: 'polyline', id: 'plate-outline', pointsMm: [[0, 50], [80, 50], [80, 0], [0, 0]], closed: true, residualMm: 0.08 },
+            { kind: 'circle', id: 'hole-1', centerMm: [40, 25], radiusMm: 5, residualMm: 0.12 },
+          ],
+          profiles: [
+            { id: 'plate-outline', primitiveIds: ['plate-outline'], role: 'outer', parentId: null, closed: true, residualMm: 0.08, issues: [] },
+            { id: 'plate-hole', primitiveIds: ['hole-1'], role: 'hole', parentId: 'plate-outline', closed: true, residualMm: 0.12, issues: [] },
+          ],
+          diagnostics: [],
+          transformedPreviewDataUrl: imageDataUrls.transformed,
+          previewWidthPx: 800,
+          previewHeightPx: 500,
+          sourceToPreviewTransform,
+          millimetersPerPixel: request.calibration.distanceMm / transformedCalibrationLength,
+        };
+      }
+      if (command === 'review_drawing_profile') {
+        const request = args?.request ?? args ?? {};
+        mock.reviewCalls.push(request);
+        if (mockOptions.drawingMode === 'review-error') throw new Error('Mock contour review failed.');
+        const outerPrimitives = request.primitives.filter((primitive: any) => primitive.kind !== 'circle');
+        const circles = request.primitives.filter((primitive: any) => primitive.kind === 'circle');
+        return {
+          evidenceId: request.evidenceId,
+          profiles: [
+            { id: 'plate-outline', primitiveIds: outerPrimitives.map((primitive: any) => primitive.id), role: 'outer', parentId: null, closed: true, residualMm: 0.08, issues: [] },
+            ...circles.map((primitive: any) => ({ id: 'plate-hole', primitiveIds: [primitive.id], role: 'hole', parentId: 'plate-outline', closed: true, residualMm: primitive.residualMm, issues: [] })),
+          ],
+          diagnostics: [],
         };
       }
       if (command === 'derive_profile_geometry') {
@@ -299,7 +383,7 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
       if (command === 'list_capture_runs') return [];
       return null;
     };
-  }, options);
+  }, { options, images });
 }
 
 export async function openSketch(page: Page, allThree = true) {
@@ -320,6 +404,7 @@ export async function openSketch(page: Page, allThree = true) {
 }
 
 export async function drawRectangle(workspace: Locator, view: 'front' | 'top' | 'side' = 'front') {
+  await workspace.getByRole('button', { name: `Select ${view} projection` }).click();
   await workspace.getByLabel('Drawing tool').selectOption('rectangle');
   await workspace.getByRole('button', { name: 'Draw profile' }).click();
   const canvas = workspace.getByTestId(`profile-view-${view}`);

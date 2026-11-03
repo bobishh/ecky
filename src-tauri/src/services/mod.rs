@@ -13,6 +13,7 @@ pub mod codex_app_server;
 pub mod codex_pre_tool_hook;
 pub mod codex_takeover;
 pub mod design;
+pub mod drawing_import;
 pub mod external_shape_edit;
 pub mod fem;
 pub mod fem_artifacts;

@@ -30,7 +30,7 @@ test('profile canvas maps pointer coordinates to millimeters with an upward-posi
       width: 100,
       height: 50,
     }),
-    [-25, 20],
+    [-25, 40],
   );
 });
 

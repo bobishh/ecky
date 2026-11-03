@@ -172,6 +172,8 @@ pub struct ProfileFeatureApplyRequest {
     pub part_name: String,
     #[serde(default)]
     pub reference: Option<ProfileArtifactReference>,
+    #[serde(default)]
+    pub drawing_profile: Option<crate::services::drawing_import::DrawingProfileApplyInput>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -492,6 +494,30 @@ pub async fn apply_profile_feature(
     app: &dyn PathResolver,
 ) -> AppResult<ProfileFeatureApplyResponse> {
     validate_feature_request(&request)?;
+    let drawing_evidence = if let Some(drawing) = request.drawing_profile.as_ref() {
+        let evidence = crate::services::drawing_import::load_verified_evidence(
+            &app.app_data_dir(),
+            &drawing.evidence_id,
+        )?;
+        let expected_plane = match &evidence.view {
+            crate::contracts::SketchView::Front => ProfilePlane::Xz,
+            crate::contracts::SketchView::Top => ProfilePlane::Xy,
+            crate::contracts::SketchView::Side => ProfilePlane::Yz,
+            crate::contracts::SketchView::Custom => {
+                return Err(AppError::validation(
+                    "Drawing profile apply supports front, top, or side views. Choose a principal view and recognize again.",
+                ));
+            }
+        };
+        if request.plane != expected_plane {
+            return Err(AppError::validation(
+                "Drawing view and extrusion plane do not match. Choose the plane assigned to this view.",
+            ));
+        }
+        Some(evidence)
+    } else {
+        None
+    };
     if let Some(reference) = request.reference.as_ref() {
         let actual = artifact_digest(&reference.source_artifact_path)?;
         if actual != reference.source_artifact_digest {
@@ -623,11 +649,14 @@ pub async fn apply_profile_feature(
         &request.part_name,
         request.reference.as_ref(),
         request.base_message_id.as_deref(),
+        request.drawing_profile.as_ref(),
+        drawing_evidence.as_ref(),
     )?;
     let exact_profile = request
         .reference
         .as_ref()
-        .is_some_and(|reference| reference.accuracy == ProfileEvidenceAccuracy::ExactBrep);
+        .is_some_and(|reference| reference.accuracy == ProfileEvidenceAccuracy::ExactBrep)
+        || request.drawing_profile.is_some();
     let geometry_backend = if exact_profile {
         let program = crate::ecky_scheme::compile_to_core_program(&source).map_err(|error| {
             AppError::parse(format!("Exact profile source cannot be compiled: {error}"))
@@ -643,7 +672,7 @@ pub async fn apply_profile_feature(
         )
         .map_err(|error| {
             AppError::validation(format!(
-                "Exact profile requires the complete model to render through Direct OCCT: {error}"
+                "This exact or image-derived profile requires the complete model to render through Direct OCCT: {error}"
             ))
         })?;
         Some(crate::contracts::GeometryBackend::EckyRust)
@@ -714,6 +743,20 @@ fn validate_feature_request(request: &ProfileFeatureApplyRequest) -> AppResult<(
         return Err(AppError::validation(
             "Profile part name must start with a letter or underscore and contain only letters, digits, underscores, or hyphens.",
         ));
+    }
+    if let Some(drawing) = request.drawing_profile.as_ref() {
+        if request.reference.is_some() || request.loops.is_some() {
+            return Err(AppError::validation(
+                "Choose one profile source: drawing, CAD reference, or manual outline.",
+            ));
+        }
+        if drawing.evidence_id.trim().is_empty() {
+            return Err(AppError::validation(
+                "Drawing recognition evidence is required.",
+            ));
+        }
+        validate_drawing_primitives(&drawing.primitives)?;
+        return Ok(());
     }
     match request.reference.as_ref() {
         Some(reference) => {
@@ -823,6 +866,159 @@ fn validate_feature_request(request: &ProfileFeatureApplyRequest) -> AppResult<(
             AppError::validation("Manual profile requires at least one closed loop.")
         })?)
         .map(|_| ()),
+    }
+}
+
+fn validate_drawing_primitives(
+    primitives: &[crate::services::drawing_import::DrawingPrimitive],
+) -> AppResult<Vec<crate::services::drawing_import::DrawingPrimitive>> {
+    crate::services::drawing_import::validate_accepted_profile_primitives(primitives)
+}
+
+fn drawing_geometry_expression(
+    primitives: &[crate::services::drawing_import::DrawingPrimitive],
+    clearance_name: &str,
+    depth_name: &str,
+) -> AppResult<String> {
+    use crate::services::drawing_import::DrawingProfileRole;
+    let loops = validate_drawing_primitives(primitives)?;
+    let profiles = crate::services::drawing_import::assemble_profile_candidates(&loops);
+    let primitive_by_id = loops
+        .iter()
+        .map(|primitive| (drawing_primitive_id(primitive), primitive))
+        .collect::<BTreeMap<_, _>>();
+    let regions = profiles
+        .iter()
+        .filter(|profile| profile.role == DrawingProfileRole::Outer && profile.parent_id.is_none())
+        .map(|profile| {
+            drawing_region_expression(
+                profile,
+                &profiles,
+                &primitive_by_id,
+                clearance_name,
+                depth_name,
+            )
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    if regions.is_empty() {
+        return Err(AppError::validation(
+            "Drawing profile needs a closed outer boundary.",
+        ));
+    }
+    Ok(union_expression(regions))
+}
+
+fn drawing_region_expression(
+    profile: &crate::services::drawing_import::DrawingProfileCandidate,
+    profiles: &[crate::services::drawing_import::DrawingProfileCandidate],
+    primitive_by_id: &BTreeMap<&str, &crate::services::drawing_import::DrawingPrimitive>,
+    clearance_name: &str,
+    depth_name: &str,
+) -> AppResult<String> {
+    use crate::services::drawing_import::DrawingProfileRole;
+    let primitive_id = profile
+        .primitive_ids
+        .first()
+        .ok_or_else(|| AppError::validation("Drawing profile candidate has no source geometry."))?;
+    let primitive = primitive_by_id.get(primitive_id.as_str()).ok_or_else(|| {
+        AppError::validation("Drawing profile candidate references missing geometry.")
+    })?;
+    let base = extruded_drawing_primitive(primitive, clearance_name, depth_name)?;
+    let mut result = base;
+    for hole in profiles.iter().filter(|candidate| {
+        candidate.role == DrawingProfileRole::Hole
+            && candidate.parent_id.as_deref() == Some(profile.id.as_str())
+    }) {
+        let hole_id = hole
+            .primitive_ids
+            .first()
+            .ok_or_else(|| AppError::validation("Drawing hole has no source geometry."))?;
+        let hole_primitive = primitive_by_id
+            .get(hole_id.as_str())
+            .ok_or_else(|| AppError::validation("Drawing hole references missing geometry."))?;
+        let hole_shape = extruded_drawing_primitive(
+            hole_primitive,
+            &format!("(- {clearance_name})"),
+            depth_name,
+        )?;
+        let islands = profiles
+            .iter()
+            .filter(|candidate| {
+                candidate.role == DrawingProfileRole::Outer
+                    && candidate.parent_id.as_deref() == Some(hole.id.as_str())
+            })
+            .map(|candidate| {
+                drawing_region_expression(
+                    candidate,
+                    profiles,
+                    primitive_by_id,
+                    clearance_name,
+                    depth_name,
+                )
+            })
+            .collect::<AppResult<Vec<_>>>()?;
+        let void = if islands.is_empty() {
+            hole_shape
+        } else {
+            format!("(difference {} {})", hole_shape, union_expression(islands))
+        };
+        result = format!("(difference {} {})", result, void);
+    }
+    Ok(result)
+}
+
+fn extruded_drawing_primitive(
+    primitive: &crate::services::drawing_import::DrawingPrimitive,
+    offset: &str,
+    depth_name: &str,
+) -> AppResult<String> {
+    use crate::services::drawing_import::DrawingPrimitive;
+    let shape = match primitive {
+        DrawingPrimitive::Circle {
+            center_mm,
+            radius_mm,
+            ..
+        } => format!(
+            "(translate {} {} 0 (offset {offset} (circle {})))",
+            number(center_mm[0]),
+            number(center_mm[1]),
+            number(*radius_mm)
+        ),
+        DrawingPrimitive::Polyline {
+            points_mm,
+            closed: true,
+            ..
+        } => {
+            let points = points_mm
+                .iter()
+                .map(|point| format!("({} {})", number(point[0]), number(point[1])))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("(offset {offset} (polygon ({points})))")
+        }
+        _ => {
+            return Err(AppError::validation(
+                "Drawing profile contains open or unsupported geometry.",
+            ))
+        }
+    };
+    Ok(format!("(extrude {shape} {depth_name})"))
+}
+
+fn union_expression(expressions: Vec<String>) -> String {
+    if expressions.len() == 1 {
+        expressions.into_iter().next().unwrap_or_default()
+    } else {
+        format!("(union {})", expressions.join(" "))
+    }
+}
+
+fn drawing_primitive_id(primitive: &crate::services::drawing_import::DrawingPrimitive) -> &str {
+    use crate::services::drawing_import::DrawingPrimitive;
+    match primitive {
+        DrawingPrimitive::Line { id, .. }
+        | DrawingPrimitive::Circle { id, .. }
+        | DrawingPrimitive::Polyline { id, .. } => id,
     }
 }
 
@@ -1229,8 +1425,12 @@ fn build_profile_feature_source(
     part_name: &str,
     reference: Option<&ProfileArtifactReference>,
     base_message_id: Option<&str>,
+    drawing_profile: Option<&crate::services::drawing_import::DrawingProfileApplyInput>,
+    drawing_evidence: Option<&crate::services::drawing_import::DrawingImportEvidence>,
 ) -> AppResult<String> {
-    let profile = if let Some(reference) =
+    let profile = if drawing_profile.is_some() {
+        String::new()
+    } else if let Some(reference) =
         reference.filter(|reference| reference.accuracy == ProfileEvidenceAccuracy::ExactBrep)
     {
         let asset = reference
@@ -1252,11 +1452,21 @@ fn build_profile_feature_source(
     let clearance_name = format!("{}_clearance", part_name.replace('-', "_"));
     let depth_name = format!("{}_depth", part_name.replace('-', "_"));
     let (translation, rotation) = plane.translation(offset);
-    let part = format!(
-        "(part {part_name}\n    (translate {} {} {}\n      (rotate {} {} {}\n        (extrude\n          PROFILE_EXPRESSION\n          {depth_name}))))",
-        number(translation[0]), number(translation[1]), number(translation[2]),
-        number(rotation[0]), number(rotation[1]), number(rotation[2])
-    );
+    let part = if let Some(drawing) = drawing_profile {
+        let geometry =
+            drawing_geometry_expression(&drawing.primitives, &clearance_name, &depth_name)?;
+        format!(
+            "(part {part_name}\n    (translate {} {} {}\n      (rotate {} {} {}\n        {geometry})))",
+            number(translation[0]), number(translation[1]), number(translation[2]),
+            number(rotation[0]), number(rotation[1]), number(rotation[2])
+        )
+    } else {
+        format!(
+            "(part {part_name}\n    (translate {} {} {}\n      (rotate {} {} {}\n        (extrude\n          PROFILE_EXPRESSION\n          {depth_name}))))",
+            number(translation[0]), number(translation[1]), number(translation[2]),
+            number(rotation[0]), number(rotation[1]), number(rotation[2])
+        )
+    };
     let nodes = crate::commands::macro_ast::macro_ast_source_map_impl(source)?;
     let model = nodes
         .iter()
@@ -1303,9 +1513,36 @@ fn build_profile_feature_source(
         "\n  (params\n    (number {clearance_name} {} :label \"{} clearance\" :min 0 :max 100 :step 0.1)\n    (number {depth_name} {} :label \"{} depth\" :min 0.001 :max 1000 :step 0.1))",
         number(clearance), part_name, number(depth), part_name
     );
-    let profile = format!("(offset {clearance_name} {profile})");
-    let part = part.replace("PROFILE_EXPRESSION", &profile);
-    let evidence = if let Some(reference) = reference {
+    let part = if drawing_profile.is_some() {
+        part
+    } else {
+        let profile = format!("(offset {clearance_name} {profile})");
+        part.replace("PROFILE_EXPRESSION", &profile)
+    };
+    let evidence = if let (Some(drawing), Some(evidence)) = (drawing_profile, drawing_evidence) {
+        let source_digest = crate::services::render_snapshot::canonical_source_digest(source);
+        let value = serde_json::json!({
+            "kind": "drawingImport",
+            "accuracy": "imageDerived",
+            "evidenceId": drawing.evidence_id,
+            "baseMessageId": base_message_id,
+            "sourceDigest": source_digest,
+            "image": evidence.image,
+            "view": evidence.view,
+            "region": evidence.region,
+            "rectification": evidence.rectification,
+            "calibration": evidence.calibration,
+            "toleranceMm": evidence.tolerance_mm,
+            "extractorVersion": evidence.extractor_version,
+            "acceptedPrimitives": drawing.primitives,
+            "units": "mm",
+        });
+        format!(
+            "; profileEvidence {}\n  ",
+            serde_json::to_string(&value)
+                .map_err(|error| AppError::validation(error.to_string()))?
+        )
+    } else if let Some(reference) = reference {
         let source_digest = crate::services::render_snapshot::canonical_source_digest(source);
         let value = serde_json::json!({
             "accuracy": match reference.accuracy { ProfileEvidenceAccuracy::ExactBrep => "exactBrep", ProfileEvidenceAccuracy::ApproximateMesh => "approximateMesh", ProfileEvidenceAccuracy::ApproximatePolygon => "approximatePolygon" },
@@ -1788,6 +2025,8 @@ mod tests {
             "profile_feature",
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
         assert!(source.contains("(part profile_feature"));
@@ -1822,6 +2061,8 @@ mod tests {
             "exact_profile",
             Some(&reference),
             Some("base-version"),
+            None,
+            None,
         )
         .unwrap();
         assert!(source.contains("(import-profile \"/app/profile-assets/aabb.step\")"));
@@ -2018,6 +2259,7 @@ mod tests {
                 depth_mm: 5.0,
                 part_name: "profile_rib".into(),
                 reference: Some(reference),
+                drawing_profile: None,
             },
             &state,
             &resolver,
@@ -2072,6 +2314,141 @@ mod tests {
         assert!(step.contains("ADVANCED_FACE"));
         assert!(step.contains("FACE_BOUND"));
         assert!(Path::new(&output_stl_path).is_file());
+
+        let photo_path = root.join("photo-plate.png");
+        crate::services::drawing_import::tests::plate_fixture(&photo_path, false, true);
+        let prepared = crate::services::drawing_import::prepare_drawing_image(
+            crate::services::drawing_import::PrepareDrawingImageRequest {
+                source_path: photo_path.to_string_lossy().into_owned(),
+            },
+            &resolver,
+        )
+        .expect("prepare raster plate");
+        let recognized = crate::services::drawing_import::recognize_drawing_profile(
+            crate::services::drawing_import::RecognizeDrawingProfileRequest {
+                image: prepared.image,
+                view: crate::contracts::SketchView::Top,
+                region: crate::services::drawing_import::DrawingRegion {
+                    left_px: 80.0,
+                    top_px: 70.0,
+                    width_px: 480.0,
+                    height_px: 310.0,
+                    rotation_degrees: 0.0,
+                },
+                rectification: None,
+                calibration: crate::services::drawing_import::DrawingScaleCalibration {
+                    start_px: [120.0, 100.0],
+                    end_px: [520.0, 100.0],
+                    distance_mm: 80.0,
+                },
+                excluded_regions: Vec::new(),
+                tolerance_mm: 0.5,
+            },
+            &resolver,
+        )
+        .expect("recognize raster plate");
+        let accepted_ids = recognized
+            .profiles
+            .iter()
+            .filter(|profile| profile.closed && profile.issues.is_empty())
+            .flat_map(|profile| profile.primitive_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let accepted_primitives = recognized
+            .primitives
+            .into_iter()
+            .filter(|primitive| accepted_ids.contains(super::drawing_primitive_id(primitive)))
+            .collect::<Vec<_>>();
+        let photo_hole_radius = accepted_primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                crate::services::drawing_import::DrawingPrimitive::Circle { radius_mm, .. } => {
+                    Some(*radius_mm)
+                }
+                _ => None,
+            })
+            .expect("recognized analytic photo hole");
+        assert!(accepted_primitives.iter().any(|primitive| matches!(
+            primitive,
+            crate::services::drawing_import::DrawingPrimitive::Circle { radius_mm, .. }
+                if (*radius_mm - 5.0).abs() < 0.5
+        )));
+        let photo_applied = apply_profile_feature(
+            ProfileFeatureApplyRequest {
+                thread_id: "profile-apply".into(),
+                base_message_id: applied.draft.message_id.clone(),
+                expected_source: source.clone(),
+                loops: None,
+                plane: ProfilePlane::Xy,
+                offset_mm: 0.0,
+                clearance_mm: 0.0,
+                depth_mm: 3.0,
+                part_name: "photo_plate".into(),
+                reference: None,
+                drawing_profile: Some(crate::services::drawing_import::DrawingProfileApplyInput {
+                    evidence_id: recognized.evidence_id,
+                    primitives: accepted_primitives,
+                }),
+            },
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("guarded image-derived profile apply");
+        assert_eq!(
+            photo_applied.draft.status,
+            crate::contracts::MessageStatus::Success
+        );
+        assert!(
+            photo_applied.draft.message_id.is_some(),
+            "image-derived apply must persist a normal version"
+        );
+        assert!(photo_applied
+            .source
+            .contains("\"accuracy\":\"imageDerived\""));
+        let photo_step = photo_applied
+            .draft
+            .artifact_bundle
+            .as_ref()
+            .and_then(|bundle| {
+                bundle
+                    .export_artifacts
+                    .iter()
+                    .find(|artifact| artifact.format.eq_ignore_ascii_case("step"))
+            })
+            .map(|artifact| Path::new(&artifact.path))
+            .expect("native STEP export for applied drawing profile");
+        let photo_step_text =
+            std::fs::read_to_string(photo_step).expect("read native drawing STEP");
+        assert!(
+            photo_step_text.contains("CIRCLE"),
+            "analytic circle missing from STEP export"
+        );
+        assert!(photo_step_text.contains("ADVANCED_FACE"));
+        let circle_radii = |step: &str| {
+            step.lines()
+                .filter_map(|line| {
+                    let body = line
+                        .split_once("CIRCLE(")?
+                        .1
+                        .trim_end_matches(';')
+                        .trim_end_matches(')');
+                    body.rsplit_once(',')?.1.trim().parse::<f64>().ok()
+                })
+                .collect::<Vec<_>>()
+        };
+        let baseline_radii = circle_radii(&step);
+        let photo_radii = circle_radii(&photo_step_text);
+        assert!(
+            photo_radii.len() > baseline_radii.len(),
+            "photo extrusion must add native circular edges: {baseline_radii:?} -> {photo_radii:?}"
+        );
+        assert!(
+            photo_radii
+                .iter()
+                .any(|radius| (*radius - photo_hole_radius).abs() < 1.0e-6),
+            "native STEP lacks the fitted {:.6} mm hole: {photo_radii:?}",
+            photo_hole_radius
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2266,6 +2643,7 @@ mod tests {
                     depth_mm: 5.0,
                     part_name: "view_profile".into(),
                     reference: Some(reference),
+                    drawing_profile: None,
                 },
                 &state,
                 &resolver,
@@ -2501,6 +2879,8 @@ mod tests {
             0.2,
             4.0,
             "profile_feature",
+            None,
+            None,
             None,
             None,
         )

@@ -12,6 +12,7 @@ pub mod config;
 pub mod design;
 pub mod dialog;
 pub mod docs;
+pub mod drawing_import;
 pub mod exploration_cycle;
 pub mod exploration_run;
 pub mod external_shape_edit;

@@ -31,12 +31,43 @@ The first release SHALL support manual closed-polyline drawing and vertex editin
 
 For a derived profile, the source view/plane and section offset SHALL determine the feature plane and location; the editor SHALL keep those fields read-only while that evidence is selected. Manual profiles MAY choose a principal plane and offset. Changing a section plane or offset requires deriving the evidence again.
 
-For exact CAD projection, the editor SHALL preserve the established simultaneous front/top/side sketch panes. One projection action SHALL request all three views for the same selected model version. Each pane SHALL retain its own result, pending state, and error; failure in one view SHALL NOT erase successful views. Selecting a pane SHALL bind its own exact profile reference and canonical plane to Apply. Front maps to XZ, top to XY, and side to YZ. Exact pane overlays remain display-only until explicit approximate polygon conversion.
+Sketch SHALL fill the application's work area. A compact view selector SHALL offer FRONT, TOP, SIDE, and ALL THREE. The default SHALL be one large FRONT pane; ALL THREE SHALL use the established simultaneous front/top/side arrangement. Layout changes SHALL preserve each view's geometry, edits, camera, and evidence. Other workbench windows SHALL retain their own layout behavior.
+
+For exact CAD projection, one projection action SHALL request all three views for the same selected model version, regardless of the display layout. Each view SHALL retain its own result, pending state, and error; failure in one view SHALL NOT erase successful views. Selecting a view SHALL bind its own exact profile reference and canonical plane to Apply. Front maps to XZ, top to XY, and side to YZ. Exact pane overlays remain display-only until explicit approximate polygon conversion.
+
+Each view SHALL independently own its manual loops, unfinished stroke, undo history, selected vertex, placement offset, and converted-profile state. Selecting another view SHALL NOT transfer a drawing or overwrite another view. Rendering ALL THREE SHALL show all existing drawings concurrently, including inactive views. Each canvas SHALL have exactly one coordinate-aligned grid that follows pan and zoom; no screen-space decorative grid may be layered beneath it.
+
+Camera scale SHALL be defined independently of pane dimensions, in screen pixels per model millimeter, with a per-view model-space center. Resizing the application or changing between single-view and ALL THREE layouts SHALL change the visible model-space extent without changing scale. Fit-to-view is an explicit action, except for initial presentation of newly loaded geometry. A measurement update alone SHALL NOT refit geometry. Grid spacing is metric and its screen spacing follows camera scale; optional coarse/fine grid levels may change with zoom, not with window size.
+
+#### Scenario: Independent drawings and layout switching
+- **GIVEN** a rectangle drawn in FRONT and a distinct circle or polyline drawn in TOP
+- **WHEN** the user switches among FRONT, TOP, SIDE, and ALL THREE
+- **THEN** each drawing remains in its original view with its original geometry and camera
+- **AND** ALL THREE shows both drawings simultaneously
+- **AND** undoing or editing FRONT does not alter TOP
+
+#### Scenario: Preserve an unfinished stroke and converted profile
+- **GIVEN** FRONT contains an unfinished manual stroke and TOP contains an exact profile explicitly converted to editable geometry
+- **WHEN** the user edits SIDE and returns to the other views
+- **THEN** FRONT can continue its own stroke and TOP retains its edited approximate profile and provenance
+
+#### Scenario: Coordinate grid after pan and zoom
+- **GIVEN** a point placed at a known grid coordinate
+- **WHEN** the user pans and zooms the pane or changes the display layout
+- **THEN** the point remains aligned with that coordinate in a single grid, without a stationary second grid
+
+#### Scenario: Window resize preserves drawing scale
+- **GIVEN** two points with a known model-space separation and an established camera scale
+- **WHEN** the application is resized or the user changes between single-view and ALL THREE layouts without zooming
+- **THEN** their screen-space separation and the grid's screen-space spacing remain unchanged within pixel-rounding tolerance
+- **AND** the pane shows a larger or smaller extent of the same drawing
+- **WHEN** the user zooms or explicitly fits the view
+- **THEN** camera scale and grid spacing may change together
 
 #### Scenario: Project all three views from one model
 - **GIVEN** an eligible STEP model is selected in the current project version
 - **WHEN** the user projects the model
-- **THEN** front, top, and side panes appear together and each receives an exact projection from that same source version
+- **THEN** front, top, and side each receive an exact projection from that same source version and ALL THREE displays them together
 - **AND** each pane retains independent loading and error status without moving the sketch layout
 
 #### Scenario: Apply selected top or side projection

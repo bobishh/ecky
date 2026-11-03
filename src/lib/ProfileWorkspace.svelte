@@ -21,6 +21,27 @@
     type ProfileGeometryResponse,
     type ProfilePoint,
   } from './profileWorkspace';
+  import {
+    calibratedDistanceMm,
+    cloneDrawingPrimitive,
+    drawingCandidateIsSelectable,
+    drawingCandidatesForApply,
+    validateDrawingCalibration,
+    type DrawingPoint,
+  } from './drawingPhoto';
+  import type {
+    DrawingImageIdentity,
+    DrawingPrimitive,
+    DrawingProfileCandidate,
+    DrawingProfileReviewResponse,
+    RecognizeDrawingProfileRequest as DrawingRecognitionRequest,
+    DrawingRecognitionResponse,
+    DrawingRegion,
+    DrawingRectification,
+    DrawingScaleCalibration,
+    PreparedDrawingImage,
+    ReviewDrawingProfileRequest,
+  } from './tauri/contracts';
 
   type ProfileView = 'front' | 'top' | 'side';
   type PaneCamera = { zoom: number; centerX: number; centerY: number };
@@ -44,6 +65,31 @@
     placementOffset: string;
   };
 
+  type PhotoViewState = {
+    scopeKey: string;
+    prepared: PreparedDrawingImage;
+    region: DrawingRegion;
+    rectificationPoints: DrawingPoint[];
+    aspectRatio: string;
+    rotationDegrees: string;
+    calibrationPoints: DrawingPoint[];
+    knownDistanceMm: string;
+    imageOpacity: number;
+    recognition: DrawingRecognitionResponse | null;
+    primitives: DrawingPrimitive[];
+    selectedPrimitiveId: string | null;
+    profiles: DrawingProfileCandidate[];
+    selectedProfileIds: string[];
+    profilesNeedReview: boolean;
+    reviewDiagnostics: string[];
+    drawing: boolean;
+    correctionTool: 'line' | 'polyline';
+    draftPointsMm: DrawingPoint[];
+    accepted: boolean;
+    pending: boolean;
+    error: string;
+  };
+
   type Props = {
     scopeKey: string;
     sourceAvailable: boolean;
@@ -52,6 +98,9 @@
     disabledReason?: string | null;
     onDerive: (input: ProfileDeriveInput) => Promise<ProfileGeometryResponse>;
     onApply: (input: ProfileApplyInput) => Promise<ProfileApplyOutcome>;
+    onChooseDrawing: () => Promise<PreparedDrawingImage | null>;
+    onRecognizeDrawing: (input: DrawingRecognitionRequest) => Promise<DrawingRecognitionResponse>;
+    onReviewDrawing: (input: ReviewDrawingProfileRequest) => Promise<DrawingProfileReviewResponse>;
   };
 
   let {
@@ -62,6 +111,9 @@
     disabledReason = null,
     onDerive,
     onApply,
+    onChooseDrawing,
+    onRecognizeDrawing,
+    onReviewDrawing,
   }: Props = $props();
 
   let profileEdits = $state<Record<ProfileView, ProfileEditorState>>({
@@ -98,6 +150,17 @@
   let requestSequence = 0;
   let activeRequestId = $state<number | null>(null);
   let drag = $state<{ loopIndex: number; pointIndex: number; pointerId: number; view: ProfileView } | null>(null);
+  let photoVertexDrag = $state<{ primitiveId: string; pointIndex: number; pointerId: number; view: ProfileView } | null>(null);
+  let photoStates = $state<Record<ProfileView, PhotoViewState | null>>({ front: null, top: null, side: null });
+  let photoPickMode = $state<'region' | 'rectification' | 'calibration' | null>(null);
+  let photoRegionStart = $state<DrawingPoint | null>(null);
+  let photoRegionDraft = $state<DrawingRegion | null>(null);
+  let photoImportPending = $state(false);
+  let photoRequestIds = $state<Record<ProfileView, number>>({ front: 0, top: 0, side: 0 });
+  let selectedProfilePrimitiveId = $state<string | null>(null);
+  let photoRequestSequence = 0;
+  let photoImportRequestId = 0;
+  let photoPrimitiveSequence = 0;
 
   $effect(() => {
     const entries = PROFILE_VIEWS.flatMap((view) => paneElements[view] ? [[view, paneElements[view]!] as const] : []);
@@ -122,7 +185,20 @@
   let draftLoopIndex = $derived(currentEdit.draftLoopIndex);
   let drawing = $derived(currentEdit.drawing);
   let visibleViews = $derived(viewLayout === 'allThree' ? PROFILE_VIEWS : [selectedView]);
-  let currentEvidence = $derived(geometryEvidence[selectedView]?.scopeKey === scopeKey ? geometryEvidence[selectedView]?.response ?? null : null);
+  let currentPhoto = $derived(photoStates[selectedView]?.scopeKey === scopeKey ? photoStates[selectedView] : null);
+  let photoDrawing = $derived(Boolean(currentPhoto?.drawing));
+  let currentEvidence = $derived(currentPhoto?.recognition ? null : geometryEvidence[selectedView]?.scopeKey === scopeKey ? geometryEvidence[selectedView]?.response ?? null : null);
+  let acceptedPhotoPrimitives = $derived(currentPhoto?.accepted && currentPhoto.recognition
+    ? drawingCandidatesForApply(currentPhoto.profiles, currentPhoto.selectedProfileIds, currentPhoto.primitives)
+    : null);
+  let photoProfileReady = $derived(Boolean(currentPhoto?.accepted && acceptedPhotoPrimitives?.length));
+  let calibratedPreviewMm = $derived(currentPhoto?.recognition && currentPhoto.calibrationPoints.length === 2
+    ? calibratedDistanceMm({
+      startPx: currentPhoto.calibrationPoints[0]!,
+      endPx: currentPhoto.calibrationPoints[1]!,
+      distanceMm: Number(currentPhoto.knownDistanceMm),
+    }, currentPhoto.recognition)
+    : null);
   let selectedViewError = $derived(viewErrorFor(selectedView));
   let convertedSelectedEvidence = $derived(currentEdit.convertedExact);
   let isExactProfile = $derived(
@@ -165,7 +241,10 @@
     Boolean(disabledReason)
       || currentPending !== null
       || drawing
-      || loopError !== null
+      || photoDrawing
+      || (!photoProfileReady && loopError !== null)
+      || (currentPhoto?.pending ?? false)
+      || (Boolean(currentPhoto) && !photoProfileReady)
       || !deriveSettingsMatch
       || !scopeKey
       || !Number.isFinite(Number(depth))
@@ -177,9 +256,17 @@
 
   function createProfileEditor(targetScope: string): ProfileEditorState {
     return {
-      scopeKey: targetScope, loops: [], undoItems: [], selectedLoopIndex: 0,
-      selectedPointIndex: null, draftLoopIndex: null, drawing: false,
-      drawingTool: 'polyline', convertedExact: false, placementPlane: 'xy', placementOffset: '0',
+      scopeKey: targetScope,
+      loops: [],
+      undoItems: [],
+      selectedLoopIndex: 0,
+      selectedPointIndex: null,
+      draftLoopIndex: null,
+      drawing: false,
+      drawingTool: 'polyline',
+      convertedExact: false,
+      placementPlane: 'xy',
+      placementOffset: '0',
     };
   }
 
@@ -215,6 +302,401 @@
     return error?.scopeKey === scopeKey ? error.message : '';
   }
 
+  function photoForView(view: ProfileView): PhotoViewState | null {
+    const photo = photoStates[view];
+    return photo?.scopeKey === scopeKey ? photo : null;
+  }
+
+  function updatePhoto(view: ProfileView, update: Partial<PhotoViewState>, invalidate = false): void {
+    const current = photoForView(view);
+    if (!current) return;
+    const next: PhotoViewState = { ...current, ...update, accepted: invalidate ? false : update.accepted ?? current.accepted };
+    if (invalidate) {
+      next.recognition = null;
+      next.primitives = [];
+      next.profiles = [];
+      next.selectedProfileIds = [];
+      next.selectedPrimitiveId = null;
+      next.profilesNeedReview = false;
+      next.reviewDiagnostics = [];
+      next.drawing = false;
+      next.draftPointsMm = [];
+      next.error = '';
+      next.accepted = false;
+      photoRequestIds = { ...photoRequestIds, [view]: ++photoRequestSequence };
+    }
+    photoStates = { ...photoStates, [view]: next };
+  }
+
+  async function chooseDrawingPhoto(): Promise<void> {
+    const view = selectedView;
+    const requestScope = scopeKey;
+    const requestId = ++photoImportRequestId;
+    photoImportPending = true;
+    setError('');
+    setStatus(`Opening a drawing photo for ${view.toUpperCase()}…`);
+    try {
+      const prepared = await onChooseDrawing();
+      if (requestScope !== scopeKey || requestId !== photoImportRequestId || !prepared) return;
+      const image = prepared.image;
+      photoStates = {
+        ...photoStates,
+        [view]: {
+          scopeKey: requestScope,
+          prepared,
+          region: { leftPx: 0, topPx: 0, widthPx: image.widthPx, heightPx: image.heightPx, rotationDegrees: 0 },
+          rectificationPoints: [],
+          aspectRatio: '',
+          rotationDegrees: '0',
+          calibrationPoints: [],
+          knownDistanceMm: '',
+          imageOpacity: 0.28,
+          recognition: null,
+          primitives: [],
+          selectedPrimitiveId: null,
+          profiles: [],
+          selectedProfileIds: [],
+          profilesNeedReview: false,
+          reviewDiagnostics: [],
+          drawing: false,
+          correctionTool: 'polyline',
+          draftPointsMm: [],
+          accepted: false,
+          pending: false,
+          error: '',
+        },
+      };
+      resetPaneCamera(view);
+      selectedView = view;
+      patchProfileEditor(view, { placementPlane: VIEW_PLANE[view], placementOffset: '0' });
+      photoPickMode = null;
+      setStatus(`Photo assigned to ${view.toUpperCase()}. Drag to crop, then set its scale.`);
+    } catch (error) {
+      if (requestScope === scopeKey && requestId === photoImportRequestId) {
+        setError(error instanceof Error ? error.message : String(error));
+        setStatus('Drawing photo could not be opened. Current profiles remain available.');
+      }
+    } finally {
+      if (requestId === photoImportRequestId) photoImportPending = false;
+    }
+  }
+
+  function sourcePointFromPaneEvent(event: PointerEvent | MouseEvent, view: ProfileView): DrawingPoint | null {
+    const photo = photoForView(view);
+    if (!photo || photo.recognition) return null;
+    const element = event.currentTarget as HTMLElement;
+    const point = profilePointFromPointer(
+      event.clientX,
+      event.clientY,
+      element.getBoundingClientRect(),
+      cameraBounds(view, boundsForView(view)),
+    );
+    return [point[0], photo.prepared.image.heightPx - point[1]];
+  }
+
+  function startPhotoRegion(event: PointerEvent, view: ProfileView): void {
+    if (photoPickMode !== 'region' || !photoForView(view) || selectedView !== view) return;
+    event.preventDefault();
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    photoRegionStart = sourcePointFromPaneEvent(event, view);
+    photoRegionDraft = null;
+  }
+
+  function movePhotoRegion(event: PointerEvent, view: ProfileView): void {
+    if (photoPickMode !== 'region' || !photoRegionStart || selectedView !== view) return;
+    const photo = photoForView(view);
+    const point = sourcePointFromPaneEvent(event, view);
+    if (!photo || !point) return;
+    photoRegionDraft = {
+      leftPx: Math.min(photoRegionStart[0], point[0]),
+      topPx: Math.min(photoRegionStart[1], point[1]),
+      widthPx: Math.abs(point[0] - photoRegionStart[0]),
+      heightPx: Math.abs(point[1] - photoRegionStart[1]),
+      rotationDegrees: Number(photo.rotationDegrees) || 0,
+    };
+  }
+
+  function finishPhotoRegion(event: PointerEvent, view: ProfileView): void {
+    if (photoPickMode !== 'region' || !photoRegionStart || selectedView !== view) return;
+    movePhotoRegion(event, view);
+    const region = photoRegionDraft;
+    if (region && region.widthPx >= 4 && region.heightPx >= 4) {
+      updatePhoto(view, { region, rectificationPoints: [], calibrationPoints: [] }, true);
+      setStatus(`Image region selected: ${Math.round(region.widthPx)} × ${Math.round(region.heightPx)} pixels.`);
+    } else {
+      setError('Crop needs a visible rectangle at least four pixels wide and high.');
+    }
+    photoRegionStart = null;
+    photoRegionDraft = null;
+    photoPickMode = null;
+  }
+
+  function pickPhotoPoint(event: MouseEvent, view: ProfileView): void {
+    if (!photoPickMode || photoPickMode === 'region' || selectedView !== view) return;
+    const point = sourcePointFromPaneEvent(event, view);
+    const photo = photoForView(view);
+    if (!photo || !point) return;
+    if (photoPickMode === 'rectification') {
+      const points = [...photo.rectificationPoints, point].slice(0, 4);
+      updatePhoto(view, { rectificationPoints: points }, true);
+      if (points.length === 4) {
+        photoPickMode = null;
+        setStatus('Four rectangle corners set. Enter its known width-to-height ratio.');
+      }
+    } else {
+      const points = [...photo.calibrationPoints, point].slice(0, 2);
+      updatePhoto(view, { calibrationPoints: points }, true);
+      if (points.length === 2) {
+        photoPickMode = null;
+        setStatus('Scale points set. Enter their known distance in millimeters.');
+      }
+    }
+  }
+
+  function beginPhotoPick(mode: 'region' | 'rectification' | 'calibration'): void {
+    const photo = currentPhoto;
+    if (!photo) return;
+    if (photo.recognition) {
+      updatePhoto(selectedView, {}, true);
+      resetPaneCamera(selectedView);
+    }
+    photoPickMode = mode;
+    photoRegionStart = null;
+    photoRegionDraft = null;
+    if (mode === 'region') setStatus(`Drag a crop on the ${selectedView.toUpperCase()} image pane.`);
+    else if (mode === 'rectification') updatePhoto(selectedView, { rectificationPoints: [] }, true);
+    else updatePhoto(selectedView, { calibrationPoints: [] }, true);
+  }
+
+  function setPhotoRotation(value: string): void {
+    const rotationDegrees = Number(value);
+    if (![0, 90, 180, 270].includes(rotationDegrees)) {
+      setError('Rotation must be 0, 90, 180, or 270 degrees.');
+      return;
+    }
+    updatePhoto(selectedView, {
+      rotationDegrees: String(rotationDegrees),
+      region: { ...currentPhoto!.region, rotationDegrees },
+    }, true);
+  }
+
+  function clearDrawingPhoto(): void {
+    photoStates = { ...photoStates, [selectedView]: null };
+    photoPickMode = null;
+    photoRegionStart = null;
+    photoRegionDraft = null;
+    resetPaneCamera(selectedView);
+    setStatus('Drawing photo removed from this view.');
+  }
+
+  async function recognizeDrawing(): Promise<void> {
+    const photo = currentPhoto;
+    if (!photo || photo.pending || photoImportPending || photoPickMode) return;
+    const toleranceMm = finiteValue(tolerance, 'Tolerance');
+    if (toleranceMm === null || toleranceMm <= 0) {
+      setError('Tolerance must be greater than zero.');
+      return;
+    }
+    const calibrationPoints = photo.calibrationPoints;
+    const knownDistanceMm = Number(photo.knownDistanceMm);
+    const calibration: DrawingScaleCalibration | null = calibrationPoints.length === 2
+      ? { startPx: calibrationPoints[0]!, endPx: calibrationPoints[1]!, distanceMm: knownDistanceMm }
+      : null;
+    const calibrationError = validateDrawingCalibration(calibration);
+    if (calibrationError || !calibration) {
+      setError(calibrationError ?? 'Select two scale points and enter their known distance.');
+      return;
+    }
+    let rectification: DrawingRectification | undefined;
+    if (photo.rectificationPoints.length > 0) {
+      const aspectRatio = Number(photo.aspectRatio);
+      if (photo.rectificationPoints.length !== 4 || !Number.isFinite(aspectRatio) || aspectRatio <= 0) {
+        setError('Pick four rectangle corners and enter a positive width-to-height ratio.');
+        return;
+      }
+      rectification = {
+        cornersPx: photo.rectificationPoints as DrawingRectification['cornersPx'],
+        aspectRatio,
+      };
+    }
+    if (photo.region.widthPx < 4 || photo.region.heightPx < 4) {
+      setError('Select a larger image region before recognition.');
+      return;
+    }
+
+    const view = selectedView;
+    const requestScope = scopeKey;
+    const requestId = ++photoRequestSequence;
+    photoRequestIds = { ...photoRequestIds, [view]: requestId };
+    updatePhoto(view, { pending: true, error: '' }, false);
+    setError('');
+    setStatus(`Recognizing linework in ${view.toUpperCase()}…`);
+    const request: DrawingRecognitionRequest = {
+      image: photo.prepared.image,
+      view,
+      region: { ...photo.region, rotationDegrees: Number(photo.rotationDegrees) || 0 },
+      rectification: rectification ?? null,
+      calibration,
+      toleranceMm,
+    };
+    try {
+      const response = await onRecognizeDrawing(request);
+      if (requestScope !== scopeKey || photoRequestIds[view] !== requestId || photoForView(view)?.prepared.image.digest !== photo.prepared.image.digest) return;
+      const selectable = response.profiles.filter((candidate) => drawingCandidateIsSelectable(candidate, response.primitives));
+      const selectedProfileIds = selectable.map((candidate) => candidate.id);
+      const next: PhotoViewState = {
+        ...photo,
+        pending: false,
+        error: '',
+        recognition: response,
+        primitives: response.primitives.map(cloneDrawingPrimitive),
+        profiles: response.profiles,
+        selectedProfileIds,
+        profilesNeedReview: false,
+        reviewDiagnostics: [],
+        drawing: false,
+        correctionTool: 'polyline',
+        draftPointsMm: [],
+        selectedPrimitiveId: response.primitives[0]?.id ?? null,
+        accepted: false,
+      };
+      photoStates = { ...photoStates, [view]: next };
+      resetPaneCamera(view);
+      setStatus(response.profiles.length
+        ? `${response.profiles.length} profile candidates found. Review and accept closed contours.`
+        : 'No closed profile candidates found. Adjust the crop or repair the linework.');
+    } catch (error) {
+      if (requestScope === scopeKey && photoRequestIds[view] === requestId) {
+        updatePhoto(view, { pending: false, error: error instanceof Error ? error.message : String(error) }, false);
+        setError(error instanceof Error ? error.message : String(error));
+        setStatus(`${view.toUpperCase()} recognition failed. Other views remain available.`);
+      }
+    } finally {
+      const previous = photoStates[view];
+      if (photoRequestIds[view] === requestId && previous?.scopeKey === requestScope) {
+        photoStates = { ...photoStates, [view]: { ...previous, pending: false } };
+      }
+    }
+  }
+
+  function toggleDrawingCandidate(candidate: DrawingProfileCandidate, checked: boolean): void {
+    if (!currentPhoto) return;
+    const selectedProfileIds = new Set(currentPhoto.selectedProfileIds);
+    if (checked) selectedProfileIds.add(candidate.id);
+    else selectedProfileIds.delete(candidate.id);
+    updatePhoto(selectedView, { selectedProfileIds: [...selectedProfileIds], accepted: false });
+  }
+
+  async function acceptDrawingProfile(): Promise<void> {
+    const photo = currentPhoto;
+    if (!photo?.recognition || photo.pending) return;
+    if (photo.profilesNeedReview) {
+      const view = selectedView;
+      const requestScope = scopeKey;
+      const requestId = ++photoRequestSequence;
+      const evidenceId = photo.recognition.evidenceId;
+      const digest = photo.prepared.image.digest;
+      photoRequestIds = { ...photoRequestIds, [view]: requestId };
+      updatePhoto(view, { pending: true, error: '' }, false);
+      setError('');
+      setStatus('Checking corrected contours…');
+      try {
+        const response = await onReviewDrawing({ evidenceId, primitives: photo.primitives });
+        const latest = photoForView(view);
+        if (requestScope !== scopeKey || photoRequestIds[view] !== requestId || latest?.prepared.image.digest !== digest) return;
+        if (response.evidenceId !== evidenceId) throw new Error('Photo evidence changed during contour review. Review the current image again.');
+        const selectableIds = new Set(response.profiles
+          .filter((candidate) => drawingCandidateIsSelectable(candidate, photo.primitives))
+          .map((candidate) => candidate.id));
+        photoStates = {
+          ...photoStates,
+          [view]: {
+            ...latest,
+            pending: false,
+            error: '',
+            profiles: response.profiles,
+            selectedProfileIds: photo.selectedProfileIds.filter((id) => selectableIds.has(id)),
+            profilesNeedReview: false,
+            reviewDiagnostics: response.diagnostics,
+            accepted: false,
+          },
+        };
+        setStatus(response.profiles.length
+          ? 'Corrections checked. Review eligible contours, then accept the profile.'
+          : 'No closed profile remains. Correct the linework or select a different image region.');
+      } catch (error) {
+        if (requestScope === scopeKey && photoRequestIds[view] === requestId) {
+          updatePhoto(view, { pending: false, error: error instanceof Error ? error.message : String(error) }, false);
+          setError(error instanceof Error ? error.message : String(error));
+          setStatus('Contour review failed. Your edits remain available.');
+        }
+      } finally {
+        const latest = photoForView(view);
+        if (photoRequestIds[view] === requestId && latest?.prepared.image.digest === digest && latest.pending) {
+          updatePhoto(view, { pending: false }, false);
+        }
+      }
+      return;
+    }
+    const accepted = drawingCandidatesForApply(photo.profiles, photo.selectedProfileIds, photo.primitives);
+    if (!accepted) {
+      setError('Select a closed outer profile and any contained holes before accepting.');
+      return;
+    }
+    updatePhoto(selectedView, { accepted: true }, false);
+    setError('');
+    setStatus('Image-derived profile accepted. Check dimensions before applying.');
+  }
+
+  function selectDrawingPrimitive(id: string): void {
+    selectedProfilePrimitiveId = id;
+    updatePhoto(selectedView, { selectedPrimitiveId: id, accepted: false }, false);
+  }
+
+  function updateDrawingPrimitiveNumber(id: string, field: 'x' | 'y' | 'x2' | 'y2' | 'radius', value: string): void {
+    const number = Number(value);
+    if (!Number.isFinite(number) || !currentPhoto) return;
+    const primitives = currentPhoto.primitives.map((primitive) => {
+      if (primitive.id !== id) return cloneDrawingPrimitive(primitive);
+      if (primitive.kind === 'circle') {
+        if (field === 'radius') return { ...primitive, radiusMm: number };
+        const centerMm = [...primitive.centerMm] as DrawingPoint;
+        centerMm[field === 'x' ? 0 : 1] = number;
+        return { ...primitive, centerMm };
+      }
+      if (primitive.kind === 'line') {
+        if (field === 'radius') return primitive;
+        const startMm = [...primitive.startMm] as DrawingPoint;
+        const endMm = [...primitive.endMm] as DrawingPoint;
+        if (field === 'x') startMm[0] = number;
+        if (field === 'y') startMm[1] = number;
+        if (field === 'x2') endMm[0] = number;
+        if (field === 'y2') endMm[1] = number;
+        return { ...primitive, startMm, endMm };
+      }
+      return primitive;
+    });
+    updatePhoto(selectedView, { primitives, profilesNeedReview: true, accepted: false });
+  }
+
+  function updateDrawingPolylineVertex(id: string, pointIndex: number, axis: 0 | 1, value: string): void {
+    const number = Number(value);
+    if (!Number.isFinite(number) || !currentPhoto) return;
+    const primitives = currentPhoto.primitives.map((primitive) => {
+      if (primitive.id !== id || primitive.kind !== 'polyline') return cloneDrawingPrimitive(primitive);
+      const pointsMm = primitive.pointsMm.map(([x, y]) => [x, y] as DrawingPoint);
+      if (pointsMm[pointIndex]) pointsMm[pointIndex]![axis] = number;
+      return { ...primitive, pointsMm };
+    });
+    updatePhoto(selectedView, { primitives, profilesNeedReview: true, accepted: false });
+  }
+
+  function removeDrawingPrimitive(id: string): void {
+    if (!currentPhoto) return;
+    const primitives = currentPhoto.primitives.filter((primitive) => primitive.id !== id);
+    updatePhoto(selectedView, { primitives, selectedPrimitiveId: primitives[0]?.id ?? null, profilesNeedReview: true, accepted: false });
+  }
+
   function replaceLoops(loops: ProfileLoop[]): void {
     rememberUndo();
     const normalized = normalizeProfileLoops(loops);
@@ -241,8 +723,12 @@
     const previous = items.pop() ?? [];
     const loops = normalizeProfileLoops(previous);
     patchProfileEditor(selectedView, {
-      undoItems: items, loops, selectedPointIndex: null,
-      selectedLoopIndex: Math.max(0, loops.length - 1), drawing: false, draftLoopIndex: null,
+      undoItems: items,
+      loops,
+      selectedPointIndex: null,
+      selectedLoopIndex: Math.max(0, loops.length - 1),
+      drawing: false,
+      draftLoopIndex: null,
     });
     setError('');
     setStatus('Last profile edit undone.');
@@ -299,12 +785,15 @@
       profileEdits = {
         ...profileEdits,
         [view]: {
-          ...createProfileEditor(requestScope), loops: normalizeProfileLoops(loops),
-          selectedLoopIndex: Math.max(0, outerIndex), placementPlane: placement.plane,
+          ...createProfileEditor(requestScope),
+          loops: normalizeProfileLoops(loops),
+          selectedLoopIndex: Math.max(0, outerIndex),
+          placementPlane: placement.plane,
           placementOffset: String(placement.offsetMm),
         },
       };
       resetPaneCamera(view);
+      photoPickMode = null;
       setStatus(response.accuracy === 'exactBrep'
         ? 'Exact CAD outline ready. Convert it to a polygon before editing vertices.'
         : response.loops.length
@@ -348,7 +837,14 @@
         if (requestScope !== scopeKey || viewRequestIds[view] !== requestId) return;
         geometryEvidence = { ...geometryEvidence, [view]: { scopeKey: requestScope, response } };
         const placement = profilePlacementForOperation(response.operation);
-        profileEdits = { ...profileEdits, [view]: { ...createProfileEditor(requestScope), placementPlane: placement.plane, placementOffset: String(placement.offsetMm) } };
+        profileEdits = {
+          ...profileEdits,
+          [view]: {
+            ...createProfileEditor(requestScope),
+            placementPlane: placement.plane,
+            placementOffset: String(placement.offsetMm),
+          },
+        };
         resetPaneCamera(view);
       } catch (error) {
         if (requestScope === scopeKey && viewRequestIds[view] === requestId) {
@@ -376,6 +872,19 @@
   }
 
   function beginDrawing(): void {
+    if (currentPhoto?.recognition) {
+      if (currentPhoto.drawing) return;
+      updatePhoto(selectedView, { drawing: true, draftPointsMm: [], accepted: false });
+      setError('');
+      setStatus(currentPhoto.correctionTool === 'line'
+        ? 'Click two endpoints to add a line to the photo profile.'
+        : 'Click three or more vertices, then close the added photo contour.');
+      return;
+    }
+    if (currentPhoto) {
+      setError('Set scale and recognize the photo before adding geometry.');
+      return;
+    }
     const loops = startEdit();
     if (drawing) return;
     const outerIndices = loops.flatMap((loop, index) => loop.role === 'outer' ? [index] : []);
@@ -393,7 +902,12 @@
     }];
     const nextDraftLoopIndex = nextLoops.length - 1;
     replaceLoops(nextLoops);
-    patchProfileEditor(selectedView, { draftLoopIndex: nextDraftLoopIndex, selectedLoopIndex: nextDraftLoopIndex, drawing: true, drawingTool: activeTool });
+    patchProfileEditor(selectedView, {
+      draftLoopIndex: nextDraftLoopIndex,
+      selectedLoopIndex: nextDraftLoopIndex,
+      drawing: true,
+      drawingTool: activeTool,
+    });
     setError('');
     setStatus(activeTool === 'polyline'
       ? 'Click three or more points in the selected view, then close the loop.'
@@ -414,12 +928,12 @@
     ));
     const loops = [...startEdit()];
     const draftIndex = currentEdit.draftLoopIndex;
-    const draftTool = currentEdit.drawingTool;
+    const tool = currentEdit.drawingTool;
     const draft = draftIndex === null ? null : loops[draftIndex];
     if (!draft || draftIndex === null) return;
-    if (draftTool === 'polyline' || draft.points.length === 0) {
+    if (tool === 'polyline' || draft.points.length === 0) {
       loops[draftIndex] = { ...draft, points: [...draft.points, point] };
-    } else if (draftTool === 'rectangle') {
+    } else if (tool === 'rectangle') {
       const [x1, y1] = draft.points[0]!;
       loops[draftIndex] = { ...draft, points: [[x1, y1], [point[0], y1], [point[0], point[1]], [x1, point[1]]] };
       patchProfileEditor(selectedView, { drawing: false, draftLoopIndex: null });
@@ -438,7 +952,50 @@
     selectView(view);
   }
 
+  function addPhotoDrawingPoint(event: MouseEvent, view: ProfileView): void {
+    const photo = photoForView(view);
+    const pane = paneElements[view];
+    if (!photo?.recognition || !photo.drawing || !pane || currentPending) return;
+    const point = snapPoint(profilePointFromPointer(
+      event.clientX,
+      event.clientY,
+      pane.getBoundingClientRect(),
+      cameraBounds(view, boundsForView(view)),
+    ));
+    const draftPointsMm = [...photo.draftPointsMm, point];
+    if (photo.correctionTool === 'line' && draftPointsMm.length === 2) {
+      const id = `user-line-${++photoPrimitiveSequence}`;
+      const primitive: DrawingPrimitive = {
+        kind: 'line', id, startMm: draftPointsMm[0]!, endMm: draftPointsMm[1]!, residualMm: 0,
+      };
+      updatePhoto(view, {
+        primitives: [...photo.primitives, primitive], selectedPrimitiveId: id,
+        drawing: false, draftPointsMm: [], profilesNeedReview: true, accepted: false,
+      });
+      setStatus('Line added. Review corrections to check the edited profile.');
+      return;
+    }
+    updatePhoto(view, { draftPointsMm });
+  }
+
   function closeLoop(): void {
+    if (currentPhoto?.recognition && currentPhoto.drawing) {
+      if (currentPhoto.correctionTool !== 'polyline' || currentPhoto.draftPointsMm.length < 3) {
+        setError('A photo contour needs at least three vertices before it can be closed.');
+        return;
+      }
+      const id = `user-polyline-${++photoPrimitiveSequence}`;
+      const primitive: DrawingPrimitive = {
+        kind: 'polyline', id, pointsMm: currentPhoto.draftPointsMm.map(([x, y]) => [x, y]), closed: true, residualMm: 0,
+      };
+      updatePhoto(selectedView, {
+        primitives: [...currentPhoto.primitives, primitive], selectedPrimitiveId: id,
+        drawing: false, draftPointsMm: [], profilesNeedReview: true, accepted: false,
+      });
+      setError('');
+      setStatus('Closed contour added. Review corrections to check the edited profile.');
+      return;
+    }
     if (!drawing) return;
     const current = currentEdit.draftLoopIndex === null ? null : startEdit()[currentEdit.draftLoopIndex];
     if (!current || current.points.length < 3) {
@@ -450,6 +1007,13 @@
     setStatus('Profile loop closed. Drag vertices or edit their coordinates.');
   }
 
+  function cancelPhotoDrawing(): void {
+    if (!currentPhoto?.drawing) return;
+    updatePhoto(selectedView, { drawing: false, draftPointsMm: [] });
+    setError('');
+    setStatus('Photo correction cancelled. Recognized geometry remains unchanged.');
+  }
+
   function selectVertex(loopIndex: number, pointIndex: number): void {
     patchProfileEditor(selectedView, { selectedLoopIndex: loopIndex, selectedPointIndex: pointIndex });
   }
@@ -457,6 +1021,7 @@
   function selectView(view: ProfileView): void {
     if (view === selectedView) return;
     selectedView = view;
+    photoPickMode = null;
     activePan = null;
     drag = null;
   }
@@ -471,6 +1036,14 @@
   }
 
   function boundsForView(view: ProfileView) {
+    const photo = photoForView(view);
+    if (photo?.recognition) {
+      const width = photo.recognition.previewWidthPx * photo.recognition.millimetersPerPixel;
+      const height = photo.recognition.previewHeightPx * photo.recognition.millimetersPerPixel;
+      const padding = Math.max(width, height, 10) * 0.12;
+      return { minX: -padding, minY: -padding, width: width + padding * 2, height: height + padding * 2 };
+    }
+    if (photo) return { minX: 0, minY: 0, width: photo.prepared.image.widthPx, height: photo.prepared.image.heightPx };
     const evidence = geometryEvidence[view]?.scopeKey === scopeKey ? geometryEvidence[view]?.response : null;
     if (evidence) return profileBounds(evidence.loops);
     const loops = view === selectedView ? currentLoops : profileEditorFor(view).loops;
@@ -512,7 +1085,11 @@
   }
 
   function handlePanePointerDown(event: PointerEvent, view: ProfileView): void {
-    selectView(view);
+    if (view !== selectedView || !photoPickMode) selectView(view);
+    if (photoPickMode === 'region' && view === selectedView) {
+      startPhotoRegion(event, view);
+      return;
+    }
     if (event.button !== 1 && !event.shiftKey) return;
     event.preventDefault();
     const element = event.currentTarget as HTMLElement;
@@ -521,6 +1098,14 @@
   }
 
   function handlePanePointerMove(event: PointerEvent, view: ProfileView): void {
+    if (photoRegionStart && photoPickMode === 'region') {
+      movePhotoRegion(event, view);
+      return;
+    }
+    if (photoVertexDrag && photoVertexDrag.view === view && photoVertexDrag.pointerId === event.pointerId) {
+      movePhotoVertex(event, view);
+      return;
+    }
     if (!activePan || activePan.view !== view || activePan.pointerId !== event.pointerId) return;
     const zoom = activePan.camera.zoom;
     const centerX = activePan.camera.centerX - (event.clientX - activePan.clientX) / zoom;
@@ -528,7 +1113,9 @@
     paneCameras = { ...paneCameras, [view]: { ...activePan.camera, centerX, centerY } };
   }
 
-  function handlePanePointerUp(event: PointerEvent): void {
+  function handlePanePointerUp(event: PointerEvent, view: ProfileView): void {
+    if (photoRegionStart && photoPickMode === 'region') finishPhotoRegion(event, view);
+    if (photoVertexDrag?.pointerId === event.pointerId) photoVertexDrag = null;
     if (activePan?.pointerId === event.pointerId) activePan = null;
   }
 
@@ -544,6 +1131,7 @@
   }
 
   function exactView(view: ProfileView): boolean {
+    if (photoForView(view)?.recognition) return false;
     const evidence = evidenceForView(view);
     return evidence?.accuracy === 'exactBrep'
       && Boolean(evidence.profileAsset)
@@ -551,6 +1139,7 @@
   }
 
   function loopsForView(view: ProfileView): ProfileLoop[] {
+    if (photoForView(view)?.recognition) return view === selectedView ? currentLoops : profileEditorFor(view).loops;
     const evidence = evidenceForView(view);
     if (evidence?.accuracy === 'exactBrep' && exactView(view)) return evidence.loops;
     return view === selectedView ? currentLoops : profileEditorFor(view).loops;
@@ -610,6 +1199,36 @@
     drag = null;
   }
 
+  function startPhotoVertexDrag(event: PointerEvent, view: ProfileView, primitiveId: string, pointIndex: number): void {
+    if (event.button !== 0 || view !== selectedView) return;
+    event.preventDefault();
+    event.stopPropagation();
+    paneElements[view]?.setPointerCapture(event.pointerId);
+    photoVertexDrag = { primitiveId, pointIndex, pointerId: event.pointerId, view };
+    selectDrawingPrimitive(primitiveId);
+  }
+
+  function movePhotoVertex(event: PointerEvent, view: ProfileView): void {
+    const active = photoVertexDrag;
+    const photo = photoForView(view);
+    if (!active || !photo || active.view !== view || active.pointerId !== event.pointerId) return;
+    const pane = paneElements[view];
+    if (!pane) return;
+    const point = profilePointFromPointer(
+      event.clientX,
+      event.clientY,
+      pane.getBoundingClientRect(),
+      cameraBounds(view, boundsForView(view)),
+    );
+    const primitives = photo.primitives.map((primitive) => {
+      if (primitive.id !== active.primitiveId || primitive.kind !== 'polyline') return cloneDrawingPrimitive(primitive);
+      const pointsMm = primitive.pointsMm.map(([x, y]) => [x, y] as DrawingPoint);
+      if (pointsMm[active.pointIndex]) pointsMm[active.pointIndex] = point;
+      return { ...primitive, pointsMm };
+    });
+    updatePhoto(view, { primitives, profilesNeedReview: true, accepted: false });
+  }
+
   async function applyProfile(): Promise<void> {
     if (applyDisabled || currentPending) return;
     const clearanceMm = finiteValue(clearance, 'Clearance');
@@ -628,7 +1247,10 @@
       setError('Derivation settings changed. Derive the profile again before applying.');
       return;
     }
-    const loops = profileLoopsForApply(
+    const drawingProfile = photoProfileReady && currentPhoto?.recognition && acceptedPhotoPrimitives
+      ? { evidenceId: currentPhoto.recognition.evidenceId, primitives: acceptedPhotoPrimitives }
+      : undefined;
+    const loops = drawingProfile ? undefined : profileLoopsForApply(
       currentEvidence,
       convertedSelectedEvidence,
       currentLoops,
@@ -660,6 +1282,7 @@
         depthMm,
         partName: partName.trim(),
         reference,
+        ...(drawingProfile ? { drawingProfile } : {}),
       });
       if (profileRequestIsCurrent(requestScope, requestId, scopeKey, activeRequestId)) {
         if (outcome.status === 'error') {
@@ -732,6 +1355,130 @@
         {#if sourceWarning}<p class="inline-hint">{sourceWarning}</p>{/if}
       </section>
 
+      <section class="control-section drawing-photo-controls" aria-label="Drawing photo">
+        <h3>Drawing photo · {selectedView.toUpperCase()}</h3>
+        <button class="action-button action-button--secondary" type="button" onclick={chooseDrawingPhoto} disabled={photoImportPending || currentPending !== null}>
+          {photoImportPending ? 'Opening photo…' : currentPhoto ? 'Replace drawing photo' : 'Drawing photo'}
+        </button>
+        {#if currentPhoto}
+          <p class="inline-hint">Photo is assigned to {selectedView.toUpperCase()}. Select another pane before importing its view.</p>
+          <div class="photo-tool-row">
+            <button class="action-button action-button--secondary" type="button" onclick={() => beginPhotoPick('region')} disabled={currentPhoto.pending}>Select image region</button>
+            <label class="compact-field">
+              Rotate
+              <select aria-label="Drawing photo rotation" value={currentPhoto.rotationDegrees} onchange={(event) => setPhotoRotation(event.currentTarget.value)} disabled={currentPhoto.pending}>
+                <option value="0">0°</option>
+                <option value="90">90°</option>
+                <option value="180">180°</option>
+                <option value="270">270°</option>
+              </select>
+            </label>
+          </div>
+          <p class="inline-hint">Crop: {Math.round(currentPhoto.region.widthPx)} × {Math.round(currentPhoto.region.heightPx)} px · drag on the image pane.</p>
+          <div class="photo-tool-row">
+            <button class="action-button action-button--secondary" type="button" onclick={() => beginPhotoPick('rectification')} disabled={currentPhoto.pending}>Pick four corners</button>
+            <label class="compact-field">
+              Width / height
+              <input aria-label="Known rectangle aspect ratio" type="number" min="0.001" step="0.01" value={currentPhoto.aspectRatio} oninput={(event) => updatePhoto(selectedView, { aspectRatio: event.currentTarget.value }, true)} disabled={currentPhoto.pending} />
+            </label>
+          </div>
+          <p class="inline-hint">{currentPhoto.rectificationPoints.length}/4 corners picked. Supply the known ratio to rectify a photographed rectangle.</p>
+          <div class="photo-tool-row">
+            <button class="action-button action-button--secondary" type="button" onclick={() => beginPhotoPick('calibration')} disabled={currentPhoto.pending}>Pick scale points</button>
+            <label class="compact-field">
+              Known length (mm)
+              <input aria-label="Known length (mm)" type="number" min="0.001" step="0.1" value={currentPhoto.knownDistanceMm} oninput={(event) => updatePhoto(selectedView, { knownDistanceMm: event.currentTarget.value }, true)} disabled={currentPhoto.pending} />
+            </label>
+          </div>
+          <p class="inline-hint">{currentPhoto.calibrationPoints.length}/2 scale points picked. Calibration uses one uniform scale.</p>
+          {#if currentPhoto.recognition}
+            <p class="inline-hint" aria-label="Calibrated distance (mm)">
+              Recovered distance: {calibratedPreviewMm === null ? 'unavailable' : `${calibratedPreviewMm.toFixed(2)} mm`} · image-derived, check dimensions.
+            </p>
+          {:else if currentPhoto.knownDistanceMm}
+            <p class="inline-hint" aria-label="Calibrated distance (mm)">Reference distance: {currentPhoto.knownDistanceMm} mm</p>
+          {/if}
+          <label class="snap-control">
+            <span>Source image opacity</span>
+            <input aria-label="Source image opacity" type="range" min="0.05" max="0.9" step="0.05" value={currentPhoto.imageOpacity} oninput={(event) => updatePhoto(selectedView, { imageOpacity: Number(event.currentTarget.value) })} />
+          </label>
+          <div class="photo-tool-row">
+            <button class="action-button" type="button" onclick={recognizeDrawing} disabled={currentPhoto.pending || photoPickMode !== null || currentPhoto.calibrationPoints.length !== 2 || !currentPhoto.knownDistanceMm}>
+              {currentPhoto.pending ? 'Recognizing…' : 'Recognize drawing'}
+            </button>
+            <button class="text-button" type="button" onclick={clearDrawingPhoto}>Clear photo</button>
+          </div>
+          {#if currentPhoto.error}<p class="status-error" role="alert">{currentPhoto.error}</p>{/if}
+          {#if currentPhoto.recognition}
+            <div class="drawing-candidates" data-testid="drawing-profile-candidates" aria-label="Recognized profile candidates">
+              <h4>Recognized profiles</h4>
+              {#each currentPhoto.profiles as candidate (candidate.id)}
+                {@const selectable = drawingCandidateIsSelectable(candidate, currentPhoto.primitives)}
+                <label class="candidate-row">
+                  <input
+                    type="checkbox"
+                    aria-label={`Use ${candidate.role} profile ${candidate.id}`}
+                    checked={currentPhoto.selectedProfileIds.includes(candidate.id)}
+                    onchange={(event) => toggleDrawingCandidate(candidate, event.currentTarget.checked)}
+                    disabled={!selectable || currentPhoto.pending || currentPhoto.profilesNeedReview}
+                  />
+                  <span><strong>{candidate.id}</strong> · {candidate.role} · residual {candidate.residualMm.toFixed(2)} mm</span>
+                </label>
+                {#if !candidate.closed || candidate.issues.length || !selectable}
+                  <p class="inline-hint candidate-issue">{candidate.issues.join('; ') || 'Open or incomplete contour; repair before accepting.'}</p>
+                {/if}
+              {/each}
+              {#if currentPhoto.profilesNeedReview}
+                <p class="inline-hint">Contour candidates may have changed. Review corrections before selecting or accepting a profile.</p>
+              {/if}
+              {#if currentPhoto.primitives.length}
+                <label>
+                  Edit recognized geometry
+                  <select aria-label="Recognized primitive" value={currentPhoto.selectedPrimitiveId ?? ''} onchange={(event) => selectDrawingPrimitive(event.currentTarget.value)}>
+                    {#each currentPhoto.primitives as primitive (primitive.id)}
+                      <option value={primitive.id}>{primitive.kind} · {primitive.id}</option>
+                    {/each}
+                  </select>
+                </label>
+                {@const primitive = currentPhoto.primitives.find((item) => item.id === currentPhoto.selectedPrimitiveId)}
+                {#if primitive?.kind === 'circle'}
+                  <div class="vertex-fields" aria-label="Edit circle geometry">
+                    <label>Center X (mm)<input aria-label="Circle center X (mm)" type="number" step="0.01" value={primitive.centerMm[0]} oninput={(event) => updateDrawingPrimitiveNumber(primitive.id, 'x', event.currentTarget.value)} /></label>
+                    <label>Center Y (mm)<input aria-label="Circle center Y (mm)" type="number" step="0.01" value={primitive.centerMm[1]} oninput={(event) => updateDrawingPrimitiveNumber(primitive.id, 'y', event.currentTarget.value)} /></label>
+                    <label>Radius (mm)<input aria-label="Circle radius (mm)" type="number" min="0.001" step="0.01" value={primitive.radiusMm} oninput={(event) => updateDrawingPrimitiveNumber(primitive.id, 'radius', event.currentTarget.value)} /></label>
+                  </div>
+                {:else if primitive?.kind === 'line'}
+                  <div class="vertex-fields" aria-label="Edit line geometry">
+                    <label>Start X (mm)<input aria-label="Line start X (mm)" type="number" step="0.01" value={primitive.startMm[0]} oninput={(event) => updateDrawingPrimitiveNumber(primitive.id, 'x', event.currentTarget.value)} /></label>
+                    <label>Start Y (mm)<input aria-label="Line start Y (mm)" type="number" step="0.01" value={primitive.startMm[1]} oninput={(event) => updateDrawingPrimitiveNumber(primitive.id, 'y', event.currentTarget.value)} /></label>
+                    <label>End X (mm)<input aria-label="Line end X (mm)" type="number" step="0.01" value={primitive.endMm[0]} oninput={(event) => updateDrawingPrimitiveNumber(primitive.id, 'x2', event.currentTarget.value)} /></label>
+                    <label>End Y (mm)<input aria-label="Line end Y (mm)" type="number" step="0.01" value={primitive.endMm[1]} oninput={(event) => updateDrawingPrimitiveNumber(primitive.id, 'y2', event.currentTarget.value)} /></label>
+                  </div>
+                {:else if primitive?.kind === 'polyline'}
+                  <div class="drawing-polyline-vertices" aria-label="Edit recognized polyline vertices">
+                    {#each primitive.pointsMm as point, pointIndex (`${primitive.id}-${pointIndex}`)}
+                      <div class="vertex-fields" aria-label={`Polyline vertex ${pointIndex + 1}`}>
+                        <label>Vertex {pointIndex + 1} X (mm)<input aria-label={`Polyline vertex ${pointIndex + 1} X (mm)`} type="number" step="0.01" value={point[0]} oninput={(event) => updateDrawingPolylineVertex(primitive.id, pointIndex, 0, event.currentTarget.value)} /></label>
+                        <label>Vertex {pointIndex + 1} Y (mm)<input aria-label={`Polyline vertex ${pointIndex + 1} Y (mm)`} type="number" step="0.01" value={point[1]} oninput={(event) => updateDrawingPolylineVertex(primitive.id, pointIndex, 1, event.currentTarget.value)} /></label>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+                {#if primitive}
+                  <button class="text-button" type="button" onclick={() => removeDrawingPrimitive(primitive.id)} disabled={currentPhoto.pending}>Remove selected geometry</button>
+                {/if}
+              {/if}
+              {#if currentPhoto.recognition.diagnostics.length || currentPhoto.reviewDiagnostics.length}
+                <ul class="warning-list">{#each [...currentPhoto.recognition.diagnostics, ...currentPhoto.reviewDiagnostics] as diagnostic, index (`${index}-${diagnostic}`)}<li>{diagnostic}</li>{/each}</ul>
+              {/if}
+              <button class="action-button action-button--primary" type="button" onclick={acceptDrawingProfile} disabled={currentPhoto.pending || (!currentPhoto.profilesNeedReview && !currentPhoto.selectedProfileIds.length)}>
+                {currentPhoto.profilesNeedReview ? 'Review corrections' : currentPhoto.accepted ? 'Profile accepted' : 'Accept selected profile'}
+              </button>
+            </div>
+          {/if}
+        {/if}
+      </section>
+
       <section class="control-section">
         <h3>Profile</h3>
         {#if currentEvidence?.accuracy === 'exactBrep' && sourceAccuracyHint}
@@ -744,6 +1491,29 @@
               Convert to editable approximate polygon
             </button>
           </div>
+        {:else if currentPhoto?.recognition}
+          <label>
+            Photo correction tool
+            <select aria-label="Photo correction tool" bind:value={currentPhoto.correctionTool} disabled={currentPhoto.drawing || currentPhoto.pending}>
+              <option value="line">Line segment</option>
+              <option value="polyline">Closed contour</option>
+            </select>
+          </label>
+          <div class="tool-row">
+            {#if currentPhoto.drawing}
+              <button class="action-button action-button--secondary" type="button" onclick={cancelPhotoDrawing}>Cancel correction</button>
+              {#if currentPhoto.correctionTool === 'polyline'}
+                <button class="action-button" type="button" onclick={closeLoop}>Close contour</button>
+              {/if}
+            {:else}
+              <button class="action-button" type="button" onclick={beginDrawing} disabled={currentPending !== null || currentPhoto.pending}>
+                Draw correction
+              </button>
+            {/if}
+          </div>
+          <p class="inline-hint">Add straight linework or a closed polygon. Existing circles stay analytic.</p>
+        {:else if currentPhoto}
+          <p class="inline-hint">Set scale and recognize the photo before adding geometry. Clear the photo to draw a separate manual profile.</p>
         {:else}
           <div class="tool-row">
             <button class="action-button" type="button" onclick={beginDrawing} disabled={currentPending !== null || drawing}>
@@ -756,14 +1526,14 @@
           </div>
           <label>
             New loop type
-            <select aria-label="New loop type" bind:value={drawRole} disabled={drawing || currentPending !== null}>
+            <select aria-label="New loop type" bind:value={drawRole} disabled={drawing || currentPending !== null || Boolean(currentPhoto)}>
               <option value="outer">Outer profile</option>
               <option value="hole">Hole</option>
             </select>
           </label>
           <label>
             Drawing tool
-            <select aria-label="Drawing tool" bind:value={activeTool} disabled={drawing || currentPending !== null}>
+            <select aria-label="Drawing tool" bind:value={activeTool} disabled={drawing || currentPending !== null || Boolean(currentPhoto)}>
               <option value="polyline">Polyline</option>
               <option value="rectangle">Rectangle</option>
               <option value="circle">Circle · approximate</option>
@@ -771,12 +1541,12 @@
           </label>
           <label class="snap-control">
             <span>Snap to grid</span>
-            <input aria-label="Snap to grid" type="checkbox" bind:checked={snapToGrid} disabled={drawing || currentPending !== null} />
+            <input aria-label="Snap to grid" type="checkbox" bind:checked={snapToGrid} disabled={drawing || currentPending !== null || Boolean(currentPhoto)} />
           </label>
           {#if snapToGrid}
             <label>
               Grid size (mm)
-              <input aria-label="Grid size (mm)" type="number" min="0.001" step="0.1" bind:value={sketchGridSize} disabled={drawing || currentPending !== null} />
+              <input aria-label="Grid size (mm)" type="number" min="0.001" step="0.1" bind:value={sketchGridSize} disabled={drawing || currentPending !== null || Boolean(currentPhoto)} />
             </label>
           {/if}
           {#if drawRole === 'hole' && currentLoops.some((loop) => loop.role === 'outer')}
@@ -822,7 +1592,7 @@
         <h3>Profile placement</h3>
         <label>
           Profile plane
-          <select aria-label="Profile plane" value={currentEdit.placementPlane} onchange={(event) => patchProfileEditor(selectedView, { placementPlane: event.currentTarget.value as ProfilePlane })} disabled={currentPending !== null || currentEvidence !== null}>
+          <select aria-label="Profile plane" value={currentEdit.placementPlane} onchange={(event) => patchProfileEditor(selectedView, { placementPlane: event.currentTarget.value as ProfilePlane })} disabled={currentPending !== null || currentEvidence !== null || !!currentPhoto?.recognition}>
             <option value="xy">XY</option>
             <option value="xz">XZ</option>
             <option value="yz">YZ</option>
@@ -852,11 +1622,12 @@
           {@const viewBounds = boundsForView(view)}
           {@const visibleBounds = cameraBounds(view, viewBounds)}
           {@const isViewExact = exactView(view)}
+          {@const photo = photoForView(view)}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
           <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
           <div
-            class={['sketch-pane', `sketch-pane--${view}`, selectedView === view && 'sketch-pane--selected', drawing && selectedView === view && 'draw-mode']}
+            class={['sketch-pane', `sketch-pane--${view}`, selectedView === view && 'sketch-pane--selected', (drawing || photoDrawing) && selectedView === view && 'draw-mode']}
             aria-label={`${view[0]!.toUpperCase()}${view.slice(1)} projection`}
             data-testid={`profile-view-${view}`}
             bind:this={paneElements[view]}
@@ -867,35 +1638,111 @@
               handlePanePointerMove(event, view);
               if (drag) moveVertex(event, view);
             }}
-            onpointerup={handlePanePointerUp}
-            onpointercancel={handlePanePointerUp}
+            onpointerup={(event) => handlePanePointerUp(event, view)}
+            onpointercancel={(event) => handlePanePointerUp(event, view)}
             onclick={(event) => {
-              if (drawing && selectedView === view) addDrawingPoint(event, view);
+              if (photoPickMode && selectedView === view) pickPhotoPoint(event, view);
+              else if (photoForView(view)?.recognition && photoForView(view)?.drawing && selectedView === view) addPhotoDrawingPoint(event, view);
+              else if (drawing && selectedView === view) addDrawingPoint(event, view);
               else selectView(view);
             }}
             onwheel={(event) => handlePaneWheel(event, view)}
           >
             <div class="sketch-pane__label">
               <button class="view-select" type="button" aria-label={`Select ${view} projection`} aria-pressed={selectedView === view} onclick={(event) => { event.stopPropagation(); selectView(view); }}>{view.toUpperCase()}</button>
-              <span>{viewPendingFor(view) ? 'PROJECTING…' : viewErrorFor(view) ? 'ERROR' : viewLoops.length ? `${viewLoops.length} LOOPS` : 'NO PROFILE'}</span>
+              <span>{photoForView(view)?.pending ? 'RECOGNIZING…' : photoForView(view)?.error ? 'ERROR' : viewPendingFor(view) ? 'PROJECTING…' : viewErrorFor(view) ? 'ERROR' : photoForView(view)?.accepted ? 'PROFILE ACCEPTED' : viewLoops.length ? `${viewLoops.length} LOOPS` : photoForView(view) ? 'DRAWING PHOTO' : 'NO PROFILE'}</span>
               <button class="sketch-pane__label-action" type="button" onclick={(event) => { event.stopPropagation(); resetPaneCamera(view); }}>FIT VIEW</button>
             </div>
-            {#if viewPendingFor(view)}
+            {#if photoForView(view)?.pending}
+              <span class="pane-message">Recognizing drawing lines…</span>
+            {:else if photoForView(view)?.error}
+              <span class="pane-message pane-message--error">{photoForView(view)?.error}</span>
+            {:else if viewPendingFor(view)}
               <span class="pane-message">Projecting current model…</span>
             {:else if viewErrorFor(view)}
               <span class="pane-message pane-message--error">{viewErrorFor(view)}</span>
-            {:else if viewLoops.length === 0}
-              <span class="pane-message">Select this view, draw a profile, or project all views.</span>
+            {:else if photoPickMode && selectedView === view}
+              <span class="pane-message">{photoPickMode === 'region' ? 'Drag a rectangle to crop the drawing.' : photoPickMode === 'calibration' ? `Click scale point ${photoForView(view)?.calibrationPoints.length === 0 ? '1' : '2'} of 2.` : `Click rectangle corner ${(photoForView(view)?.rectificationPoints.length ?? 0) + 1} of 4.`}</span>
+            {:else if photoForView(view)?.drawing}
+              <span class="pane-message">{photoForView(view)?.correctionTool === 'line' ? `Click endpoint ${photoForView(view)?.draftPointsMm.length === 0 ? '1' : '2'} of 2.` : `${photoForView(view)?.draftPointsMm.length ?? 0} contour points · click Close contour when ready.`}</span>
+            {:else if viewLoops.length === 0 && !photoForView(view)?.recognition}
+              <span class="pane-message">Select a view, draw a profile, or add a drawing photo.</span>
             {/if}
-            <svg class="sketch-pane__drawing" viewBox={viewBox(view)} preserveAspectRatio="none" aria-hidden="true">
-              <defs>
-                <pattern id={`profile-grid-${view}`} width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="scale(1,-1)">
-                  <path d="M 10 0 L 0 0 0 10" class="grid-line" />
-                </pattern>
-              </defs>
-              <rect x={visibleBounds.minX} y={-visibleBounds.minY - visibleBounds.height} width={visibleBounds.width} height={visibleBounds.height} fill={`url(#profile-grid-${view})`} />
-              <line x1={0} y1={-visibleBounds.minY - visibleBounds.height} x2={0} y2={-visibleBounds.minY} class="axis-line" />
-              <line x1={visibleBounds.minX} y1={0} x2={visibleBounds.minX + visibleBounds.width} y2={0} class="axis-line" />
+            <svg class="sketch-pane__drawing" viewBox={viewBox(view)} preserveAspectRatio="xMidYMid meet" aria-label={`${view} sketch canvas`}>
+              {#if !photo || photo.recognition}
+                <defs>
+                  <pattern id={`profile-grid-${view}`} width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="scale(1,-1)">
+                    <path d="M 10 0 L 0 0 0 10" class="grid-line" />
+                  </pattern>
+                </defs>
+                <rect x={visibleBounds.minX} y={-visibleBounds.minY - visibleBounds.height} width={visibleBounds.width} height={visibleBounds.height} fill={`url(#profile-grid-${view})`} />
+                <line x1={0} y1={-visibleBounds.minY - visibleBounds.height} x2={0} y2={-visibleBounds.minY} class="axis-line" />
+                <line x1={visibleBounds.minX} y1={0} x2={visibleBounds.minX + visibleBounds.width} y2={0} class="axis-line" />
+              {/if}
+              {#if photo?.recognition}
+                {@const imageWidthMm = photo.recognition.previewWidthPx * photo.recognition.millimetersPerPixel}
+                {@const imageHeightMm = photo.recognition.previewHeightPx * photo.recognition.millimetersPerPixel}
+                <image href={photo.recognition.transformedPreviewDataUrl} x="0" y={-imageHeightMm} width={imageWidthMm} height={imageHeightMm} opacity={photo.imageOpacity} preserveAspectRatio="none" />
+                {#each photo.primitives as primitive (primitive.id)}
+                  {#if primitive.kind === 'line'}
+                    <line
+                      class={['drawing-primitive', photo.selectedPrimitiveId === primitive.id && 'drawing-primitive--selected']}
+                      x1={primitive.startMm[0]} y1={-primitive.startMm[1]} x2={primitive.endMm[0]} y2={-primitive.endMm[1]}
+                      role="button" tabindex="0" aria-label={`Select line ${primitive.id}`}
+                      onclick={(event) => { event.stopPropagation(); selectDrawingPrimitive(primitive.id); }}
+                      onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectDrawingPrimitive(primitive.id); } }}
+                    />
+                  {:else if primitive.kind === 'circle'}
+                    <circle
+                      class={['drawing-primitive', 'drawing-circle', photo.selectedPrimitiveId === primitive.id && 'drawing-primitive--selected']}
+                      cx={primitive.centerMm[0]} cy={-primitive.centerMm[1]} r={primitive.radiusMm}
+                      role="button" tabindex="0" aria-label={`Select circle ${primitive.id}`}
+                      onclick={(event) => { event.stopPropagation(); selectDrawingPrimitive(primitive.id); }}
+                      onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectDrawingPrimitive(primitive.id); } }}
+                    />
+                  {:else}
+                    {@const points = primitive.pointsMm.map(([x, y]) => `${x},${-y}`).join(' ')}
+                    {#if primitive.closed}
+                      <polygon class={['drawing-primitive', photo.selectedPrimitiveId === primitive.id && 'drawing-primitive--selected']} points={points} role="button" tabindex="0" aria-label={`Select closed linework ${primitive.id}`} onclick={(event) => { event.stopPropagation(); selectDrawingPrimitive(primitive.id); }} onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectDrawingPrimitive(primitive.id); } }} />
+                    {:else}
+                      <polyline class={['drawing-primitive', photo.selectedPrimitiveId === primitive.id && 'drawing-primitive--selected']} points={points} role="button" tabindex="0" aria-label={`Select open linework ${primitive.id}`} onclick={(event) => { event.stopPropagation(); selectDrawingPrimitive(primitive.id); }} onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectDrawingPrimitive(primitive.id); } }} />
+                    {/if}
+                    {#if selectedView === view && photo.selectedPrimitiveId === primitive.id}
+                      {#each primitive.pointsMm as point, pointIndex (`${primitive.id}-handle-${pointIndex}`)}
+                        <circle
+                          class="drawing-vertex-handle"
+                          data-testid={`drawing-vertex-${pointIndex}`}
+                          cx={point[0]} cy={-point[1]} r={Math.max(0.2, 5 / paneCameras[view].zoom)}
+                          role="button" tabindex="0"
+                          aria-label={`${primitive.id} vertex ${pointIndex + 1}, ${point[0].toFixed(2)} by ${point[1].toFixed(2)} mm`}
+                          onpointerdown={(event) => startPhotoVertexDrag(event, view, primitive.id, pointIndex)}
+                          onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectDrawingPrimitive(primitive.id); } }}
+                        />
+                      {/each}
+                    {/if}
+                  {/if}
+                {/each}
+                {#if photo.drawing && photo.draftPointsMm.length}
+                  {@const draftPoints = photo.draftPointsMm.map(([x, y]) => `${x},${-y}`).join(' ')}
+                  {#if photo.correctionTool === 'line' && photo.draftPointsMm.length === 1}
+                    <circle class="drawing-primitive drawing-primitive--draft" cx={photo.draftPointsMm[0]![0]} cy={-photo.draftPointsMm[0]![1]} r={Math.max(0.2, 5 / paneCameras[view].zoom)} />
+                  {:else if photo.correctionTool === 'line'}
+                    <line class="drawing-primitive drawing-primitive--draft" x1={photo.draftPointsMm[0]![0]} y1={-photo.draftPointsMm[0]![1]} x2={photo.draftPointsMm[1]![0]} y2={-photo.draftPointsMm[1]![1]} />
+                  {:else}
+                    <polyline class="drawing-primitive drawing-primitive--draft" points={draftPoints} />
+                  {/if}
+                {/if}
+              {:else if photo}
+                <image data-testid="drawing-photo-source" href={photo.prepared.previewDataUrl} x="0" y={-photo.prepared.image.heightPx} width={photo.prepared.image.widthPx} height={photo.prepared.image.heightPx} opacity={photo.imageOpacity} preserveAspectRatio="none" />
+                {@const region = photoRegionDraft ?? photo.region}
+                <rect class="drawing-region" x={region.leftPx} y={-(region.topPx + region.heightPx)} width={region.widthPx} height={region.heightPx} />
+                {#each photo.rectificationPoints as point, index (`rectification-${index}`)}
+                  <circle class="drawing-pick-point" cx={point[0]} cy={-(photo.prepared.image.heightPx - point[1])} r={Math.max(photo.prepared.image.widthPx, photo.prepared.image.heightPx) * 0.008} />
+                {/each}
+                {#each photo.calibrationPoints as point, index (`calibration-${index}`)}
+                  <circle class="drawing-calibration-point" cx={point[0]} cy={-(photo.prepared.image.heightPx - point[1])} r={Math.max(photo.prepared.image.widthPx, photo.prepared.image.heightPx) * 0.009} />
+                {/each}
+              {/if}
               {#each viewLoops as loop, loopIndex (`${view}-${loopIndex}-${loop.points.length}-${loop.role}`)}
                 {@const pathPoints = loop.points.map(([x, y]) => `${x},${-y}`).join(' ')}
                 <polygon points={pathPoints} class={[loop.role, loop.role === 'hole' && 'hole', profileEditorFor(view).selectedLoopIndex === loopIndex && 'selected-loop', profileEditorFor(view).drawing && loopIndex === profileEditorFor(view).draftLoopIndex && 'open-draft']} fill-rule="evenodd" />
@@ -922,7 +1769,13 @@
         {/each}
       </div>
       <div class="evidence-row">
-        {#if currentEvidence}
+        {#if currentPhoto?.recognition}
+          <span class="evidence-tag">IMAGE-DERIVED</span>
+          <span>{selectedView.toUpperCase()} · scale {calibratedPreviewMm?.toFixed(2) ?? 'unavailable'} mm · check dimensions · tolerance {currentPhoto.recognition.evidence.toleranceMm.toFixed(2)} mm</span>
+        {:else if currentPhoto}
+          <span class="evidence-tag evidence-tag--manual">DRAWING PHOTO</span>
+          <span>Image coordinates in pixels · set scale and recognize before applying.</span>
+        {:else if currentEvidence}
           <span class={['evidence-tag', { exact: isExactProfile }]}>{isExactProfile ? 'EXACT CAD PROFILE' : 'APPROXIMATE PROFILE'}</span>
           <span>
             {#if currentEvidence.operation.kind === 'section'}
@@ -1032,9 +1885,25 @@
     overflow: hidden;
   }
 
-  .view-layout-switcher { display: flex; flex: 0 0 auto; gap: 0.25rem; }
-  .view-layout-switcher button { min-height: 1.7rem; padding: 0.25rem 0.5rem; border: 1px solid var(--profile-border); background: transparent; color: var(--profile-muted); font-size: 0.6rem; font-weight: 700; letter-spacing: 0.06em; }
-  .view-layout-switcher button[aria-pressed="true"] { border-color: var(--profile-secondary); color: var(--profile-secondary); }
+  .view-layout-switcher {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 0.25rem;
+  }
+  .view-layout-switcher button {
+    min-height: 1.7rem;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--profile-border);
+    background: transparent;
+    color: var(--profile-muted);
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+  }
+  .view-layout-switcher button[aria-pressed="true"] {
+    border-color: var(--profile-secondary);
+    color: var(--profile-secondary);
+  }
 
   .sketch-workspace__panes {
     display: grid;
@@ -1049,7 +1918,6 @@
   }
 
   .sketch-workspace__panes--single { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
-  .sketch-workspace__panes--single > .sketch-pane--front { grid-row: auto; }
 
   .sketch-pane {
     position: relative;
@@ -1165,6 +2033,13 @@
   .sketch-pane polygon.selected-loop { stroke: var(--profile-secondary); stroke-width: 1.5; }
   .sketch-pane polygon.hole { fill: color-mix(in srgb, #aa5b50 20%, transparent); stroke: #c78274; }
   .sketch-pane polygon.open-draft { fill: none; stroke-dasharray: 4 3; }
+  .drawing-region { fill: color-mix(in srgb, var(--profile-secondary) 16%, transparent); stroke: var(--profile-secondary); stroke-width: 1.2; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; pointer-events: none; }
+  .drawing-pick-point { fill: #f1c879; stroke: #17120a; stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+  .drawing-vertex-handle { fill: #f1c879; stroke: #241b0f; stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: all; cursor: move; }
+  .drawing-calibration-point { fill: #ef7d64; stroke: #20120f; stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+  .drawing-primitive { fill: none; stroke: #f0c572; stroke-width: 1.3; vector-effect: non-scaling-stroke; pointer-events: stroke; cursor: pointer; }
+  .drawing-primitive--selected { stroke: #fff0c6; stroke-width: 2; }
+  .drawing-circle { fill: color-mix(in srgb, #d76857 16%, transparent); }
   .vertex-handle { fill: var(--profile-panel); stroke: var(--profile-secondary); stroke-width: 1.5; vector-effect: non-scaling-stroke; cursor: grab; pointer-events: all; }
   .vertex-handle.selected-point { fill: var(--profile-secondary); stroke: #f0d6a5; }
   .evidence-row { justify-content: flex-start; flex-wrap: wrap; min-height: 2.3rem; color: var(--profile-muted); font-size: 0.68rem; }

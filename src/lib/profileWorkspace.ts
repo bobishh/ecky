@@ -24,7 +24,7 @@ export type ProfileDeriveInput = Pick<ProfileGeometryRequest, 'operation' | 'tol
 export type ProfileApplyReference = NonNullable<ProfileFeatureApplyRequest['reference']>;
 export type ProfileApplyInput = Pick<
   ProfileFeatureApplyRequest,
-  'loops' | 'plane' | 'offsetMm' | 'clearanceMm' | 'depthMm' | 'partName' | 'reference'
+  'loops' | 'plane' | 'offsetMm' | 'clearanceMm' | 'depthMm' | 'partName' | 'reference' | 'drawingProfile'
 >;
 export type ProfileApplyOutcome = { status: 'saved' } | { status: 'error'; message: string };
 
@@ -157,8 +157,16 @@ export function profilePointFromPointer(
   rect: Pick<DOMRect, 'left' | 'top' | 'width' | 'height'>,
   bounds: ProfileBounds,
 ): ProfilePoint {
-  const ratioX = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
-  const ratioY = rect.height > 0 ? (clientY - rect.top) / rect.height : 0;
+  const scale = Math.min(
+    rect.width > 0 ? rect.width / bounds.width : 0,
+    rect.height > 0 ? rect.height / bounds.height : 0,
+  );
+  const renderedWidth = bounds.width * scale;
+  const renderedHeight = bounds.height * scale;
+  const insetX = (rect.width - renderedWidth) / 2;
+  const insetY = (rect.height - renderedHeight) / 2;
+  const ratioX = renderedWidth > 0 ? (clientX - rect.left - insetX) / renderedWidth : 0;
+  const ratioY = renderedHeight > 0 ? (clientY - rect.top - insetY) / renderedHeight : 0;
   return [bounds.minX + ratioX * bounds.width, bounds.minY + (1 - ratioY) * bounds.height];
 }
 
