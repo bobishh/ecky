@@ -18,6 +18,8 @@
     hidden = false,
     focused = false,
     highlighted = false,
+    fillWorkarea = false,
+    workareaBottomInset = 0,
     onclose,
     children
   }: {
@@ -33,6 +35,8 @@
     hidden?: boolean;
     focused?: boolean;
     highlighted?: boolean;
+    fillWorkarea?: boolean;
+    workareaBottomInset?: number;
     onclose: () => void;
     children: Snippet;
   } = $props();
@@ -88,6 +92,7 @@
     if (windowId) {
       bringToFront(windowId);
     }
+    if (fillWorkarea) return;
     if (event.button !== 0 || !(event.target instanceof Element)) return;
     if (isInteractiveGestureTarget(event.target)) return;
     event.stopPropagation();
@@ -102,6 +107,7 @@
   }
 
   function handleResizeStart(event: MouseEvent) {
+    if (fillWorkarea) return;
     event.preventDefault();
     event.stopPropagation();
 
@@ -162,6 +168,7 @@
   }
 
   function handleWindowDoubleClick(event: MouseEvent) {
+    if (fillWorkarea) return;
     if (!(event.target instanceof Element)) return;
     if (isInteractiveGestureTarget(event.target)) return;
     fitToViewport();
@@ -190,10 +197,11 @@
   class="window"
   class:window--hidden={hidden}
   class:window--interacting={dragging || resizing}
+  class:window--fill-workarea={fillWorkarea}
   class:window--focused={focused}
   class:window--highlighted={highlighted}
   data-window-id={windowId ?? undefined}
-  style="left: {x}px; top: {y}px; width: {width}px; height: {height}px; z-index: {2000 + z};"
+  style="left: {x}px; top: {y}px; width: {width}px; height: {height}px; z-index: {2000 + z}; --window-workarea-bottom: {workareaBottomInset}px;"
   role="dialog"
   aria-hidden={hidden}
   onmousedown={handleWindowMouseDown}
@@ -229,6 +237,14 @@
     visibility: hidden;
     pointer-events: none;
   }
+
+  .window--fill-workarea {
+    inset: 0 0 var(--window-workarea-bottom, 0px) 0 !important;
+    width: auto !important;
+    height: auto !important;
+  }
+  .window--fill-workarea .window-header { cursor: default; }
+  .window--fill-workarea .window-resize-handle { display: none; }
 
   .window--interacting {
     user-select: none;

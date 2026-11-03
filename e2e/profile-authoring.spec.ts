@@ -315,6 +315,7 @@ async function openSketch(page: Page) {
   await dock.getByRole('button', { name: 'Sketch', exact: true }).click();
   const workspace = page.getByTestId('profile-workspace');
   await expect(workspace.getByText('Profile authoring requires an Ecky source model.')).toHaveCount(0);
+  await workspace.getByRole('button', { name: 'All three views', exact: true }).click();
   return workspace;
 }
 
@@ -372,7 +373,7 @@ test('exact section applies profile asset while sampled display loops stay out o
   await workspace.getByLabel('Section plane').selectOption('xy');
   await workspace.getByLabel('Section offset (mm)').fill('3');
   await workspace.getByRole('button', { name: 'Extract exact section' }).click();
-  await expect(workspace.getByText('EXACT CAD PROFILE · MM')).toBeVisible();
+  await expect(workspace.getByText('EXACT CAD PROFILE')).toBeVisible();
   await expect(workspace.getByText(/XY section · offset 3.00 mm/i)).toBeVisible();
   await expect(workspace.getByRole('button', { name: 'Apply profile' })).toBeEnabled();
   await workspace.getByRole('button', { name: 'Apply profile' }).click();
@@ -399,7 +400,7 @@ test('approximate mesh section uses STL and submits editable loops with approxim
 
   await workspace.getByLabel('Derivation mode').selectOption('meshSection');
   await workspace.getByRole('button', { name: 'Extract approximate section' }).click();
-  await expect(workspace.getByText('APPROXIMATE MESH · MM')).toBeVisible();
+  await expect(workspace.getByText('APPROXIMATE PROFILE')).toBeVisible();
   await workspace.getByRole('button', { name: 'Apply profile' }).click();
 
   await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.applyCalls.length === 1);
@@ -423,12 +424,12 @@ test('exact projection requires explicit conversion before sampled loops can be 
   await workspace.getByLabel('Derivation mode').selectOption('exactProjection');
   await workspace.getByRole('button', { name: 'Project all three views' }).click();
   await expect(workspace.getByTestId('profile-view-front').locator('polygon.outer')).toBeVisible();
-  await expect(workspace.getByText('EXACT CAD PROFILE · MM')).toBeVisible();
+  await expect(workspace.getByText('EXACT CAD PROFILE')).toBeVisible();
   await expect(workspace.getByRole('button', { name: 'Convert to editable approximate polygon' })).toBeVisible();
   await expect(workspace.locator('circle.vertex-handle')).toHaveCount(0);
 
   await workspace.getByRole('button', { name: 'Convert to editable approximate polygon' }).click();
-  await expect(workspace.getByText('APPROXIMATE POLYGON · MM')).toBeVisible();
+  await expect(workspace.getByText('APPROXIMATE PROFILE')).toBeVisible();
   await expect(workspace.locator('circle.vertex-handle')).toHaveCount(8);
   await workspace.getByRole('button', { name: 'Apply profile' }).click();
 

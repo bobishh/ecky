@@ -27,6 +27,7 @@
     drawUnavailableReason = null,
     terminalDock = null,
     overlayActionsEl = $bindable(null),
+    workbenchBottomInset = 0,
     onActivateWindow,
     onDrawToggle,
     onCloseView,
@@ -52,6 +53,7 @@
     drawUnavailableReason?: string | null;
     terminalDock?: TerminalDock | null;
     overlayActionsEl?: HTMLElement | null;
+    workbenchBottomInset?: number;
     onActivateWindow: (id: WindowId, action: DockLauncherAction) => void;
     onDrawToggle: () => void;
     onCloseView: () => void;
@@ -295,7 +297,7 @@
 
 {#if shell('projects').visible}<Window windowId="projects" {...shell('projects')} minWidth={320} minHeight={300} title="Projects" focused={shell('projects').active} hidden={!shell('projects').visible} highlighted={highlightTarget === 'projects'} onclose={() => onCloseWindow('projects')}>{#if projectsContent}{@render projectsContent()}{/if}</Window>{/if}
 {#if shell('library').visible}<Window windowId="library" {...shell('library')} minWidth={320} minHeight={320} title="Library" focused={shell('library').active} hidden={!shell('library').visible} onclose={() => onCloseWindow('library')}>{#if libraryContent}{@render libraryContent()}{/if}</Window>{/if}
-{#if mountedWindows.sketch}<Window windowId="sketch" {...shell('sketch')} minWidth={520} minHeight={360} title="Sketch" focused={shell('sketch').active} hidden={!shell('sketch').visible} onclose={() => onCloseWindow('sketch')}>{#if sketchContent}{@render sketchContent()}{/if}</Window>{/if}
+{#if mountedWindows.sketch}<Window windowId="sketch" {...shell('sketch')} minWidth={520} minHeight={360} title="Sketch" focused={shell('sketch').active} hidden={!shell('sketch').visible} fillWorkarea={currentView === 'workbench'} workareaBottomInset={workbenchBottomInset} onclose={() => onCloseWindow('sketch')}>{#if sketchContent}{@render sketchContent()}{/if}</Window>{/if}
 {#if mountedWindows.params}<Window windowId="params" {...shell('params')} minWidth={280} minHeight={250} title="Parameters" focused={shell('params').active} hidden={!shell('params').visible} highlighted={highlightTarget === 'params'} onclose={() => onCloseWindow('params')}>{#if paramsContent}{@render paramsContent()}{/if}</Window>{/if}
 {#if mountedWindows.capture}<Window windowId="capture" {...shell('capture')} minWidth={720} minHeight={520} title="External Shapes" focused={shell('capture').active} hidden={!shell('capture').visible} highlighted={highlightTarget === 'capture'} onclose={() => onCloseWindow('capture')}>{#if captureContent}{@render captureContent()}{/if}</Window>{/if}
 {#if mountedWindows.analysis}<Window windowId="analysis" {...shell('analysis')} minWidth={340} minHeight={360} title="Structural Analysis" focused={shell('analysis').active} hidden={!shell('analysis').visible} onclose={() => onCloseWindow('analysis')}>{#if analysisContent}{@render analysisContent()}{/if}</Window>{/if}

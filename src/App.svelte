@@ -1742,6 +1742,7 @@ import {
   let drawingOverlay = $state<DrawingOverlayHandle | null>(null);
   let overlayActionsEl = $state<HTMLElement | null>(null);
   let genieSafeRightInset = $state(360);
+  let workbenchBottomInset = $state(0);
   let drawingOverlayDirty = $state(false);
   let viewportAreaEl = $state<HTMLElement | null>(null);
   let hiddenViewerSpec = $state<HiddenViewerSpec | null>(null);
@@ -1763,6 +1764,7 @@ import {
     const workbenchActive = $currentView === 'workbench';
     if (!overlayActionsEl || !workbenchActive || typeof ResizeObserver === 'undefined' || typeof window === 'undefined') {
       genieSafeRightInset = 360;
+      workbenchBottomInset = 0;
       setWindowSafeInsets({});
       return;
     }
@@ -1771,9 +1773,8 @@ import {
       const dockRect = overlayActionsEl?.getBoundingClientRect();
       const width = dockRect?.width ?? 0;
       genieSafeRightInset = Math.max(220, Math.ceil(width) + 28);
-      setWindowSafeInsets({
-        bottom: dockRect ? Math.ceil(window.innerHeight - dockRect.top + 8) : 0,
-      });
+      workbenchBottomInset = dockRect ? Math.ceil(window.innerHeight - dockRect.top + 8) : 0;
+      setWindowSafeInsets({ bottom: workbenchBottomInset });
       fitVisibleWindowsToViewport({
         width: window.innerWidth,
         height: window.innerHeight,
@@ -5836,6 +5837,7 @@ import {
       sketch: $windowStore.sketch,
     }}
     {mountedWindows}
+    {workbenchBottomInset}
     highlightTarget={$onboarding.highlightTarget}
     {drawMode}
     canDraw={selectedModelCapabilities.supportsVision}
