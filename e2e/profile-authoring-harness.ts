@@ -4,6 +4,9 @@ import { readFile } from 'node:fs/promises';
 type ProfileMockOptions = {
   deriveMode?: 'success' | 'pending-error';
   failedProjectionView?: 'front' | 'top' | 'side';
+  failedProfileView?: 'front' | 'top' | 'side';
+  structuredProjectionError?: boolean;
+  nativeProjectionDirectory?: string;
   missingArtifact?: boolean;
   applyMode?: 'success' | 'render-error' | 'validation-error';
   drawingMode?: 'success' | 'recognition-error' | 'review-error';
@@ -14,6 +17,12 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
     readFile(new URL('./fixtures/plate-drawing-source.png', import.meta.url)),
     readFile(new URL('./fixtures/plate-drawing-preview.png', import.meta.url)),
   ]);
+  const nativeProjectionEntries = options.nativeProjectionDirectory
+    ? await Promise.all((['front', 'top', 'side'] as const).map(async (view) => {
+      const raw = await readFile(`${options.nativeProjectionDirectory}/${view}/final2/display-edges.json`, 'utf8');
+      return [view, JSON.parse(raw) as { displayEdges: number[][][]; warnings?: string[] }] as const;
+    }))
+    : [];
   const images = {
     source: `data:image/png;base64,${sourceImage.toString('base64')}`,
     transformed: `data:image/png;base64,${transformedPreview.toString('base64')}`,
@@ -21,6 +30,7 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
   await page.addInitScript((payload) => {
     const mockOptions = payload.options;
     const imageDataUrls = payload.images;
+    const nativeProjectionByView = Object.fromEntries(payload.nativeProjectionEntries ?? []) as Record<string, { displayEdges: number[][][]; warnings?: string[] }>;
     const design = {
       title: 'Flange fixture',
       versionName: 'V1',
@@ -124,6 +134,7 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
     const messages = [version];
     const mock = {
       deriveCalls: [] as Array<Record<string, unknown>>,
+      projectionDrawingCalls: [] as Array<Record<string, unknown>>,
       applyCalls: [] as Array<Record<string, unknown>>,
       projectionRequests: [] as Array<Record<string, unknown>>,
       historyRefreshes: [] as Array<Record<string, unknown>>,
@@ -277,14 +288,44 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
           diagnostics: [],
         };
       }
+      if (command === 'project_profile_drawing') {
+        const request = args?.request ?? {};
+        mock.projectionDrawingCalls.push(request);
+        if (mockOptions.failedProjectionView === request.view) {
+          if (mockOptions.structuredProjectionError) {
+            throw {
+              code: 'render',
+              message: 'Could not create exact projection.',
+              details: 'No visible projection edges were returned. view=side op=projection',
+            };
+          }
+          throw new Error(`Mock ${request.view} drawing projection failed.`);
+        }
+        const fixtureDisplayEdges = request.view === 'front'
+          ? [[[-14, -6], [14, -6]], [[14, -6], [14, 6]], [[14, 6], [-14, 6]], [[-14, 6], [-14, -6]]]
+          : request.view === 'side'
+            ? [[[-4, -14], [4, -14]], [[4, -14], [4, 14]], [[4, 14], [-4, 14]], [[-4, 14], [-4, -14]]]
+            : [[[-10, -10], [10, -10]], [[10, -10], [10, 10]], [[10, 10], [-10, 10]], [[-10, 10], [-10, -10]]];
+        const nativeProjection = nativeProjectionByView[request.view];
+        return {
+          sourceArtifactPath: request.artifactPath,
+          sourceArtifactDigest: 'sha256:profile-source',
+          view: request.view,
+          toleranceMm: request.toleranceMm,
+          units: 'mm',
+          projectionAsset: { artifactPath: `/mock/profile-projections/${request.view}.step`, artifactDigest: `sha256:projection-${request.view}` },
+          displayEdges: nativeProjection?.displayEdges ?? fixtureDisplayEdges,
+          warnings: nativeProjection?.warnings ?? [],
+        };
+      }
       if (command === 'derive_profile_geometry') {
         const request = args?.request ?? {};
         mock.deriveCalls.push(request);
         if (mockOptions.deriveMode === 'pending-error') {
           return new Promise((_resolve, reject) => pendingDerivationRejectors.push(reject));
         }
-        if (request.operation.kind === 'projection' && mockOptions.failedProjectionView === request.operation.view) {
-          throw new Error(`Mock ${request.operation.view} projection failed.`);
+        if (request.operation.kind === 'projection' && mockOptions.failedProfileView === request.operation.view) {
+          throw new Error(`Mock ${request.operation.view} closed profile failed.`);
         }
         return {
           sourceArtifactPath: request.artifactPath,
@@ -383,7 +424,7 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
       if (command === 'list_capture_runs') return [];
       return null;
     };
-  }, { options, images });
+  }, { options, images, nativeProjectionEntries });
 }
 
 export async function openSketch(page: Page, allThree = true) {

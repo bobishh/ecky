@@ -77,13 +77,21 @@ test('approximate mesh section uses STL and submits editable loops with approxim
   });
 });
 
-test('exact projection requires explicit conversion before sampled loops can be edited or applied', async ({ page }) => {
+test('exact projected edges stay open until a closed profile is built', async ({ page }) => {
   await installProfileMocks(page);
   const workspace = await openSketch(page);
 
   await workspace.getByLabel('Derivation mode').selectOption('exactProjection');
   await workspace.getByRole('button', { name: 'Project all three views' }).click();
-  await expect(workspace.getByTestId('profile-view-front').locator('polygon.outer')).toBeVisible();
+  const front = workspace.getByTestId('profile-view-front');
+  await expect(front.locator('polyline.projected-edge')).toHaveCount(4);
+  await expect(front.locator('polygon.outer')).toHaveCount(0);
+  await expect(workspace.getByText('EXACT CAD PROJECTION', { exact: true })).toBeVisible();
+  await expect(workspace.getByRole('button', { name: 'Apply profile' })).toBeDisabled();
+  await expect(workspace.getByRole('button', { name: 'Build closed profile' })).toBeEnabled();
+
+  await workspace.getByRole('button', { name: 'Build closed profile' }).click();
+  await expect(front.locator('polygon.outer')).toBeVisible();
   await expect(workspace.getByText('EXACT CAD PROFILE', { exact: true })).toBeVisible();
   await expect(workspace.getByRole('button', { name: 'Convert to editable approximate polygon' })).toBeVisible();
   await expect(workspace.locator('circle.vertex-handle')).toHaveCount(0);
@@ -104,21 +112,30 @@ test('exact projection requires explicit conversion before sampled loops can be 
   });
 });
 
-test('one exact projection action fills front, top, and side views; selected top view applies to same project', async ({ page }) => {
+test('one exact projection action fills all views; selected top builds and applies a closed profile', async ({ page }) => {
   await installProfileMocks(page);
   const workspace = await openSketch(page);
 
+  await workspace.getByRole('button', { name: 'All three views', exact: true }).click();
   await expect(workspace.getByTestId('profile-projection-views').getByTestId('profile-view-front')).toBeVisible();
   await expect(workspace.getByTestId('profile-projection-views').getByTestId('profile-view-top')).toBeVisible();
   await expect(workspace.getByTestId('profile-projection-views').getByTestId('profile-view-side')).toBeVisible();
   await workspace.getByRole('button', { name: 'Project all three views' }).click();
-  await expect(workspace.getByTestId('profile-view-front').locator('polygon.outer')).toBeVisible();
-  await expect(workspace.getByTestId('profile-view-top').locator('polygon.hole')).toHaveCount(1);
-  await expect(workspace.getByTestId('profile-view-side').locator('polygon.outer')).toBeVisible();
-  await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.deriveCalls.length === 3);
-  const deriveCalls = await page.evaluate(() => (window as any).__PROFILE_AUTHORING__.deriveCalls);
-  expect(deriveCalls.map((call: any) => call.operation.view).sort()).toEqual(['front', 'side', 'top']);
+  for (const view of ['front', 'top', 'side']) {
+    await expect(workspace.getByTestId(`profile-view-${view}`).locator('polyline.projected-edge')).toHaveCount(4);
+    await expect(workspace.getByTestId(`profile-view-${view}`).locator('polygon.outer')).toHaveCount(0);
+  }
+  await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.projectionDrawingCalls.length === 3);
+  const drawingCalls = await page.evaluate(() => (window as any).__PROFILE_AUTHORING__.projectionDrawingCalls);
+  expect(drawingCalls.map((call: any) => call.view).sort()).toEqual(['front', 'side', 'top']);
+  await expect(workspace.getByRole('button', { name: 'Apply profile' })).toBeDisabled();
   await workspace.getByRole('button', { name: 'Select top projection' }).click();
+  await workspace.getByRole('button', { name: 'Build closed profile' }).click();
+  await expect(workspace.getByTestId('profile-view-top').locator('polygon.hole')).toHaveCount(1);
+  await expect(workspace.getByTestId('profile-view-top').locator('polyline.projected-edge')).toHaveCount(4);
+  await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.deriveCalls.length === 1);
+  const deriveCalls = await page.evaluate(() => (window as any).__PROFILE_AUTHORING__.deriveCalls);
+  expect(deriveCalls[0].operation).toEqual({ kind: 'projection', view: 'top' });
   await expect(workspace.getByRole('button', { name: 'Select top projection' })).toHaveAttribute('aria-pressed', 'true');
   if (process.env.PROFILE_AUTHORING_SCREENSHOT_PATH) {
     const dismiss = page.getByRole('button', { name: 'DISMISS' });
@@ -146,14 +163,33 @@ test('one exact projection action fills front, top, and side views; selected top
   await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.projectionRequests.some((request: any) => request.preferredMessageId === 'profile-version-2'));
 });
 
+test('native STEP projection output renders independently in front, top, and side', async ({ page }) => {
+  const nativeProjectionDirectory = process.env.PROFILE_AUTHORING_NATIVE_OUTPUTS_DIR;
+  test.skip(!nativeProjectionDirectory, 'Set PROFILE_AUTHORING_NATIVE_OUTPUTS_DIR to inspect saved native STEP projection output.');
+  await installProfileMocks(page, { nativeProjectionDirectory });
+  const workspace = await openSketch(page);
+  await workspace.getByRole('button', { name: 'All three views', exact: true }).click();
+  await workspace.getByRole('button', { name: 'Project all three views' }).click();
+
+  for (const view of ['front', 'top', 'side']) {
+    await expect(workspace.getByTestId(`profile-view-${view}`).locator('polyline.projected-edge').first()).toHaveCount(1);
+    await expect(workspace.getByTestId(`profile-view-${view}`).locator('polygon.outer')).toHaveCount(0);
+  }
+  if (process.env.PROFILE_AUTHORING_PROJECTION_SCREENSHOT_PATH) {
+    await page.screenshot({ path: process.env.PROFILE_AUTHORING_PROJECTION_SCREENSHOT_PATH, fullPage: true });
+  }
+});
+
 test('selecting SIDE applies side projection on YZ plane', async ({ page }) => {
   await installProfileMocks(page);
   const workspace = await openSketch(page);
 
   await workspace.getByRole('button', { name: 'Project all three views' }).click();
-  await expect(workspace.getByTestId('profile-view-side').locator('polygon.outer')).toBeVisible();
+  await expect(workspace.getByTestId('profile-view-side').locator('polyline.projected-edge')).toHaveCount(4);
   await workspace.getByRole('button', { name: 'Select side projection' }).click();
   await expect(workspace.getByLabel('Profile plane', { exact: true })).toHaveValue('yz');
+  await workspace.getByRole('button', { name: 'Build closed profile' }).click();
+  await expect(workspace.getByTestId('profile-view-side').locator('polygon.outer')).toBeVisible();
   await workspace.getByRole('button', { name: 'Apply profile' }).click();
 
   await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.applyCalls.length === 1);
@@ -163,21 +199,47 @@ test('selecting SIDE applies side projection on YZ plane', async ({ page }) => {
   expect(applyCall.reference.profileAsset.artifactPath).toBe('/mock/profile-assets/side.step');
 });
 
-test('one failed view does not discard successful projections or block applying another view', async ({ page }) => {
+test('one failed drawing projection does not discard successful view drawings', async ({ page }) => {
   await installProfileMocks(page, { failedProjectionView: 'side' });
   const workspace = await openSketch(page);
 
+  await workspace.getByRole('button', { name: 'All three views', exact: true }).click();
   await workspace.getByRole('button', { name: 'Project all three views' }).click();
-  await expect(workspace.getByTestId('profile-view-front').locator('polygon.outer')).toBeVisible();
-  await expect(workspace.getByTestId('profile-view-top').locator('polygon.outer')).toBeVisible();
-  await expect(workspace.getByTestId('profile-view-side')).toContainText('Mock side projection failed.');
-  await workspace.getByRole('button', { name: 'Select top projection' }).click();
-  await workspace.getByRole('button', { name: 'Apply profile' }).click();
+  await expect(workspace.getByTestId('profile-view-front').locator('polyline.projected-edge')).toHaveCount(4);
+  await expect(workspace.getByTestId('profile-view-top').locator('polyline.projected-edge')).toHaveCount(4);
+  await expect(workspace.getByTestId('profile-view-side')).toContainText('Mock side drawing projection failed.');
+  await expect(workspace.getByTestId('profile-view-side').locator('polyline.projected-edge')).toHaveCount(0);
+  await expect(workspace.getByRole('button', { name: 'Apply profile' })).toBeDisabled();
+});
 
-  await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.applyCalls.length === 1);
-  const applyCall = await page.evaluate(() => (window as any).__PROFILE_AUTHORING__.applyCalls[0]);
-  expect(applyCall.reference.operation).toEqual({ kind: 'projection', view: 'top' });
-  expect(applyCall.loops).toBeUndefined();
+test('closed-profile failure keeps selected view drawing and does not enable Apply', async ({ page }) => {
+  await installProfileMocks(page, { failedProfileView: 'top' });
+  const workspace = await openSketch(page);
+  await workspace.getByRole('button', { name: 'Project all three views' }).click();
+  await workspace.getByRole('button', { name: 'Select top projection' }).click();
+  const top = workspace.getByTestId('profile-view-top');
+  await expect(top.locator('polyline.projected-edge')).toHaveCount(4);
+
+  await workspace.getByRole('button', { name: 'Build closed profile' }).click();
+  await expect(top.locator('polyline.projected-edge')).toHaveCount(4);
+  await expect(top).toContainText('Mock top closed profile failed.');
+  await expect(top.locator('polygon.outer')).toHaveCount(0);
+  await expect(workspace.getByRole('button', { name: 'Apply profile' })).toBeDisabled();
+});
+
+test('structured projection errors show backend details in the pane and workspace status', async ({ page }) => {
+  await installProfileMocks(page, { failedProjectionView: 'side', structuredProjectionError: true });
+  const workspace = await openSketch(page);
+
+  await workspace.getByRole('button', { name: 'All three views', exact: true }).click();
+  await workspace.getByRole('button', { name: 'Project all three views' }).click();
+  const pane = workspace.getByTestId('profile-view-side');
+  await expect(pane).toContainText('Could not create exact projection.');
+  await expect(pane).toContainText('No visible projection edges were returned.');
+  await expect(pane).toContainText('view=side');
+  await expect(workspace.getByTestId('profile-status')).toContainText('Could not create exact projection.');
+  await expect(workspace.getByTestId('profile-status')).toContainText('No visible projection edges were returned.');
+  await expect(pane).not.toContainText('[object Object]');
 });
 
 test('pending derivation failure keeps the manual profile and fixed controls visible', async ({ page }) => {

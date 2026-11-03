@@ -1050,6 +1050,27 @@ void given_native_profile_derivation_when_sectioned_or_projected_then_exact_loop
     const fs::path ring_step = root / "annular-tube.step";
     write_step_file(ring_step, {ring_cut.Shape()});
 
+    const fs::path drawing_projection = root / "drawing-projection-top";
+    project_exact_drawing(ProfileDrawingRequest{ring_step, "top", 0.05}, drawing_projection);
+    const std::string drawing_preview = [&]() {
+        std::ifstream file(drawing_projection / "display-edges.json");
+        return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    }();
+    assert(drawing_preview.find("\"displayEdges\":[[") != std::string::npos);
+    const std::vector<double> drawing_radii = circular_edge_radii(
+        read_step(drawing_projection / "projection.step"));
+    assert(std::any_of(drawing_radii.begin(), drawing_radii.end(), [](double radius) {
+        return std::abs(radius - 12.0) < 1.0e-6;
+    }));
+    assert(std::any_of(drawing_radii.begin(), drawing_radii.end(), [](double radius) {
+        return std::abs(radius - 4.0) < 1.0e-6;
+    }));
+
+    auto ring_projection_solids = profile_projection_solids(ring_cut.Shape(), 1.0e-7);
+    assert(profile_projection_ray_hits_solids(ring_projection_solids, 8.0, 0.0, 1.0e-7));
+    assert(!profile_projection_ray_hits_solids(ring_projection_solids, 0.0, 0.0, 1.0e-7));
+    assert(!profile_projection_ray_hits_solids(ring_projection_solids, 20.0, 0.0, 1.0e-7));
+
     const fs::path xy = derive(ring_step, "section", "xy", 3.0, "section-xy");
     const std::string xy_report = loop_report(xy);
     assert(role_count(xy_report, "outer") == 1);
@@ -1130,6 +1151,32 @@ void given_native_profile_derivation_when_sectioned_or_projected_then_exact_loop
     }
     assert(compound_face_count == 2);
 
+    BRep_Builder overlapping_builder;
+    TopoDS_Compound overlapping_boxes;
+    overlapping_builder.MakeCompound(overlapping_boxes);
+    overlapping_builder.Add(overlapping_boxes,
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 10, 10, 8).Shape());
+    overlapping_builder.Add(overlapping_boxes,
+        BRepPrimAPI_MakeBox(gp_Pnt(5, 0, 0), 10, 10, 8).Shape());
+    const fs::path overlapping_step = root / "overlapping-boxes.step";
+    write_step_file(overlapping_step, {overlapping_boxes});
+    const fs::path overlapping_projection = derive(
+        overlapping_step, "projection", "top", 0.0, "projection-overlapping-boxes");
+    const std::string overlapping_report = loop_report(overlapping_projection);
+    assert(role_count(overlapping_report, "outer") == 1);
+    assert(role_count(overlapping_report, "hole") == 0);
+    const TopoDS_Shape overlapping_profile = read_step(overlapping_projection / "profile.step");
+    std::size_t overlapping_face_count = 0;
+    for (TopExp_Explorer faces(overlapping_profile, TopAbs_FACE); faces.More(); faces.Next()) {
+        ++overlapping_face_count;
+    }
+    assert(overlapping_face_count == 1);
+    const std::array<double, 6> overlapping_bounds = shape_bounds(overlapping_profile);
+    assert(std::abs(overlapping_bounds[0]) < 1.0e-6);
+    assert(std::abs(overlapping_bounds[3] - 15.0) < 1.0e-6);
+    assert(std::abs(overlapping_bounds[1]) < 1.0e-6);
+    assert(std::abs(overlapping_bounds[4] - 10.0) < 1.0e-6);
+
     ExecutionContext context;
     const Command import_profile = command(
         1, "import-profile", {text_arg((compound_projection / "profile.step").string())});
@@ -1175,6 +1222,30 @@ void given_native_profile_derivation_when_sectioned_or_projected_then_exact_loop
     fs::remove_all(root);
 }
 
+void given_overlapping_exact_projection_edges_when_arranged_then_curves_split_and_deduplicate() {
+    const TopoDS_Edge first = BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 0), gp_Pnt(10, 0, 0)).Edge();
+    const TopoDS_Edge overlap = BRepBuilderAPI_MakeEdge(gp_Pnt(5, 0, 0), gp_Pnt(15, 0, 0)).Edge();
+    BOPAlgo_Builder arrangement;
+    arrangement.SetNonDestructive(Standard_True);
+    arrangement.AddArgument(first);
+    arrangement.AddArgument(overlap);
+    arrangement.Perform();
+    assert(!arrangement.HasErrors());
+    TopTools_IndexedMapOfShape arranged;
+    TopExp::MapShapes(arrangement.Shape(), TopAbs_EDGE, arranged);
+    assert(arranged.Extent() == 3);
+    std::vector<double> lengths;
+    for (int index = 1; index <= arranged.Extent(); ++index) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(arranged(index)));
+        lengths.push_back(std::abs(curve.LastParameter() - curve.FirstParameter()));
+    }
+    std::sort(lengths.begin(), lengths.end());
+    assert(lengths.size() == 3);
+    assert(std::abs(lengths[0] - 5.0) < 1.0e-7);
+    assert(std::abs(lengths[1] - 5.0) < 1.0e-7);
+    assert(std::abs(lengths[2] - 5.0) < 1.0e-7);
+}
+
 }  // namespace
 
 int main() {
@@ -1200,5 +1271,6 @@ int main() {
     given_boolean_cutter_when_face_is_generated_then_authored_support_surface_survives();
     given_fused_capsule_cutter_when_cut_repeats_then_authored_faces_survive();
     given_annular_profile_when_offset_positive_or_negative_then_both_boundaries_move_and_hole_survives();
+    given_overlapping_exact_projection_edges_when_arranged_then_curves_split_and_deduplicate();
     given_native_profile_derivation_when_sectioned_or_projected_then_exact_loops_respect_material_occupancy();
 }

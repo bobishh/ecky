@@ -10,10 +10,13 @@
     finishProfileViewRequest,
     profileReferenceForApply,
     profilePointFromPointer,
+    profileDrawingBounds,
     removeProfileLoop,
     type ProfileApplyInput,
     type ProfileApplyOutcome,
     type ProfileDeriveInput,
+    type ProfileDrawingInput,
+    type ProfileDrawingProjectionResponse,
     type ProfileGeometryOperation,
     type ProfileLoop,
     type ProfileLoopRole,
@@ -42,6 +45,7 @@
     PreparedDrawingImage,
     ReviewDrawingProfileRequest,
   } from './tauri/contracts';
+  import { formatBackendError } from './tauri/client';
 
   type ProfileView = 'front' | 'top' | 'side';
   type PaneCamera = { zoom: number; centerX: number; centerY: number };
@@ -97,6 +101,7 @@
     sourceAccuracyHint?: string | null;
     disabledReason?: string | null;
     onDerive: (input: ProfileDeriveInput) => Promise<ProfileGeometryResponse>;
+    onProjectDrawing: (input: ProfileDrawingInput) => Promise<ProfileDrawingProjectionResponse>;
     onApply: (input: ProfileApplyInput) => Promise<ProfileApplyOutcome>;
     onChooseDrawing: () => Promise<PreparedDrawingImage | null>;
     onRecognizeDrawing: (input: DrawingRecognitionRequest) => Promise<DrawingRecognitionResponse>;
@@ -110,6 +115,7 @@
     sourceAccuracyHint = null,
     disabledReason = null,
     onDerive,
+    onProjectDrawing,
     onApply,
     onChooseDrawing,
     onRecognizeDrawing,
@@ -120,7 +126,8 @@
     front: createProfileEditor(''), top: createProfileEditor(''), side: createProfileEditor(''),
   });
   let geometryEvidence = $state<Record<ProfileView, { scopeKey: string; response: ProfileGeometryResponse } | null>>({ front: null, top: null, side: null });
-  let viewPending = $state<Record<ProfileView, { scopeKey: string; requestId: number } | null>>({ front: null, top: null, side: null });
+  let projectionDrawings = $state<Record<ProfileView, { scopeKey: string; response: ProfileDrawingProjectionResponse } | null>>({ front: null, top: null, side: null });
+  let viewPending = $state<Record<ProfileView, { scopeKey: string; requestId: number; kind: 'drawing' | 'profile' } | null>>({ front: null, top: null, side: null });
   let viewErrors = $state<Record<ProfileView, { scopeKey: string; message: string } | null>>({ front: null, top: null, side: null });
   let selectedView = $state<ProfileView>('front');
   let paneCameras = $state<Record<ProfileView, PaneCamera>>({ front: { zoom: 4, centerX: 0, centerY: 0 }, top: { zoom: 4, centerX: 0, centerY: 0 }, side: { zoom: 4, centerX: 0, centerY: 0 } });
@@ -189,6 +196,7 @@
   let currentPhoto = $derived(photoStates[selectedView]?.scopeKey === scopeKey ? photoStates[selectedView] : null);
   let photoDrawing = $derived(Boolean(currentPhoto?.drawing));
   let currentEvidence = $derived(currentPhoto?.recognition ? null : geometryEvidence[selectedView]?.scopeKey === scopeKey ? geometryEvidence[selectedView]?.response ?? null : null);
+  let currentProjectionDrawing = $derived(projectionDrawingForView(selectedView));
   let acceptedPhotoPrimitives = $derived(currentPhoto?.accepted && currentPhoto.recognition
     ? drawingCandidatesForApply(currentPhoto.profiles, currentPhoto.selectedProfileIds, currentPhoto.primitives)
     : null);
@@ -299,6 +307,7 @@
   let applyDisabled = $derived(
     Boolean(disabledReason)
       || currentPending !== null
+      || viewPendingFor(selectedView)
       || drawing
       || photoDrawing
       || (!photoProfileReady && loopError !== null)
@@ -354,6 +363,11 @@
 
   function viewPendingFor(view: ProfileView): boolean {
     return viewPending[view]?.scopeKey === scopeKey;
+  }
+
+  function viewPendingKindFor(view: ProfileView): 'drawing' | 'profile' | null {
+    const pendingView = viewPending[view];
+    return pendingView?.scopeKey === scopeKey ? pendingView.kind : null;
   }
 
   function viewErrorFor(view: ProfileView): string {
@@ -433,7 +447,7 @@
       setStatus(`Photo assigned to ${view.toUpperCase()}. Drag to crop, then set its scale.`);
     } catch (error) {
       if (requestScope === scopeKey && requestId === photoImportRequestId) {
-        setError(error instanceof Error ? error.message : String(error));
+        setError(formatBackendError(error));
         setStatus('Drawing photo could not be opened. Current profiles remain available.');
       }
     } finally {
@@ -639,8 +653,8 @@
         : 'No closed profile candidates found. Adjust the crop or repair the linework.');
     } catch (error) {
       if (requestScope === scopeKey && photoRequestIds[view] === requestId) {
-        updatePhoto(view, { pending: false, error: error instanceof Error ? error.message : String(error) }, false);
-        setError(error instanceof Error ? error.message : String(error));
+        updatePhoto(view, { pending: false, error: formatBackendError(error) }, false);
+        setError(formatBackendError(error));
         setStatus(`${view.toUpperCase()} recognition failed. Other views remain available.`);
       }
     } finally {
@@ -698,8 +712,8 @@
           : 'No closed profile remains. Correct the linework or select a different image region.');
       } catch (error) {
         if (requestScope === scopeKey && photoRequestIds[view] === requestId) {
-          updatePhoto(view, { pending: false, error: error instanceof Error ? error.message : String(error) }, false);
-          setError(error instanceof Error ? error.message : String(error));
+          updatePhoto(view, { pending: false, error: formatBackendError(error) }, false);
+          setError(formatBackendError(error));
           setStatus('Contour review failed. Your edits remain available.');
         }
       } finally {
@@ -817,10 +831,7 @@
 
   async function deriveProfile(): Promise<void> {
     if (!deriveAvailable || currentPending || drawing) return;
-    if (deriveMode === 'exactProjection') {
-      await deriveAllProjections();
-      return;
-    }
+    if (deriveMode === 'exactProjection') return;
     let offsetMm = 0;
     const parsedOffset = finiteValue(sectionOffset, 'Section offset');
     if (parsedOffset === null) return;
@@ -873,7 +884,7 @@
           : 'Section contained no closed profile loops.');
     } catch (error) {
       if (profileRequestIsCurrent(requestScope, requestId, scopeKey, activeRequestId)) {
-        setError(error instanceof Error ? error.message : String(error));
+        setError(formatBackendError(error));
         setStatus('Profile derivation failed. Current profile remains available.');
       }
     } finally {
@@ -885,7 +896,7 @@
     }
   }
 
-  async function deriveAllProjections(): Promise<void> {
+  async function projectAllDrawings(): Promise<void> {
     const toleranceMm = finiteValue(tolerance, 'Tolerance');
     if (toleranceMm === null) return;
     if (toleranceMm <= 0) {
@@ -898,29 +909,17 @@
     const tasks = PROFILE_VIEWS.map(async (view) => {
       const requestId = ++requestSequence;
       viewRequestIds = { ...viewRequestIds, [view]: requestId };
-      viewPending = { ...viewPending, [view]: { scopeKey: requestScope, requestId } };
+      viewPending = { ...viewPending, [view]: { scopeKey: requestScope, requestId, kind: 'drawing' } };
       viewErrors = { ...viewErrors, [view]: { scopeKey: requestScope, message: '' } };
       try {
-        const response = await onDerive({
-          operation: { kind: 'projection', view },
-          toleranceMm,
-          source: 'step',
-        });
+        const response = await onProjectDrawing({ view, toleranceMm });
         if (requestScope !== scopeKey || viewRequestIds[view] !== requestId) return;
-        geometryEvidence = { ...geometryEvidence, [view]: { scopeKey: requestScope, response } };
-        const placement = profilePlacementForOperation(response.operation);
-        profileEdits = {
-          ...profileEdits,
-          [view]: {
-            ...createProfileEditor(requestScope),
-            placementPlane: placement.plane,
-            placementOffset: String(placement.offsetMm),
-          },
-        };
+        projectionDrawings = { ...projectionDrawings, [view]: { scopeKey: requestScope, response } };
+        viewErrors = { ...viewErrors, [view]: null };
         resetPaneCamera(view);
       } catch (error) {
         if (requestScope === scopeKey && viewRequestIds[view] === requestId) {
-          viewErrors = { ...viewErrors, [view]: { scopeKey: requestScope, message: error instanceof Error ? error.message : String(error) } };
+          viewErrors = { ...viewErrors, [view]: { scopeKey: requestScope, message: formatBackendError(error) } };
         }
       } finally {
         if (viewRequestIds[view] === requestId) {
@@ -931,7 +930,75 @@
     await Promise.all(tasks);
     if (requestScope === scopeKey) {
       const failed = PROFILE_VIEWS.filter((view) => Boolean(viewErrorFor(view)));
-      setStatus(failed.length ? `${3 - failed.length} of 3 projections ready; failed views remain available for retry.` : 'Front, top, and side projections ready.');
+      if (failed.length > 0) {
+        setError(failed.map((view) => `${view.toUpperCase()}: ${viewErrorFor(view)}`).join('\n'));
+      }
+      setStatus(failed.length ? `${3 - failed.length} of 3 projections ready; failed views remain available for retry.` : 'Front, top, and side projected drawings ready. Build a closed profile in a view before applying it.');
+    }
+  }
+
+  async function buildClosedProfile(): Promise<void> {
+    const drawing = projectionDrawingForView(selectedView);
+    if (!drawing || photoForView(selectedView) || !exactCadAvailable || currentPending !== null || currentViewsPending) return;
+    const toleranceMm = finiteValue(tolerance, 'Tolerance');
+    if (toleranceMm === null) return;
+    if (toleranceMm <= 0) {
+      setError('Tolerance must be greater than zero.');
+      return;
+    }
+    const view = selectedView;
+    const requestScope = scopeKey;
+    const requestId = ++requestSequence;
+    activeRequestId = requestId;
+    pendingScopeKey = requestScope;
+    pending = 'section';
+    viewRequestIds = { ...viewRequestIds, [view]: requestId };
+    viewPending = { ...viewPending, [view]: { scopeKey: requestScope, requestId, kind: 'profile' } };
+    viewErrors = { ...viewErrors, [view]: null };
+    setError('');
+    setStatus(`Building a closed ${view.toUpperCase()} profile from the current model…`);
+    try {
+      const response = await onDerive({
+        operation: { kind: 'projection', view },
+        toleranceMm,
+        source: 'step',
+      });
+      if (!profileRequestIsCurrent(requestScope, requestId, scopeKey, activeRequestId)
+        || viewRequestIds[view] !== requestId) return;
+      geometryEvidence = { ...geometryEvidence, [view]: { scopeKey: requestScope, response } };
+      const placement = profilePlacementForOperation(response.operation);
+      const loops = response.accuracy === 'exactBrep' && response.profileAsset ? [] : response.loops;
+      const outerIndex = loops.findIndex((loop) => loop.role === 'outer');
+      profileEdits = {
+        ...profileEdits,
+        [view]: {
+          ...createProfileEditor(requestScope),
+          loops: normalizeProfileLoops(loops),
+          selectedLoopIndex: Math.max(0, outerIndex),
+          placementPlane: placement.plane,
+          placementOffset: String(placement.offsetMm),
+        },
+      };
+      resetPaneCamera(view);
+      setError('');
+      setStatus(`Exact ${view.toUpperCase()} closed profile ready. Projected drawing remains visible.`);
+    } catch (error) {
+      if (profileRequestIsCurrent(requestScope, requestId, scopeKey, activeRequestId)
+        && viewRequestIds[view] === requestId) {
+        const message = formatBackendError(error);
+        viewErrors = { ...viewErrors, [view]: { scopeKey: requestScope, message } };
+        setError(message);
+        setStatus(`Could not build a closed ${view.toUpperCase()} profile. Projected drawing remains available.`);
+      }
+    } finally {
+      if (viewRequestIds[view] === requestId) {
+        viewPending = { ...viewPending, [view]: finishProfileViewRequest(viewPending[view], requestId) };
+      }
+      if (activeRequestId === requestId) {
+        pending = null;
+        pendingScopeKey = null;
+        activeRequestId = null;
+      }
     }
   }
 
@@ -1117,9 +1184,19 @@
     }
     if (photo) return { minX: 0, minY: 0, width: photo.prepared.image.widthPx, height: photo.prepared.image.heightPx };
     const evidence = geometryEvidence[view]?.scopeKey === scopeKey ? geometryEvidence[view]?.response : null;
-    if (evidence) return profileBounds(evidence.loops);
-    const loops = view === selectedView ? currentLoops : profileEditorFor(view).loops;
-    if (loops.length) return profileBounds(loops);
+    const loops = evidence?.loops ?? (view === selectedView ? currentLoops : profileEditorFor(view).loops);
+    const profileBoundsForView = loops.length ? profileBounds(loops) : null;
+    const drawing = projectionDrawingForView(view);
+    const drawingBoundsForView = drawing ? profileDrawingBounds(drawing.displayEdges) : null;
+    if (profileBoundsForView && drawingBoundsForView) {
+      const minX = Math.min(profileBoundsForView.minX, drawingBoundsForView.minX);
+      const minY = Math.min(profileBoundsForView.minY, drawingBoundsForView.minY);
+      const maxX = Math.max(profileBoundsForView.minX + profileBoundsForView.width, drawingBoundsForView.minX + drawingBoundsForView.width);
+      const maxY = Math.max(profileBoundsForView.minY + profileBoundsForView.height, drawingBoundsForView.minY + drawingBoundsForView.height);
+      return { minX, minY, width: maxX - minX, height: maxY - minY };
+    }
+    if (profileBoundsForView) return profileBoundsForView;
+    if (drawingBoundsForView) return drawingBoundsForView;
     return { minX: -50, minY: -50, width: 100, height: 100 };
   }
 
@@ -1200,6 +1277,11 @@
 
   function evidenceForView(view: ProfileView): ProfileGeometryResponse | null {
     return geometryEvidence[view]?.scopeKey === scopeKey ? geometryEvidence[view]?.response ?? null : null;
+  }
+
+  function projectionDrawingForView(view: ProfileView): ProfileDrawingProjectionResponse | null {
+    const drawing = projectionDrawings[view];
+    return drawing?.scopeKey === scopeKey ? drawing.response : null;
   }
 
   function exactView(view: ProfileView): boolean {
@@ -1366,7 +1448,7 @@
       }
     } catch (error) {
       if (profileRequestIsCurrent(requestScope, requestId, scopeKey, activeRequestId)) {
-        setError(error instanceof Error ? error.message : String(error));
+        setError(formatBackendError(error));
         setStatus('Profile could not be saved. Your edits remain available.');
       }
     } finally {
@@ -1413,17 +1495,27 @@
           Tolerance (mm)
           <input aria-label="Tolerance (mm)" type="number" min="0.001" step="0.1" bind:value={tolerance} disabled={currentPending !== null} />
         </label>
-        <button class="action-button action-button--secondary" type="button" onclick={deriveProfile} disabled={!deriveAvailable || currentPending !== null || drawing || currentViewsPending}>
-          {deriveMode === 'exactProjection' && currentViewsPending
-            ? 'Projecting…'
-            : currentPending === 'section'
-            ? 'Deriving…'
-            : deriveMode === 'exactProjection'
-              ? 'Project all three views'
+        {#if deriveMode === 'exactProjection'}
+          <button class="action-button action-button--secondary" type="button" onclick={projectAllDrawings} disabled={!deriveAvailable || currentPending !== null || drawing || currentViewsPending}>
+            {currentViewsPending ? 'Projecting…' : 'Project all three views'}
+          </button>
+          {#if currentProjectionDrawing && !currentPhoto}
+            <button class="action-button action-button--secondary" type="button" onclick={buildClosedProfile} disabled={!deriveAvailable || currentPending !== null || drawing || currentViewsPending}>
+              {viewPendingKindFor(selectedView) === 'profile' ? 'Building profile…' : 'Build closed profile'}
+            </button>
+            <p class="inline-hint">Projected edges are view-only. Build a closed profile before applying.</p>
+          {:else if currentProjectionDrawing && currentPhoto}
+            <p class="inline-hint">A drawing photo is assigned to this view. Select another view to build its CAD profile.</p>
+          {/if}
+        {:else}
+          <button class="action-button action-button--secondary" type="button" onclick={deriveProfile} disabled={!deriveAvailable || currentPending !== null || drawing || currentViewsPending}>
+            {currentPending === 'section'
+              ? 'Deriving…'
               : deriveMode === 'exactSection'
                 ? 'Extract exact section'
                 : 'Extract approximate section'}
-        </button>
+          </button>
+        {/if}
         {#if sourceWarning}<p class="inline-hint">{sourceWarning}</p>{/if}
       </section>
 
@@ -1700,6 +1792,7 @@
           {@const visibleBounds = cameraBounds(view, viewBounds)}
           {@const isViewExact = exactView(view)}
           {@const photo = photoForView(view)}
+          {@const projectionDrawing = projectionDrawingForView(view)}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
           <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -1727,7 +1820,7 @@
           >
             <div class="sketch-pane__label">
               <button class="view-select" type="button" aria-label={`Select ${view} projection`} aria-pressed={selectedView === view} onclick={(event) => { event.stopPropagation(); selectView(view); }}>{view.toUpperCase()}</button>
-              <span>{photoForView(view)?.pending ? 'RECOGNIZING…' : photoForView(view)?.error ? 'ERROR' : viewPendingFor(view) ? 'PROJECTING…' : viewErrorFor(view) ? 'ERROR' : photoForView(view)?.accepted ? 'PROFILE ACCEPTED' : viewLoops.length ? `${viewLoops.length} LOOPS` : photoForView(view) ? 'DRAWING PHOTO' : 'NO PROFILE'}</span>
+              <span>{photoForView(view)?.pending ? 'RECOGNIZING…' : photoForView(view)?.error ? 'ERROR' : viewPendingFor(view) ? (viewPendingKindFor(view) === 'profile' ? 'BUILDING PROFILE…' : 'PROJECTING…') : viewErrorFor(view) ? 'ERROR' : photoForView(view)?.accepted ? 'PROFILE ACCEPTED' : projectionDrawing && !photo ? 'PROJECTED EDGES' : viewLoops.length ? `${viewLoops.length} LOOPS` : photoForView(view) ? 'DRAWING PHOTO' : 'NO PROFILE'}</span>
               <button class="sketch-pane__label-action" type="button" onclick={(event) => { event.stopPropagation(); resetPaneCamera(view); }}>FIT VIEW</button>
             </div>
             {#if photoForView(view)?.pending}
@@ -1735,14 +1828,14 @@
             {:else if photoForView(view)?.error}
               <span class="pane-message pane-message--error">{photoForView(view)?.error}</span>
             {:else if viewPendingFor(view)}
-              <span class="pane-message">Projecting current model…</span>
+              <span class="pane-message">{viewPendingKindFor(view) === 'profile' ? 'Building a closed profile…' : 'Projecting current model…'}</span>
             {:else if viewErrorFor(view)}
               <span class="pane-message pane-message--error">{viewErrorFor(view)}</span>
             {:else if photoPickMode && selectedView === view}
               <span class="pane-message">{photoPickMode === 'region' ? 'Drag a rectangle to crop the drawing.' : photoPickMode === 'calibration' ? `Click scale point ${photoForView(view)?.calibrationPoints.length === 0 ? '1' : '2'} of 2.` : `Click rectangle corner ${(photoForView(view)?.rectificationPoints.length ?? 0) + 1} of 4.`}</span>
             {:else if photoForView(view)?.drawing}
               <span class="pane-message">{photoForView(view)?.correctionTool === 'line' ? `Click endpoint ${photoForView(view)?.draftPointsMm.length === 0 ? '1' : '2'} of 2.` : `${photoForView(view)?.draftPointsMm.length ?? 0} contour points · click Close contour when ready.`}</span>
-            {:else if viewLoops.length === 0 && !photoForView(view)?.recognition}
+            {:else if viewLoops.length === 0 && !projectionDrawing && !photoForView(view)?.recognition}
               <span class="pane-message">Select a view, draw a profile, or add a drawing photo.</span>
             {/if}
             <svg class="sketch-pane__drawing" viewBox={viewBox(view)} preserveAspectRatio="xMidYMid meet" aria-label={`${view} sketch canvas`}>
@@ -1820,6 +1913,12 @@
                   <circle class="drawing-calibration-point" cx={point[0]} cy={-(photo.prepared.image.heightPx - point[1])} r={Math.max(photo.prepared.image.widthPx, photo.prepared.image.heightPx) * 0.009} />
                 {/each}
               {/if}
+              {#if projectionDrawing && !photo}
+                {#each projectionDrawing.displayEdges as edge, edgeIndex (`projected-edge-${view}-${edgeIndex}`)}
+                  {@const edgePoints = edge.map(([x, y]) => `${x},${-y}`).join(' ')}
+                  <polyline class="projected-edge" data-testid="projected-edge" points={edgePoints} />
+                {/each}
+              {/if}
               {#each viewLoops as loop, loopIndex (`${view}-${loopIndex}-${loop.points.length}-${loop.role}`)}
                 {@const pathPoints = loop.points.map(([x, y]) => `${x},${-y}`).join(' ')}
                 <polygon points={pathPoints} class={[loop.role, loop.role === 'hole' && 'hole', profileEditorFor(view).selectedLoopIndex === loopIndex && 'selected-loop', profileEditorFor(view).drawing && loopIndex === profileEditorFor(view).draftLoopIndex && 'open-draft']} fill-rule="evenodd" />
@@ -1852,6 +1951,9 @@
         {:else if currentPhoto}
           <span class="evidence-tag evidence-tag--manual">DRAWING PHOTO</span>
           <span>Image coordinates in pixels · set scale and recognize before applying.</span>
+        {:else if currentProjectionDrawing && !currentEvidence}
+          <span class="evidence-tag exact">EXACT CAD PROJECTION</span>
+          <span>{selectedView.toUpperCase()} · {currentProjectionDrawing.displayEdges.length} projected edges · preview only · build a closed profile before applying</span>
         {:else if currentEvidence}
           <span class={['evidence-tag', { exact: isExactProfile }]}>{isExactProfile ? 'EXACT CAD PROFILE' : 'APPROXIMATE PROFILE'}</span>
           <span>
@@ -1872,6 +1974,11 @@
           {#each currentEvidence.warnings as warning (warning)}<li>{warning}</li>{/each}
         </ul>
       {/if}
+      {#if currentProjectionDrawing?.warnings.length}
+        <ul class="warning-list">
+          {#each currentProjectionDrawing.warnings as warning (warning)}<li>{warning}</li>{/each}
+        </ul>
+      {/if}
       {#if staleEvidence}<p class="inline-hint stale-hint">Model version changed. Previous section has been cleared from this edit.</p>{/if}
       {#if selectedViewError}<p class="inline-hint stale-hint">{selectedViewError}</p>{/if}
       <div class="status-slot" data-testid="profile-status" aria-live="polite" aria-atomic="true">
@@ -1881,6 +1988,8 @@
           <p>Derivation settings changed. Derive again before applying.</p>
         {:else if currentStatusText}
           <p>{currentStatusText}</p>
+        {:else if currentProjectionDrawing && !currentEvidence}
+          <p>Projected edges are display-only. Build a closed profile to enable Apply.</p>
         {:else if loopError}
           <p>{loopError}</p>
         {:else}
@@ -2109,6 +2218,7 @@
   .sketch-pane polygon { fill: color-mix(in srgb, var(--profile-primary) 22%, transparent); stroke: var(--profile-muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
   .sketch-pane polygon.selected-loop { stroke: var(--profile-secondary); stroke-width: 1.5; }
   .sketch-pane polygon.hole { fill: color-mix(in srgb, #aa5b50 20%, transparent); stroke: #c78274; }
+  .projected-edge { fill: none; stroke: #82b1a2; stroke-width: 1.05; vector-effect: non-scaling-stroke; pointer-events: none; }
   .sketch-pane polygon.open-draft { fill: none; stroke-dasharray: 4 3; }
   .drawing-region { fill: color-mix(in srgb, var(--profile-secondary) 16%, transparent); stroke: var(--profile-secondary); stroke-width: 1.2; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; pointer-events: none; }
   .drawing-pick-point { fill: #f1c879; stroke: #17120a; stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }

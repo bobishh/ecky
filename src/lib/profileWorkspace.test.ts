@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   normalizeProfileLoops,
   profileLoopArea,
+  profileDrawingBounds,
   profileLoopError,
   profileGeometrySettingsMatch,
   profileLoopsForApply,
@@ -32,6 +33,15 @@ test('profile canvas maps pointer coordinates to millimeters with an upward-posi
     }),
     [-25, 40],
   );
+});
+
+test('projected open edges define fit bounds without becoming a closed profile', () => {
+  const bounds = profileDrawingBounds([[[-10, 0], [0, 0]], [[100, 20], [100, 40]]]);
+  assert.ok(bounds);
+  assert.equal(bounds.minX, -23.2);
+  assert.equal(bounds.minY, -13.2);
+  assert.equal(bounds.width, 136.4);
+  assert.equal(bounds.height, 66.4);
 });
 
 test('profile loops normalize a repeated closing point and retain implicit closure', () => {

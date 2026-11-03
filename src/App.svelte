@@ -9,7 +9,7 @@
   import ViewportWorkspace from './lib/workbench/ViewportWorkspace.svelte';
   import WorkbenchWindows from './lib/workbench/WorkbenchWindows.svelte';
   import ProfileWorkspace from './lib/ProfileWorkspace.svelte';
-  import type { ProfileApplyInput, ProfileApplyOutcome, ProfileDeriveInput } from './lib/profileWorkspace';
+  import type { ProfileApplyInput, ProfileApplyOutcome, ProfileDeriveInput, ProfileDrawingInput } from './lib/profileWorkspace';
   import type { PreparedDrawingImage, RecognizeDrawingProfileRequest, DrawingRecognitionResponse, ReviewDrawingProfileRequest, DrawingProfileReviewResponse } from './lib/tauri/contracts';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
@@ -294,6 +294,7 @@ import {
     getVersionSource,
     applyCapturePreview as applyCapturePreviewCommand,
     deriveProfileGeometry,
+    projectProfileDrawing,
     applyProfileFeature,
     prepareDrawingImage,
     recognizeDrawingProfile,
@@ -5470,6 +5471,17 @@ import {
     return deriveProfileGeometry({ artifactPath, operation: input.operation, toleranceMm: input.toleranceMm });
   }
 
+  async function handleProfileProjectDrawing(input: ProfileDrawingInput) {
+    if (!profileStepArtifactPath) {
+      throw new Error('Exact CAD drawing projection requires an existing STEP/STP artifact.');
+    }
+    return projectProfileDrawing({
+      artifactPath: profileStepArtifactPath,
+      view: input.view,
+      toleranceMm: input.toleranceMm,
+    });
+  }
+
   async function handleChooseDrawingPhoto(): Promise<PreparedDrawingImage | null> {
     const selected = await open({
       multiple: false,
@@ -5910,6 +5922,7 @@ import {
             ? 'Profile authoring requires an Ecky source model.'
             : undefined}
         onDerive={handleProfileDerive}
+        onProjectDrawing={handleProfileProjectDrawing}
         onApply={handleProfileApply}
         onChooseDrawing={handleChooseDrawingPhoto}
         onRecognizeDrawing={handleRecognizeDrawing}

@@ -18,6 +18,8 @@ import {
   type ApplyCapturePreviewResult,
   type ManualCodeApplyResponse,
   type ProfileGeometryRequest,
+  type ProjectProfileDrawingRequest,
+  type ProfileDrawingProjectionResponse,
   type ProfileFeatureApplyRequest,
   type PrepareDrawingImageRequest,
   type PreparedDrawingImage,
@@ -1490,6 +1492,10 @@ export async function applyManualCode(input: {
 
 export async function deriveProfileGeometry(request: ProfileGeometryRequest) {
   return invokeCommand(commands.deriveProfileGeometry(request));
+}
+
+export async function projectProfileDrawing(request: ProjectProfileDrawingRequest): Promise<ProfileDrawingProjectionResponse> {
+  return invokeCommand(commands.projectProfileDrawing(request));
 }
 
 export async function prepareDrawingImage(request: PrepareDrawingImageRequest): Promise<PreparedDrawingImage> {

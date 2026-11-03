@@ -56,6 +56,7 @@
 #include <GC_MakeArcOfCircle.hxx>
 #include <GCE2d_MakeSegment.hxx>
 #include <GeomAbs_JoinType.hxx>
+#include <Geom_Line.hxx>
 #include <HLRAlgo_Projector.hxx>
 #include <HLRBRep_Algo.hxx>
 #include <HLRBRep_HLRToShape.hxx>
@@ -7981,37 +7982,83 @@ bool profile_point_inside_solid(const TopoDS_Shape& shape, const gp_Pnt& point, 
     return false;
 }
 
-bool profile_projection_ray_hits_solid(const TopoDS_Shape& shape,
+struct ProfileProjectionSolid {
+    TopoDS_Solid solid;
+    Standard_Real min_x;
+    Standard_Real min_y;
+    Standard_Real min_z;
+    Standard_Real max_x;
+    Standard_Real max_y;
+    Standard_Real max_z;
+    std::unique_ptr<BRepClass3d_SolidClassifier> classifier;
+    std::unique_ptr<BRepIntCurveSurface_Inter> intersector;
+};
+
+std::vector<ProfileProjectionSolid> profile_projection_solids(const TopoDS_Shape& shape,
+                                                              double tolerance) {
+    std::vector<ProfileProjectionSolid> result;
+    for (TopExp_Explorer solids(shape, TopAbs_SOLID); solids.More(); solids.Next()) {
+        const TopoDS_Solid solid = TopoDS::Solid(solids.Current());
+        Bnd_Box bounds;
+        BRepBndLib::Add(solid, bounds, Standard_False);
+        if (bounds.IsVoid()) {
+            throw EvalError("exact profile projection encountered a solid with empty bounds");
+        }
+        ProfileProjectionSolid candidate;
+        candidate.solid = solid;
+        bounds.Get(candidate.min_x, candidate.min_y, candidate.min_z,
+                   candidate.max_x, candidate.max_y, candidate.max_z);
+        candidate.classifier = std::make_unique<BRepClass3d_SolidClassifier>();
+        candidate.classifier->Load(solid);
+        candidate.intersector = std::make_unique<BRepIntCurveSurface_Inter>();
+        candidate.intersector->Load(solid, std::max(tolerance, 1.0e-7));
+        result.push_back(std::move(candidate));
+    }
+    return result;
+}
+
+bool profile_projection_ray_hits_solid(ProfileProjectionSolid& candidate,
                                        double x,
                                        double y,
                                        double tolerance) {
-    Bnd_Box bounds;
-    BRepBndLib::Add(shape, bounds, Standard_False);
-    if (bounds.IsVoid()) return false;
-    Standard_Real min_x, min_y, min_z, max_x, max_y, max_z;
-    bounds.Get(min_x, min_y, min_z, max_x, max_y, max_z);
-    const double margin = std::max(1.0, (max_z - min_z) * 0.1);
-    const double ray_start = min_z - margin;
-    const double ray_end = max_z + margin;
-    const gp_Lin ray(gp_Pnt(x, y, ray_start), gp_Dir(0, 0, 1));
+    if (x < candidate.min_x - tolerance || x > candidate.max_x + tolerance ||
+        y < candidate.min_y - tolerance || y > candidate.max_y + tolerance) {
+        return false;
+    }
+    const double margin = std::max(1.0, (candidate.max_z - candidate.min_z) * 0.1);
+    const double ray_start = candidate.min_z - margin;
+    const double ray_end = candidate.max_z + margin;
+    std::vector<double> hits{ray_start, ray_end};
+    const Handle(Geom_Line) ray = new Geom_Line(gp_Ax1(gp_Pnt(x, y, ray_start), gp_Dir(0, 0, 1)));
+    const GeomAdaptor_Curve ray_curve(ray, 0.0, ray_end - ray_start);
+    candidate.intersector->Init(ray_curve);
+    for (; candidate.intersector->More(); candidate.intersector->Next()) {
+        hits.push_back(candidate.intersector->Pnt().Z());
+    }
+    if (hits.size() < 4) return false;
+    std::sort(hits.begin(), hits.end());
+    hits.erase(std::unique(hits.begin(), hits.end(), [&](double left, double right) {
+        return std::abs(left - right) <= std::max(tolerance, 1.0e-8);
+    }), hits.end());
+    if (hits.size() < 4) return false;
+    // The ray endpoints are outside the solid by construction. Only classify
+    // intervals between actual surface hits; the first and last intervals
+    // cannot contain material and rebuilding their classifiers is wasted work.
+    for (std::size_t index = 2; index + 1 < hits.size(); ++index) {
+        if (hits[index] - hits[index - 1] <= std::max(tolerance, 1.0e-8)) continue;
+        const gp_Pnt midpoint(x, y, (hits[index] + hits[index - 1]) / 2.0);
+        candidate.classifier->Perform(midpoint, tolerance);
+        if (candidate.classifier->State() == TopAbs_IN) return true;
+    }
+    return false;
+}
 
-    for (TopExp_Explorer solids(shape, TopAbs_SOLID); solids.More(); solids.Next()) {
-        std::vector<double> hits{ray_start, ray_end};
-        BRepIntCurveSurface_Inter intersection;
-        intersection.Init(solids.Current(), ray, std::max(tolerance, 1.0e-7));
-        for (; intersection.More(); intersection.Next()) {
-            hits.push_back(intersection.Pnt().Z());
-        }
-        std::sort(hits.begin(), hits.end());
-        hits.erase(std::unique(hits.begin(), hits.end(), [&](double left, double right) {
-            return std::abs(left - right) <= std::max(tolerance, 1.0e-8);
-        }), hits.end());
-        for (std::size_t index = 1; index < hits.size(); ++index) {
-            if (hits[index] - hits[index - 1] <= std::max(tolerance, 1.0e-8)) continue;
-            const gp_Pnt midpoint(x, y, (hits[index] + hits[index - 1]) / 2.0);
-            BRepClass3d_SolidClassifier classifier(solids.Current(), midpoint, tolerance);
-            if (classifier.State() == TopAbs_IN) return true;
-        }
+bool profile_projection_ray_hits_solids(std::vector<ProfileProjectionSolid>& solids,
+                                        double x,
+                                        double y,
+                                        double tolerance) {
+    for (ProfileProjectionSolid& solid : solids) {
+        if (profile_projection_ray_hits_solid(solid, x, y, tolerance)) return true;
     }
     return false;
 }
@@ -8251,7 +8298,8 @@ std::vector<std::array<double, 2>> sample_profile_wire(const TopoDS_Wire& wire, 
 
 void write_profile_loops_file(const fs::path& path,
                               std::vector<DerivedProfileLoop>& loops,
-                              double tolerance) {
+                              double tolerance,
+                              const std::vector<std::string>& warnings) {
     for (DerivedProfileLoop& loop : loops) loop.display_points = sample_profile_wire(loop.wire, tolerance);
     std::ostringstream output;
     output << std::setprecision(17) << "{\"loops\":[";
@@ -8268,10 +8316,89 @@ void write_profile_loops_file(const fs::path& path,
         }
         output << "]}";
     }
+    output << "],\"warnings\":[";
+    for (std::size_t index = 0; index < warnings.size(); ++index) {
+        if (index > 0) output << ',';
+        output << quote_json_string(warnings[index]);
+    }
     output << "]}";
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     file << output.str();
     if (!file) throw IoError("failed to write exact profile display loops");
+}
+
+std::vector<std::array<double, 2>> sample_profile_edge(const TopoDS_Edge& edge,
+                                                      double tolerance,
+                                                      bool& point_degenerate) {
+    TopLoc_Location location;
+    Standard_Real first;
+    Standard_Real last;
+    if (BRep_Tool::Curve(edge, location, first, last).IsNull() &&
+        !BRepLib::BuildCurves3d(edge, tolerance)) {
+        throw EvalError("exact drawing projection edge has no usable 3D curve or planar pcurve");
+    }
+    BRepAdaptor_Curve curve(edge);
+    GCPnts_QuasiUniformDeflection distribution(curve, tolerance, GeomAbs_C1);
+    if (!distribution.IsDone() || distribution.NbPoints() < 2) {
+        if (BRep_Tool::Degenerated(edge)) {
+            TopExp_Explorer vertices(edge, TopAbs_VERTEX);
+            if (!vertices.More()) {
+                throw EvalError("exact drawing projection has a degenerate edge without a vertex");
+            }
+            const gp_Pnt start = BRep_Tool::Pnt(TopoDS::Vertex(vertices.Current()));
+            point_degenerate = true;
+            return {{start.X(), start.Y()}, {start.X(), start.Y()}};
+        }
+        if (curve.GetType() == GeomAbs_Line && std::isfinite(curve.FirstParameter()) &&
+            std::isfinite(curve.LastParameter()) && curve.FirstParameter() != curve.LastParameter()) {
+            const gp_Pnt start = curve.Value(curve.FirstParameter());
+            const gp_Pnt end = curve.Value(curve.LastParameter());
+            return {{start.X(), start.Y()}, {end.X(), end.Y()}};
+        }
+        const gp_Pnt start = curve.Value(curve.FirstParameter());
+        const gp_Pnt end = curve.Value(curve.LastParameter());
+        std::ostringstream message;
+        message << "exact drawing projection could not sample a non-degenerate edge within tolerance"
+                << " (curveType=" << static_cast<int>(curve.GetType())
+                << ", range=" << curve.FirstParameter() << ':' << curve.LastParameter()
+                << ", endpoints=" << start.X() << ',' << start.Y() << " -> "
+                << end.X() << ',' << end.Y() << ')';
+        throw EvalError(message.str());
+    }
+    std::vector<std::array<double, 2>> points;
+    const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+    for (int sample = 0; sample < distribution.NbPoints(); ++sample) {
+        const int point_index = reversed ? distribution.NbPoints() - sample : sample + 1;
+        const gp_Pnt point = distribution.Value(point_index);
+        points.push_back({point.X(), point.Y()});
+    }
+    if (points.size() < 2) throw EvalError("exact drawing projection edge has fewer than two display points");
+    return points;
+}
+
+void write_profile_drawing_file(const fs::path& path,
+                                const std::vector<std::vector<std::array<double, 2>>>& edges,
+                                const std::vector<std::string>& warnings) {
+    std::ostringstream output;
+    output << std::setprecision(17) << "{\"displayEdges\":[";
+    for (std::size_t edge = 0; edge < edges.size(); ++edge) {
+        if (edge > 0) output << ',';
+        output << '[';
+        for (std::size_t point = 0; point < edges[edge].size(); ++point) {
+            if (point > 0) output << ',';
+            output << '[' << edges[edge][point][0] << ',' << edges[edge][point][1] << ']';
+        }
+        output << ']';
+    }
+    output << "],\"warnings\":[";
+    for (std::size_t index = 0; index < warnings.size(); ++index) {
+        if (index > 0) output << ',';
+        output << quote_json_string(warnings[index]);
+    }
+    output << "]}";
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file << output.str();
+    if (!file) throw IoError("failed to write exact drawing projection display edges");
 }
 
 struct ProfileDerivationRequest {
@@ -8281,6 +8408,156 @@ struct ProfileDerivationRequest {
     double offset_mm = 0.0;
     double tolerance_mm = 0.5;
 };
+
+struct ProfileSource {
+    TopoDS_Shape shape;
+    std::vector<std::string> warnings;
+};
+
+ProfileSource load_profile_source(const fs::path& source_path) {
+    STEPControl_Reader reader;
+    if (reader.ReadFile(source_path.string().c_str()) != IFSelect_RetDone ||
+        reader.TransferRoots() <= 0) {
+        throw EvalError("profile source STEP could not be read or transferred");
+    }
+    const TopoDS_Shape transferred = reader.OneShape();
+    if (transferred.IsNull() || !TopExp_Explorer(transferred, TopAbs_SOLID).More()) {
+        throw EvalError("exact profile derivation requires at least one STEP solid");
+    }
+
+    std::vector<TopoDS_Solid> solids;
+    TopTools_IndexedMapOfShape solid_faces;
+    for (TopExp_Explorer explorer(transferred, TopAbs_SOLID); explorer.More(); explorer.Next()) {
+        const TopoDS_Solid solid = TopoDS::Solid(explorer.Current());
+        const std::size_t solid_index = solids.size() + 1;
+        if (!BRepCheck_Analyzer(solid).IsValid()) {
+            throw EvalError("exact profile source solid " + std::to_string(solid_index) +
+                            " failed BRep validity check; repair or re-export the STEP model");
+        }
+        solids.push_back(solid);
+        TopExp::MapShapes(solid, TopAbs_FACE, solid_faces);
+    }
+
+    std::size_t loose_null_surface_faces = 0;
+    for (TopExp_Explorer explorer(transferred, TopAbs_FACE); explorer.More(); explorer.Next()) {
+        const TopoDS_Face face = TopoDS::Face(explorer.Current());
+        if (solid_faces.Contains(face)) continue;
+        if (!BRep_Tool::Surface(face).IsNull()) {
+            throw EvalError("exact profile source contains a loose STEP face with a surface outside "
+                            "all solid bodies; projection is ambiguous and no geometry was omitted");
+        }
+        ++loose_null_surface_faces;
+    }
+
+    TopoDS_Compound solid_compound;
+    BRep_Builder solid_builder;
+    solid_builder.MakeCompound(solid_compound);
+    for (const TopoDS_Solid& solid : solids) solid_builder.Add(solid_compound, solid);
+    ProfileSource result{solid_compound, {}};
+    if (loose_null_surface_faces > 0) {
+        result.warnings.push_back("Excluded " + std::to_string(loose_null_surface_faces) +
+                                  " loose STEP face(s) with no surface and no containing solid; all valid solid bodies were retained.");
+    }
+    return result;
+}
+
+void projection_frame(const std::string& view,
+                      gp_Pnt& origin,
+                      gp_Dir& normal,
+                      gp_Dir& x_direction) {
+    origin = gp_Pnt(0, 0, 0);
+    normal = gp_Dir(0, 0, 1);
+    x_direction = gp_Dir(1, 0, 0);
+    if (view == "front") {
+        normal = gp_Dir(0, -1, 0);
+    } else if (view == "side") {
+        normal = gp_Dir(1, 0, 0);
+        x_direction = gp_Dir(0, 1, 0);
+    }
+}
+
+Handle(HLRBRep_Algo) project_visible_curves(const TopoDS_Shape& shape) {
+    Handle(HLRBRep_Algo) hidden_line = new HLRBRep_Algo();
+    hidden_line->Add(shape);
+    hidden_line->Projector(HLRAlgo_Projector(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1))));
+    hidden_line->Update();
+    hidden_line->Hide();
+    return hidden_line;
+}
+
+struct ProfileDrawingRequest {
+    fs::path source_path;
+    std::string view;
+    double tolerance_mm = 0.5;
+};
+
+ProfileDrawingRequest parse_profile_drawing_request(yyjson_val* root) {
+    if (!yyjson_is_obj(root)) throw ParseError("drawing projection request must be a JSON object");
+    yyjson_val* source = yyjson_obj_get(root, "sourceArtifactPath");
+    yyjson_val* view = yyjson_obj_get(root, "view");
+    yyjson_val* tolerance = yyjson_obj_get(root, "toleranceMm");
+    if (!yyjson_is_str(source) || !yyjson_is_str(view) || !yyjson_is_num(tolerance)) {
+        throw ParseError("drawing projection request needs sourceArtifactPath, view, and toleranceMm");
+    }
+    ProfileDrawingRequest request{yyjson_get_str(source), yyjson_get_str(view), yyjson_get_num(tolerance)};
+    if (request.source_path.empty()) throw ParseError("sourceArtifactPath cannot be empty");
+    if (request.view != "front" && request.view != "top" && request.view != "side") {
+        throw ParseError("drawing projection view must be front, top, or side");
+    }
+    if (!std::isfinite(request.tolerance_mm) || request.tolerance_mm < 1.0e-6 || request.tolerance_mm > 1.0) {
+        throw ParseError("drawing projection toleranceMm must be between 0.000001 and 1 mm");
+    }
+    return request;
+}
+
+void project_exact_drawing(const ProfileDrawingRequest& request, const fs::path& output_dir) {
+    ProfileSource prepared = load_profile_source(request.source_path);
+    gp_Pnt origin;
+    gp_Dir normal;
+    gp_Dir x_direction;
+    projection_frame(request.view, origin, normal, x_direction);
+    const TopoDS_Shape source = transform_shape_to_profile_plane(prepared.shape, origin, normal, x_direction);
+    HLRBRep_HLRToShape visible(project_visible_curves(source));
+    TopTools_IndexedMapOfShape unique_edges;
+    const TopoDS_Shape visible_shape = visible.VCompound();
+    const TopoDS_Shape outline_shape = visible.OutLineVCompound();
+    if (!visible_shape.IsNull()) TopExp::MapShapes(visible_shape, TopAbs_EDGE, unique_edges);
+    if (!outline_shape.IsNull()) TopExp::MapShapes(outline_shape, TopAbs_EDGE, unique_edges);
+    if (unique_edges.Extent() == 0) {
+        throw EvalError("exact CAD drawing projection returned no visible curves");
+    }
+
+    BRep_Builder builder;
+    TopoDS_Compound exact_edges;
+    builder.MakeCompound(exact_edges);
+    std::vector<std::vector<std::array<double, 2>>> display_edges;
+    std::size_t point_degenerate_edges = 0;
+    display_edges.reserve(static_cast<std::size_t>(unique_edges.Extent()));
+    for (int index = 1; index <= unique_edges.Extent(); ++index) {
+        const TopoDS_Edge edge = TopoDS::Edge(unique_edges(index));
+        TopLoc_Location location;
+        Standard_Real first;
+        Standard_Real last;
+        if (BRep_Tool::Curve(edge, location, first, last).IsNull() &&
+            !BRepLib::BuildCurves3d(edge, request.tolerance_mm * 0.01)) {
+            throw EvalError("exact drawing projection could not lift an HLR edge's planar pcurve");
+        }
+        if (BRep_Tool::Curve(edge, location, first, last).IsNull()) {
+            throw EvalError("exact drawing projection HLR edge has no exact 3D curve");
+        }
+        builder.Add(exact_edges, edge);
+        bool point_degenerate = false;
+        display_edges.push_back(sample_profile_edge(edge, request.tolerance_mm, point_degenerate));
+        if (point_degenerate) ++point_degenerate_edges;
+    }
+    fs::create_directories(output_dir);
+    write_step_file(output_dir / "projection.step", {exact_edges});
+    if (point_degenerate_edges > 0) {
+        prepared.warnings.push_back(std::to_string(point_degenerate_edges) +
+                                    " point-degenerate projected edge(s) are shown as zero-length preview segments; exact topology remains in the STEP asset.");
+    }
+    write_profile_drawing_file(output_dir / "display-edges.json", display_edges, prepared.warnings);
+}
 
 ProfileDerivationRequest parse_profile_derivation_request(yyjson_val* root) {
     if (!yyjson_is_obj(root)) throw ParseError("profile derivation request must be a JSON object");
@@ -8326,15 +8603,9 @@ ProfileDerivationRequest parse_profile_derivation_request(yyjson_val* root) {
 }
 
 void derive_exact_profile(const ProfileDerivationRequest& request, const fs::path& output_dir) {
-    STEPControl_Reader reader;
-    if (reader.ReadFile(request.source_path.string().c_str()) != IFSelect_RetDone ||
-        reader.TransferRoots() <= 0) {
-        throw EvalError("profile source STEP could not be read or transferred");
-    }
-    TopoDS_Shape source = reader.OneShape();
-    if (source.IsNull() || !TopExp_Explorer(source, TopAbs_SOLID).More()) {
-        throw EvalError("exact profile derivation requires at least one STEP solid");
-    }
+    ProfileSource prepared = load_profile_source(request.source_path);
+    TopoDS_Shape source = prepared.shape;
+    std::vector<std::string> warnings = std::move(prepared.warnings);
 
     gp_Pnt frame_origin(0, 0, 0);
     gp_Dir frame_normal(0, 0, 1);
@@ -8351,20 +8622,19 @@ void derive_exact_profile(const ProfileDerivationRequest& request, const fs::pat
             frame_normal = gp_Dir(1, 0, 0);
             frame_x = gp_Dir(0, 1, 0);
         }
-    } else if (request.plane_or_view == "front") {
-        frame_normal = gp_Dir(0, -1, 0);
-        frame_x = gp_Dir(1, 0, 0);
-    } else if (request.plane_or_view == "side") {
-        frame_normal = gp_Dir(1, 0, 0);
-        frame_x = gp_Dir(0, 1, 0);
+    } else {
+        projection_frame(request.plane_or_view, frame_origin, frame_normal, frame_x);
     }
     source = transform_shape_to_profile_plane(source, frame_origin, frame_normal, frame_x);
     const double connection_tolerance = std::max(1.0e-7, std::min(1.0e-3, request.tolerance_mm * 0.01));
     const double classification_tolerance = std::max(1.0e-7, connection_tolerance * 0.1);
+    std::vector<ProfileProjectionSolid> projection_solids =
+        profile_projection_solids(source, classification_tolerance);
 
-    TopoDS_Shape exact_edges;
-    std::vector<TopoDS_Wire> wires;
+    TopoDS_Shape profile_shape;
+    std::vector<DerivedProfileLoop> loops;
     if (request.kind == "section") {
+        TopoDS_Shape exact_edges;
         Bnd_Box source_bounds;
         BRepBndLib::Add(source, source_bounds, Standard_False);
         Standard_Real min_x, min_y, min_z, max_x, max_y, max_z;
@@ -8385,80 +8655,121 @@ void derive_exact_profile(const ProfileDerivationRequest& request, const fs::pat
             throw EvalError("exact CAD section returned no edges at the requested plane; local Z range is " +
                             std::to_string(min_z) + " to " + std::to_string(max_z));
         }
-    } else {
-        Handle(HLRBRep_Algo) hidden_line = new HLRBRep_Algo();
-        hidden_line->Add(source);
-        hidden_line->Projector(HLRAlgo_Projector(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1))));
-        hidden_line->Update();
-        hidden_line->Hide();
-        HLRBRep_HLRToShape visible(hidden_line);
-        const auto material_boundary_edges = [&](const TopoDS_Shape& candidate_edges) {
-            TopTools_IndexedMapOfShape edges;
-            TopExp::MapShapes(candidate_edges, TopAbs_EDGE, edges);
-            std::vector<TopoDS_Edge> silhouette_edges;
-            for (int edge_index = 1; edge_index <= edges.Extent(); ++edge_index) {
-                const TopoDS_Edge edge = TopoDS::Edge(edges(edge_index));
-                BRepAdaptor_Curve curve(edge);
-                const double first = curve.FirstParameter();
-                const double last = curve.LastParameter();
-                if (!std::isfinite(first) || !std::isfinite(last) || first == last) continue;
-                bool bounds_material = false;
-                for (double ratio : {0.25, 0.5, 0.75}) {
-                    const double parameter = first + (last - first) * ratio;
-                    gp_Pnt point;
-                    gp_Vec tangent;
-                    curve.D1(parameter, point, tangent);
-                    tangent.SetZ(0.0);
-                    if (tangent.SquareMagnitude() <= Precision::SquareConfusion()) continue;
-                    tangent.Normalize();
-                    const gp_Vec normal(-tangent.Y(), tangent.X(), 0.0);
-                    const double step = std::max(20.0 * classification_tolerance, 2.0e-6);
-                    const bool positive = profile_projection_ray_hits_solid(
-                        source, point.X() + normal.X() * step, point.Y() + normal.Y() * step,
-                        classification_tolerance);
-                    const bool negative = profile_projection_ray_hits_solid(
-                        source, point.X() - normal.X() * step, point.Y() - normal.Y() * step,
-                        classification_tolerance);
-                    if (positive != negative) {
-                        bounds_material = true;
-                        break;
-                    }
-                }
-                if (bounds_material) silhouette_edges.push_back(edge);
-            }
-            BRep_Builder builder;
-            TopoDS_Compound silhouettes;
-            builder.MakeCompound(silhouettes);
-            for (const TopoDS_Edge& edge : silhouette_edges) builder.Add(silhouettes, edge);
-            return silhouettes;
-        };
-        exact_edges = material_boundary_edges(visible.VCompound());
-        try {
-            wires = connect_profile_edges(exact_edges, connection_tolerance);
-        } catch (const EvalError&) {
-            BRep_Builder visible_builder;
-            TopoDS_Compound visible_edges;
-            visible_builder.MakeCompound(visible_edges);
-            visible_builder.Add(visible_edges, visible.VCompound());
-            visible_builder.Add(visible_edges, visible.OutLineVCompound());
-            exact_edges = material_boundary_edges(visible_edges);
-        }
-    }
-
-    if (wires.empty()) wires = connect_profile_edges(exact_edges, connection_tolerance);
-    auto occupancy = [&](const gp_Pnt& point) {
-        if (request.kind == "section") {
+        const std::vector<TopoDS_Wire> wires = connect_profile_edges(exact_edges, connection_tolerance);
+        const auto occupancy = [&](const gp_Pnt& point) {
             return profile_point_inside_solid(source, point, classification_tolerance);
+        };
+        loops = classify_profile_loops(wires, occupancy, classification_tolerance);
+        profile_shape = build_profile_faces(loops);
+    } else {
+        Handle(HLRBRep_Algo) hidden_line = project_visible_curves(source);
+        HLRBRep_HLRToShape visible(hidden_line);
+
+        BRep_Builder visible_builder;
+        TopoDS_Compound visible_edges;
+        visible_builder.MakeCompound(visible_edges);
+        const TopoDS_Shape visible_edges_shape = visible.VCompound();
+        if (!visible_edges_shape.IsNull()) visible_builder.Add(visible_edges, visible_edges_shape);
+        const TopoDS_Shape outline_edges_shape = visible.OutLineVCompound();
+        if (!outline_edges_shape.IsNull()) visible_builder.Add(visible_edges, outline_edges_shape);
+
+        TopTools_IndexedMapOfShape input_edges;
+        TopExp::MapShapes(visible_edges, TopAbs_EDGE, input_edges);
+        if (input_edges.Extent() == 0) {
+            throw EvalError("exact CAD projection returned no visible contour edges");
         }
-        return profile_projection_ray_hits_solid(
-            source, point.X(), point.Y(), classification_tolerance);
-    };
-    std::vector<DerivedProfileLoop> loops = classify_profile_loops(
-        wires, occupancy, classification_tolerance);
-    TopoDS_Shape profile_shape = build_profile_faces(loops);
+        BOPAlgo_Builder edge_arrangement;
+        edge_arrangement.SetNonDestructive(Standard_True);
+        edge_arrangement.SetFuzzyValue(connection_tolerance);
+        for (int edge_index = 1; edge_index <= input_edges.Extent(); ++edge_index) {
+            const TopoDS_Edge edge = TopoDS::Edge(input_edges(edge_index));
+            TopLoc_Location location;
+            Standard_Real first;
+            Standard_Real last;
+            if (BRep_Tool::Curve(edge, location, first, last).IsNull() &&
+                !BRepLib::BuildCurves3d(edge, connection_tolerance)) {
+                throw EvalError("exact CAD projection edge has no usable 3D curve or planar pcurve");
+            }
+            if (BRep_Tool::Curve(edge, location, first, last).IsNull()) {
+                throw EvalError("exact CAD projection could not build a 3D curve for an HLR edge");
+            }
+            edge_arrangement.AddArgument(edge);
+        }
+        edge_arrangement.Perform();
+        if (edge_arrangement.HasErrors() || edge_arrangement.Shape().IsNull()) {
+            throw EvalError("exact CAD projection could not arrange intersecting visible curves");
+        }
+
+        TopTools_IndexedMapOfShape arranged_edges;
+        TopExp::MapShapes(edge_arrangement.Shape(), TopAbs_EDGE, arranged_edges);
+        std::vector<TopoDS_Edge> material_boundary_edges;
+        for (int edge_index = 1; edge_index <= arranged_edges.Extent(); ++edge_index) {
+            const TopoDS_Edge edge = TopoDS::Edge(arranged_edges(edge_index));
+            BRepAdaptor_Curve curve(edge);
+            const double first = curve.FirstParameter();
+            const double last = curve.LastParameter();
+            if (!std::isfinite(first) || !std::isfinite(last) || first == last) continue;
+            bool saw_material_boundary = false;
+            bool saw_interior_edge = false;
+            std::vector<std::string> sample_states;
+            for (double ratio : {0.25, 0.5, 0.75}) {
+                const double parameter = first + (last - first) * ratio;
+                gp_Pnt point;
+                gp_Vec tangent;
+                curve.D1(parameter, point, tangent);
+                tangent.SetZ(0.0);
+                if (tangent.SquareMagnitude() <= Precision::SquareConfusion()) continue;
+                tangent.Normalize();
+                const gp_Vec normal(-tangent.Y(), tangent.X(), 0.0);
+                const double step = std::max(20.0 * classification_tolerance, 2.0e-6);
+                const bool positive = profile_projection_ray_hits_solids(
+                    projection_solids, point.X() + normal.X() * step,
+                    point.Y() + normal.Y() * step, classification_tolerance);
+                const bool negative = profile_projection_ray_hits_solids(
+                    projection_solids, point.X() - normal.X() * step,
+                    point.Y() - normal.Y() * step, classification_tolerance);
+                sample_states.push_back(std::to_string(point.X()) + "," +
+                                        std::to_string(point.Y()) + ":" +
+                                        (positive ? "1" : "0") +
+                                        (negative ? "1" : "0"));
+                if (positive != negative) saw_material_boundary = true;
+                else saw_interior_edge = true;
+            }
+            if (saw_material_boundary && saw_interior_edge) {
+                gp_Pnt start;
+                gp_Pnt end;
+                curve.D0(first, start);
+                curve.D0(last, end);
+                std::ostringstream message;
+                message << "exact CAD projection has a mixed visible edge after exact curve arrangement"
+                        << " (curveType=" << static_cast<int>(curve.GetType())
+                        << ", start=" << start.X() << ',' << start.Y()
+                        << ", end=" << end.X() << ',' << end.Y()
+                        << ", samples=";
+                for (std::size_t index = 0; index < sample_states.size(); ++index) {
+                    if (index != 0) message << ';';
+                    message << sample_states[index];
+                }
+                message << ')';
+                throw EvalError(message.str());
+            }
+            if (saw_material_boundary) material_boundary_edges.push_back(edge);
+        }
+        BRep_Builder edge_builder;
+        TopoDS_Compound material_edges;
+        edge_builder.MakeCompound(material_edges);
+        for (const TopoDS_Edge& edge : material_boundary_edges) edge_builder.Add(material_edges, edge);
+        const std::vector<TopoDS_Wire> wires = connect_profile_edges(material_edges, connection_tolerance);
+        const auto occupancy = [&](const gp_Pnt& point) {
+            return profile_projection_ray_hits_solids(
+                projection_solids, point.X(), point.Y(), classification_tolerance);
+        };
+        loops = classify_profile_loops(wires, occupancy, classification_tolerance);
+        profile_shape = build_profile_faces(loops);
+    }
     fs::create_directories(output_dir);
     write_step_file(output_dir / "profile.step", {profile_shape});
-    write_profile_loops_file(output_dir / "display-loops.json", loops, request.tolerance_mm);
+    write_profile_loops_file(output_dir / "display-loops.json", loops, request.tolerance_mm, warnings);
 }
 
 // Preview/export STL tessellation quality. Use FreeCAD-style adaptive angular
@@ -8908,12 +9219,14 @@ int run(int argc, char** argv, ExecutionContext& context) {
     context.set_stage("parse-arguments");
     fs::path plan_path;
     fs::path profile_request_path;
+    fs::path drawing_request_path;
     fs::path out_dir;
     for (int index = 1; index < argc; ++index) {
         std::string arg = argv[index];
         if (arg == "--help") {
             std::cout << "direct-occt-runner --plan PLAN --out DIR\n"
-                         "direct-occt-runner --derive-profile REQUEST.json --out DIR\n";
+                         "direct-occt-runner --derive-profile REQUEST.json --out DIR\n"
+                         "direct-occt-runner --project-drawing REQUEST.json --out DIR\n";
             return 0;
         }
         if (arg == "--version") {
@@ -8928,15 +9241,22 @@ int run(int argc, char** argv, ExecutionContext& context) {
             profile_request_path = argv[++index];
             continue;
         }
+        if (arg == "--project-drawing" && index + 1 < argc) {
+            drawing_request_path = argv[++index];
+            continue;
+        }
         if (arg == "--out" && index + 1 < argc) {
             out_dir = argv[++index];
             continue;
         }
-        throw ParseError("usage: direct-occt-runner (--plan PLAN | --derive-profile REQUEST.json) --out DIR");
+        throw ParseError("usage: direct-occt-runner (--plan PLAN | --derive-profile REQUEST.json | --project-drawing REQUEST.json) --out DIR");
     }
 
-    if ((plan_path.empty() == profile_request_path.empty()) || out_dir.empty()) {
-        throw ParseError("usage: direct-occt-runner (--plan PLAN | --derive-profile REQUEST.json) --out DIR");
+    const int selected_modes = static_cast<int>(!plan_path.empty()) +
+                              static_cast<int>(!profile_request_path.empty()) +
+                              static_cast<int>(!drawing_request_path.empty());
+    if (selected_modes != 1 || out_dir.empty()) {
+        throw ParseError("usage: direct-occt-runner (--plan PLAN | --derive-profile REQUEST.json | --project-drawing REQUEST.json) --out DIR");
     }
 
     std::error_code runner_path_error;
@@ -8964,6 +9284,27 @@ int run(int argc, char** argv, ExecutionContext& context) {
             yyjson_doc_get_root(request_document.get()));
         context.set_stage("derive-exact-profile");
         derive_exact_profile(request, out_dir);
+        context.set_stage("complete");
+        return 0;
+    }
+
+    if (!drawing_request_path.empty()) {
+        context.set_stage("read-drawing-projection-request");
+        std::string request_text = read_text_file(drawing_request_path);
+        yyjson_read_err request_error;
+        std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> request_document(
+            yyjson_read_opts(request_text.data(), request_text.size(), YYJSON_READ_NOFLAG, nullptr,
+                             &request_error),
+            yyjson_doc_free);
+        if (!request_document) {
+            throw ParseError("drawing projection request JSON parse failed at byte " +
+                             std::to_string(request_error.pos) + ": " +
+                             std::string(request_error.msg ? request_error.msg : "unknown parse error"));
+        }
+        const ProfileDrawingRequest request = parse_profile_drawing_request(
+            yyjson_doc_get_root(request_document.get()));
+        context.set_stage("project-exact-drawing");
+        project_exact_drawing(request, out_dir);
         context.set_stage("complete");
         return 0;
     }

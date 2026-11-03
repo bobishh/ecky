@@ -8,6 +8,8 @@ import type {
   ProfileLoop as ContractProfileLoop,
   ProfileLoopRole as ContractProfileLoopRole,
   ProfilePlane as ContractProfilePlane,
+  ProfileDrawingProjectionResponse as ContractProfileDrawingProjectionResponse,
+  ProjectProfileDrawingRequest,
 } from './tauri/contracts';
 
 export type ProfilePlane = ContractProfilePlane;
@@ -18,6 +20,8 @@ export type ProfileGeometryOperation = ProfileDerivationOperation;
 export type ProfileGeometryAccuracy = ProfileEvidenceAccuracy;
 export type ProfileAssetReference = ProfileAsset;
 export type ProfileGeometryResponse = ContractProfileGeometryResponse;
+export type ProfileDrawingProjectionResponse = ContractProfileDrawingProjectionResponse;
+export type ProfileDrawingInput = Pick<ProjectProfileDrawingRequest, 'view' | 'toleranceMm'>;
 export type ProfileDeriveInput = Pick<ProfileGeometryRequest, 'operation' | 'toleranceMm'> & {
   source: 'step' | 'mesh';
 };
@@ -128,7 +132,16 @@ export function removeProfileLoop(loops: ProfileLoop[], removeIndex: number): Pr
 }
 
 export function profileBounds(loops: ProfileLoop[]): ProfileBounds {
-  const points = loops.flatMap((loop) => loop.points).filter(isFinitePoint);
+  return profileBoundsFromPoints(loops.flatMap((loop) => loop.points));
+}
+
+export function profileDrawingBounds(displayEdges: ProfileDrawingProjectionResponse['displayEdges']): ProfileBounds | null {
+  const points = displayEdges.flat();
+  return points.length ? profileBoundsFromPoints(points) : null;
+}
+
+function profileBoundsFromPoints(rawPoints: ProfilePoint[]): ProfileBounds {
+  const points = rawPoints.filter(isFinitePoint);
   if (!points.length) return { minX: -50, minY: -50, width: 100, height: 100 };
 
   const extents = points.reduce(

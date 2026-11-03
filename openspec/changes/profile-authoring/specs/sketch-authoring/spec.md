@@ -6,7 +6,7 @@ The first release SHALL submit supported profile features through Rust's normal 
 
 #### Scenario: Save an exact profile feature
 - **GIVEN** an existing flange represented by a supported STEP/BRep artifact with a visible top outline and through-hole
-- **WHEN** the user chooses exact top projection, enters clearance and thickness, then applies the profile
+- **WHEN** the user chooses exact top projection, builds its closed profile, enters clearance and thickness, then applies the profile
 - **THEN** Ecky keeps the flange source, adds a named part through the exact profile asset, and creates a normal immutable version in the same project
 - **AND** the generated feature preserves the hole, projection provenance, clearance, and extrusion depth without submitting sampled display points
 
@@ -33,7 +33,13 @@ For a derived profile, the source view/plane and section offset SHALL determine 
 
 Sketch SHALL fill the application's work area. A compact view selector SHALL offer FRONT, TOP, SIDE, and ALL THREE. The default SHALL be one large FRONT pane; ALL THREE SHALL use the established simultaneous front/top/side arrangement. Layout changes SHALL preserve each view's geometry, edits, camera, and evidence. Other workbench windows SHALL retain their own layout behavior.
 
-For exact CAD projection, one projection action SHALL request all three views for the same selected model version, regardless of the display layout. Each view SHALL retain its own result, pending state, and error; failure in one view SHALL NOT erase successful views. Selecting a view SHALL bind its own exact profile reference and canonical plane to Apply. Front maps to XZ, top to XY, and side to YZ. Exact pane overlays remain display-only until explicit approximate polygon conversion.
+For exact CAD projection, one projection action SHALL request all three views for the same selected model version, regardless of the display layout. Each view SHALL retain its own result, pending state, and error; failure in one view SHALL NOT erase successful views. Front maps to XZ, top to XY, and side to YZ.
+
+A projection drawing and a closed profile are distinct results. Project all three views SHALL display native exact visible projected edges without waiting for material-boundary classification, closed-loop assembly, or extrusion preparation. Each edge SHALL be drawn independently; the preview SHALL NOT connect unrelated endpoints or close open edges. The exact projected curves SHALL be retained in a separate content-addressed STEP asset; sampled screen points are preview-only. A drawing asset SHALL NOT be accepted as an extrudable profile asset.
+
+Build closed profile SHALL explicitly request the existing strict native profile derivation for the selected view. Only successful closed-profile derivation SHALL bind that view's profile asset to Apply or enable approximate polygon conversion. Pending or failed profile construction SHALL preserve the projection drawing and other views. Backend errors SHALL show actionable diagnostic text, including process exit status when a native process fails without text output. Unsupported closed-profile extraction SHALL NOT prevent an otherwise valid drawing projection.
+
+Native derivation SHALL retain every valid source solid. Loose STEP faces lacking any surface and belonging to no solid MAY be excluded with an explicit warning. Invalid solid bodies SHALL be reported rather than silently omitted. Projection drawing and profile assets SHALL preserve source digest and view provenance.
 
 Each view SHALL independently own its manual loops, unfinished stroke, undo history, selected vertex, placement offset, and converted-profile state. Selecting another view SHALL NOT transfer a drawing or overwrite another view. Rendering ALL THREE SHALL show all existing drawings concurrently, including inactive views. Each canvas SHALL have exactly one coordinate-aligned grid that follows pan and zoom; no screen-space decorative grid may be layered beneath it.
 
@@ -72,14 +78,27 @@ Camera scale SHALL be defined independently of pane dimensions, in screen pixels
 
 #### Scenario: Apply selected top or side projection
 - **GIVEN** exact projections are available in the three panes
-- **WHEN** the user selects TOP or SIDE and applies clearance and depth
+- **WHEN** the user selects TOP or SIDE, successfully builds its closed profile, and applies clearance and depth
 - **THEN** the new feature uses that view's profile asset and operation reference on XY for TOP or YZ for SIDE
 - **AND** sampled overlay loops are not submitted as exact geometry
 
 #### Scenario: One projection fails
 - **GIVEN** the model can be projected in two views but the third projection is unsupported
 - **WHEN** the user requests all views
-- **THEN** the failed pane shows its diagnostic while successful panes remain selectable and can be applied
+- **THEN** the failed pane shows its diagnostic while successful drawings remain selectable and available for closed-profile construction
+
+#### Scenario: Drawing succeeds while closed-profile construction fails
+- **GIVEN** native projection produces exact visible edges from a STEP assembly, including open curves and internal detail
+- **WHEN** the user requests all three views
+- **THEN** each successful drawing appears without requiring closed boundaries and Apply remains unavailable for a drawing alone
+- **WHEN** Build closed profile fails for the selected drawing
+- **THEN** the drawing remains visible, the failure explains the unsupported boundary, and the other views remain available
+
+#### Scenario: Surface-less loose faces in a STEP assembly
+- **GIVEN** an assembly contains valid solid bodies and additional loose faces with null surfaces
+- **WHEN** the user projects the assembly
+- **THEN** all valid solids participate in the native drawing calculation without passing the null-surface faces to HLR
+- **AND** the result identifies the excluded loose faces in a warning
 
 #### Scenario: Exact profile controls
 - **GIVEN** exact CAD evidence with sampled display contours

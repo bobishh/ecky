@@ -4,8 +4,10 @@ use crate::contracts::{AppError, AppResult};
 use crate::models::AppState;
 use crate::services::profile_authoring::{
     apply_profile_feature as apply_profile_feature_service,
-    derive_profile_geometry as derive_profile_geometry_service, ProfileFeatureApplyRequest,
-    ProfileFeatureApplyResponse, ProfileGeometryRequest, ProfileGeometryResponse,
+    derive_profile_geometry as derive_profile_geometry_service,
+    project_profile_drawing as project_profile_drawing_service, ProfileDrawingProjectionResponse,
+    ProfileFeatureApplyRequest, ProfileFeatureApplyResponse, ProfileGeometryRequest,
+    ProfileGeometryResponse, ProjectProfileDrawingRequest,
 };
 
 #[tauri::command]
@@ -17,6 +19,17 @@ pub async fn derive_profile_geometry(
     tauri::async_runtime::spawn_blocking(move || derive_profile_geometry_service(request, &app))
         .await
         .map_err(|error| AppError::internal(format!("Profile geometry worker failed: {error}")))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn project_profile_drawing(
+    request: ProjectProfileDrawingRequest,
+    app: AppHandle,
+) -> AppResult<ProfileDrawingProjectionResponse> {
+    tauri::async_runtime::spawn_blocking(move || project_profile_drawing_service(request, &app))
+        .await
+        .map_err(|error| AppError::internal(format!("Drawing projection worker failed: {error}")))?
 }
 
 #[tauri::command]

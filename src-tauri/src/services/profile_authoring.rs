@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -105,6 +107,27 @@ pub struct ProfileGeometryRequest {
 pub struct ProfileAsset {
     pub artifact_path: String,
     pub artifact_digest: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectProfileDrawingRequest {
+    pub artifact_path: String,
+    pub view: ProfileView,
+    pub tolerance_mm: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileDrawingProjectionResponse {
+    pub source_artifact_path: String,
+    pub source_artifact_digest: String,
+    pub view: ProfileView,
+    pub tolerance_mm: f64,
+    pub units: String,
+    pub projection_asset: ProfileAsset,
+    pub display_edges: Vec<Vec<[f64; 2]>>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Type)]
@@ -297,10 +320,256 @@ pub fn derive_profile_geometry(
     derive_exact_profile_geometry(&request, app, source_digest)
 }
 
+pub fn project_profile_drawing(
+    request: ProjectProfileDrawingRequest,
+    app: &dyn PathResolver,
+) -> AppResult<ProfileDrawingProjectionResponse> {
+    validate_drawing_projection_request(&request)?;
+    let source_path = Path::new(&request.artifact_path);
+    if !source_path.is_file() {
+        return Err(AppError::not_found(format!(
+            "Projection source artifact does not exist: {}",
+            source_path.display()
+        )));
+    }
+    let extension = source_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if !extension.eq_ignore_ascii_case("step") && !extension.eq_ignore_ascii_case("stp") {
+        return Err(AppError::validation(
+            "Exact CAD drawing projections need a STEP/STP BRep file. Export FCStd as STEP first.",
+        ));
+    }
+    let source_digest = artifact_digest(&request.artifact_path)?;
+    let runner =
+        crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(app, true)
+            .ok_or_else(|| {
+                AppError::validation(
+            "Bundled native Direct OCCT runner is unavailable for exact drawing projection.",
+        )
+            })?;
+    let asset_root = app.app_data_dir().join("projection-assets");
+    std::fs::create_dir_all(&asset_root)
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    let work = asset_root.join(format!("project-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&work).map_err(|error| AppError::persistence(error.to_string()))?;
+    let _workspace = ProfileDerivationWorkspace(work.clone());
+    let request_path = work.join("request.json");
+    let request_json = serde_json::json!({
+        "sourceArtifactPath": request.artifact_path,
+        "view": request.view,
+        "toleranceMm": request.tolerance_mm,
+    });
+    let serialized_request = serde_json::to_vec(&request_json).map_err(|error| {
+        AppError::validation(format!(
+            "Could not serialize exact drawing projection request: {error}"
+        ))
+    })?;
+    std::fs::write(&request_path, serialized_request).map_err(|error| {
+        AppError::persistence(format!(
+            "Could not write drawing projection request: {error}"
+        ))
+    })?;
+    let stdout_path = work.join("runner.stdout.log");
+    let stderr_path = work.join("runner.stderr.log");
+    let output = run_profile_native_command(
+        &runner,
+        "--project-drawing",
+        "drawing projection",
+        &request_path,
+        &work,
+        &stdout_path,
+        &stderr_path,
+        180,
+    )?;
+    if !output.success {
+        return Err(AppError::with_details(
+            crate::contracts::AppErrorCode::Render,
+            "Native Direct OCCT drawing projection failed.",
+            format!(
+                "{}\n\nstdout:\n{}\n\nstderr:\n{}",
+                output.status, output.stdout, output.stderr
+            ),
+        ));
+    }
+    let report_path = work.join("display-edges.json");
+    let report: ExactDrawingReport =
+        serde_json::from_slice(&std::fs::read(&report_path).map_err(|error| {
+            AppError::persistence(format!("Native drawing preview edges are missing: {error}"))
+        })?)
+        .map_err(|error| {
+            AppError::parse(format!("Native drawing preview edges are invalid: {error}"))
+        })?;
+    let display_edges = validate_display_edges(report.display_edges)?;
+    if artifact_digest(&request.artifact_path)? != source_digest {
+        return Err(AppError::conflict(
+            "Projection source STEP changed while the exact drawing was being calculated; retry.",
+        ));
+    }
+    let staged_asset = work.join("projection.step");
+    let bytes = std::fs::read(&staged_asset).map_err(|error| {
+        AppError::persistence(format!(
+            "Native exact drawing STEP asset is missing: {error}"
+        ))
+    })?;
+    let asset_digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+    let asset_path = asset_root.join(format!(
+        "{}.step",
+        asset_digest.trim_start_matches("sha256:")
+    ));
+    if asset_path.exists() {
+        if artifact_digest(asset_path.to_string_lossy().as_ref())? != asset_digest {
+            return Err(AppError::conflict(
+                "Content-addressed drawing asset already exists with unexpected bytes.",
+            ));
+        }
+    } else {
+        std::fs::rename(&staged_asset, &asset_path).map_err(|error| {
+            AppError::persistence(format!(
+                "Could not persist exact drawing STEP asset: {error}"
+            ))
+        })?;
+    }
+    let mut warnings = report.warnings;
+    warnings.push(
+        "Drawing curves remain exact in the STEP asset. Display edges are sampled independently; they are not joined into closed profiles.".into(),
+    );
+    Ok(ProfileDrawingProjectionResponse {
+        source_artifact_path: request.artifact_path,
+        source_artifact_digest: source_digest,
+        view: request.view,
+        tolerance_mm: request.tolerance_mm,
+        units: "mm".into(),
+        projection_asset: ProfileAsset {
+            artifact_path: asset_path.to_string_lossy().into_owned(),
+            artifact_digest: asset_digest,
+        },
+        display_edges,
+        warnings,
+    })
+}
+
+struct ProfileNativeRunnerOutput {
+    success: bool,
+    status: String,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_profile_native_command(
+    runner: &Path,
+    mode: &str,
+    operation: &str,
+    request_path: &Path,
+    work: &Path,
+    stdout_path: &Path,
+    stderr_path: &Path,
+    timeout_seconds: u64,
+) -> AppResult<ProfileNativeRunnerOutput> {
+    let stdout = std::fs::File::create(stdout_path).map_err(|error| {
+        AppError::persistence(format!("Could not capture projection output: {error}"))
+    })?;
+    let stderr = std::fs::File::create(stderr_path).map_err(|error| {
+        AppError::persistence(format!("Could not capture projection errors: {error}"))
+    })?;
+    let mut child = Command::new(runner)
+        .arg(mode)
+        .arg(request_path)
+        .arg("--out")
+        .arg(work)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|error| {
+            AppError::render(format!(
+                "Could not start native drawing projection: {error}"
+            ))
+        })?;
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AppError::render(format!(
+                    "Could not monitor native {operation}; runner was stopped: {error}"
+                )));
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AppError::render(format!(
+                "Native {operation} exceeded its {timeout_seconds}-second limit. Try a lighter STEP model or a different view."
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    let read_log = |path: &Path| -> AppResult<String> {
+        std::fs::read_to_string(path).map_err(|error| {
+            AppError::persistence(format!("Could not read native projection log: {error}"))
+        })
+    };
+    Ok(ProfileNativeRunnerOutput {
+        success: status.success(),
+        status: status.to_string(),
+        stdout: read_log(stdout_path)?,
+        stderr: read_log(stderr_path)?,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExactDrawingReport {
+    display_edges: Vec<Vec<[f64; 2]>>,
+    #[serde(default)]
+    warnings: Vec<String>,
+}
+
+fn validate_drawing_projection_request(request: &ProjectProfileDrawingRequest) -> AppResult<()> {
+    if request.artifact_path.trim().is_empty() {
+        return Err(AppError::validation(
+            "Projection source artifact path is required.",
+        ));
+    }
+    if !request.tolerance_mm.is_finite() || !(1.0e-6..=1.0).contains(&request.tolerance_mm) {
+        return Err(AppError::validation(
+            "Drawing tolerance must be finite and between 0.000001 and 1 mm.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_display_edges(edges: Vec<Vec<[f64; 2]>>) -> AppResult<Vec<Vec<[f64; 2]>>> {
+    if edges.is_empty() {
+        return Err(AppError::validation(
+            "Exact drawing projection returned no visible curves.",
+        ));
+    }
+    for edge in &edges {
+        if edge.len() < 2
+            || edge
+                .iter()
+                .flatten()
+                .any(|coordinate| !coordinate.is_finite())
+        {
+            return Err(AppError::validation(
+                "Exact drawing projection contains an invalid display edge.",
+            ));
+        }
+    }
+    Ok(edges)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExactProfileReport {
     loops: Vec<ProfileLoop>,
+    #[serde(default)]
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -376,26 +645,26 @@ fn derive_exact_profile_geometry(
     std::fs::write(&request_path, serialized_request).map_err(|error| {
         AppError::persistence(format!("Could not write exact profile request: {error}"))
     })?;
-    let output = Command::new(&runner)
-        .arg("--derive-profile")
-        .arg(&request_path)
-        .arg("--out")
-        .arg(&work)
-        .output()
-        .map_err(|error| {
-            AppError::render(format!(
-                "Could not start native exact profile derivation: {error}"
-            ))
-        })?;
-    if !output.status.success() {
+    let stdout_path = work.join("runner.stdout.log");
+    let stderr_path = work.join("runner.stderr.log");
+    let output = run_profile_native_command(
+        &runner,
+        "--derive-profile",
+        "exact profile derivation",
+        &request_path,
+        &work,
+        &stdout_path,
+        &stderr_path,
+        120,
+    )?;
+    if !output.success {
         let _ = std::fs::remove_dir_all(&work);
         return Err(AppError::with_details(
             crate::contracts::AppErrorCode::Render,
             "Native Direct OCCT exact profile derivation failed.",
             format!(
-                "stdout:\n{}\n\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                "{}\n\nstdout:\n{}\n\nstderr:\n{}",
+                output.status, output.stdout, output.stderr
             ),
         ));
     }
@@ -407,6 +676,8 @@ fn derive_exact_profile_geometry(
             AppError::parse(format!("Native profile display loops are invalid: {error}"))
         })?;
     let loops = validate_profile_loops(&report.loops)?;
+    let mut warnings = report.warnings;
+    warnings.push("Exact BRep curves and holes are stored in the profile asset. Display loop points are sampled for preview only.".into());
     if artifact_digest(&request.artifact_path)? != source_digest {
         let _ = std::fs::remove_dir_all(&work);
         return Err(AppError::conflict(
@@ -484,7 +755,7 @@ fn derive_exact_profile_geometry(
         }),
         display_accuracy: "approximateDisplayOnly".into(),
         loops,
-        warnings: vec!["Exact BRep curves and holes are stored in the profile asset. Display loop points are sampled for preview only.".into()],
+        warnings,
     })
 }
 
@@ -1885,6 +2156,102 @@ mod tests {
     }
 
     #[test]
+    fn drawing_projection_validation_accepts_independent_edges_and_rejects_invalid_display_points()
+    {
+        assert_eq!(
+            validate_display_edges(vec![vec![[0.0, 0.0], [0.0, 0.0]]]).unwrap(),
+            vec![vec![[0.0, 0.0], [0.0, 0.0]]],
+            "point-degenerate exact edges stay independent; validator does not fabricate a contour"
+        );
+        assert!(validate_display_edges(vec![vec![[0.0, 0.0]]]).is_err());
+        assert!(validate_display_edges(vec![vec![[0.0, f64::NAN], [1.0, 1.0]]]).is_err());
+        assert!(validate_display_edges(Vec::new()).is_err());
+    }
+
+    #[test]
+    fn exact_front_drawing_projection_persists_verified_asset_outside_profile_apply_namespace() {
+        struct Resolver {
+            root: PathBuf,
+            runner: Option<PathBuf>,
+        }
+        impl PathResolver for Resolver {
+            fn app_config_dir(&self) -> PathBuf {
+                self.root.clone()
+            }
+
+            fn app_data_dir(&self) -> PathBuf {
+                self.root.clone()
+            }
+
+            fn resource_path(&self, path: &str) -> Option<PathBuf> {
+                if path == "runtime/occt/bin/direct-occt-runner" {
+                    self.runner.clone()
+                } else {
+                    None
+                }
+            }
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("ecky-drawing-projection-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temporary app data");
+        let resolver = Resolver {
+            root: root.clone(),
+            runner: std::env::var_os("ECKY_PROFILE_PROJECTION_TEST_RUNNER").map(PathBuf::from),
+        };
+        let Some(runner) =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &resolver, true,
+            )
+        else {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        };
+        let supports_drawing_projection = Command::new(&runner)
+            .arg("--help")
+            .output()
+            .ok()
+            .is_some_and(|output| {
+                String::from_utf8_lossy(&output.stdout).contains("--project-drawing")
+            });
+        if !supports_drawing_projection {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+
+        let source_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fem/exact-sphere.step");
+        let source_path_text = source_path.to_string_lossy();
+        let response = project_profile_drawing(
+            ProjectProfileDrawingRequest {
+                artifact_path: source_path_text.to_string(),
+                view: ProfileView::Front,
+                tolerance_mm: 0.01,
+            },
+            &resolver,
+        )
+        .expect("exact visible drawing edges");
+        assert_eq!(
+            response.source_artifact_digest,
+            artifact_digest(&source_path_text).unwrap()
+        );
+        assert_eq!(response.units, "mm");
+        assert!(!response.display_edges.is_empty());
+        assert!(response.display_edges.iter().all(|edge| edge.len() >= 2));
+        assert!(response
+            .projection_asset
+            .artifact_path
+            .starts_with(root.join("projection-assets").to_string_lossy().as_ref()));
+        assert!(std::path::Path::new(&response.projection_asset.artifact_path).is_file());
+        assert_eq!(
+            artifact_digest(&response.projection_asset.artifact_path).unwrap(),
+            response.projection_asset.artifact_digest
+        );
+        assert!(!root.join("profile-assets").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn given_closed_mesh_section_when_sliced_then_returns_deterministic_closed_outer_loop() {
         let (vertices, triangles) = square_mesh(-1.0, 1.0);
         let segments =
@@ -2614,6 +2981,23 @@ mod tests {
             )
             .await
             .expect("persisted base view version");
+            let drawing = project_profile_drawing(
+                ProjectProfileDrawingRequest {
+                    artifact_path: source_step.to_string_lossy().into_owned(),
+                    view,
+                    tolerance_mm: 0.01,
+                },
+                &resolver,
+            )
+            .expect("exact visible drawing projection succeeds independently of profile closure");
+            assert!(Path::new(&drawing.projection_asset.artifact_path).is_file());
+            assert_eq!(
+                artifact_digest(&drawing.projection_asset.artifact_path).unwrap(),
+                drawing.projection_asset.artifact_digest
+            );
+            assert!(!drawing.display_edges.is_empty());
+            assert!(drawing.display_edges.iter().all(|edge| edge.len() >= 2));
+
             let derived = derive_profile_geometry(
                 ProfileGeometryRequest {
                     artifact_path: source_step.to_string_lossy().into_owned(),
