@@ -2002,6 +2002,18 @@ Example fragment:
 (if useCap (sphere r) (cylinder r h))
 ```
 
+### `import-profile`
+
+`(import-profile path)`
+
+Imports exact planar profile regions with their outer and inner wires from a content-addressed STEP asset. Positive offsets expand outer boundaries and shrink holes.
+
+Example fragment:
+
+```scheme
+(import-profile "/absolute/path/profile-assets/<digest>.step")
+```
+
 ### `import-step`
 
 `(import-step path)`

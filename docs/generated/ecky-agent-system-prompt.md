@@ -413,6 +413,7 @@ a `[...]` note marks a backend restriction.
 (hull (sphere 6) (translate 30 0 0 (sphere 6)))  ; Convex hull of the child solids as a single closed BREP solid. [native direct OCCT only; rejected by FreeCAD interop]
 (voronoi-cell (voronoi-cells 3 3 12 12 1.5 23) 4 40 40 1.2)  ; Creates one exact bounded Voronoi polygon, uniformly inset and expressed relative to its selected site. [native direct OCCT only; rejected by FreeCAD interop]
 (import-step "/absolute/path/component.step")  ; Imports an exact STEP payload through native Direct OCCT. [native direct OCCT only; rejected by FreeCAD interop]
+(import-profile "/absolute/path/profile-assets/<digest>.step")  ; Imports exact planar profile regions with their outer and inner wires from a content-addressed STEP asset. Positive offsets expand outer boundaries and shrink holes. [native direct OCCT only; rejected by FreeCAD interop]
 (wall-pattern (:mode ribs :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Straight rib pattern along the shell parameter direction. [native mesh only]
 (wall-pattern (:mode rings :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Ring bands around the shell parameter direction. [native mesh only]
 (wall-pattern (:mode spiral :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Spiral rib pattern across shell parameters. [native mesh only]
