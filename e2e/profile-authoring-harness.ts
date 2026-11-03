@@ -19,7 +19,20 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
   ]);
   const nativeProjectionEntries = options.nativeProjectionDirectory
     ? await Promise.all((['front', 'top', 'side'] as const).map(async (view) => {
-      const raw = await readFile(`${options.nativeProjectionDirectory}/${view}/final2/display-edges.json`, 'utf8');
+      const candidates = [
+        `${options.nativeProjectionDirectory}/${view}/final2/display-edges.json`,
+        `${options.nativeProjectionDirectory}/${view}/out/display-edges.json`,
+      ];
+      let raw: string | null = null;
+      for (const path of candidates) {
+        try {
+          raw = await readFile(path, 'utf8');
+          break;
+        } catch {
+          // Try the next known native-output layout.
+        }
+      }
+      if (raw === null) throw new Error(`No native projection edges found for ${view} in ${options.nativeProjectionDirectory}.`);
       return [view, JSON.parse(raw) as { displayEdges: number[][][]; warnings?: string[] }] as const;
     }))
     : [];
@@ -311,6 +324,7 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
           sourceArtifactPath: request.artifactPath,
           sourceArtifactDigest: 'sha256:profile-source',
           view: request.view,
+          visibility: request.visibility ?? 'allEdges',
           toleranceMm: request.toleranceMm,
           units: 'mm',
           projectionAsset: { artifactPath: `/mock/profile-projections/${request.view}.step`, artifactDigest: `sha256:projection-${request.view}` },

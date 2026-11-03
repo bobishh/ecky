@@ -35,11 +35,13 @@ Sketch SHALL fill the application's work area. A compact view selector SHALL off
 
 For exact CAD projection, one projection action SHALL request all three views for the same selected model version, regardless of the display layout. Each view SHALL retain its own result, pending state, and error; failure in one view SHALL NOT erase successful views. Front maps to XZ, top to XY, and side to YZ.
 
-A projection drawing and a closed profile are distinct results. Project all three views SHALL display native exact visible projected edges without waiting for material-boundary classification, closed-loop assembly, or extrusion preparation. Each edge SHALL be drawn independently; the preview SHALL NOT connect unrelated endpoints or close open edges. The exact projected curves SHALL be retained in a separate content-addressed STEP asset; sampled screen points are preview-only. A drawing asset SHALL NOT be accepted as an extrudable profile asset.
+A projection drawing and a closed profile are distinct results. Project all three views SHALL display native exact projected edges without waiting for material-boundary classification, closed-loop assembly, or extrusion preparation. Each edge SHALL be drawn independently; the preview SHALL NOT connect unrelated endpoints or close open edges. The exact projected curves SHALL be retained in a separate content-addressed STEP asset; sampled screen points are preview-only. A drawing asset SHALL NOT be accepted as an extrudable profile asset.
+
+Projection edges SHALL offer All edges (default) and Visible edges. All edges SHALL project exact source edges and outlines without hidden-line removal, including edges occluded by other geometry. Visible edges SHALL additionally run native hidden-line removal under a bounded execution time. The request and result SHALL record the selected mode, and the displayed drawing SHALL identify its actual mode independently of later selector changes. The application SHALL NOT silently substitute one mode for the other. Closed-profile construction SHALL keep its separate material-boundary semantics regardless of the drawing mode.
 
 Build closed profile SHALL explicitly request the existing strict native profile derivation for the selected view. Only successful closed-profile derivation SHALL bind that view's profile asset to Apply or enable approximate polygon conversion. Pending or failed profile construction SHALL preserve the projection drawing and other views. Backend errors SHALL show actionable diagnostic text, including process exit status when a native process fails without text output. Unsupported closed-profile extraction SHALL NOT prevent an otherwise valid drawing projection.
 
-Native derivation SHALL retain every valid source solid. Loose STEP faces lacking any surface and belonging to no solid MAY be excluded with an explicit warning. Invalid solid bodies SHALL be reported rather than silently omitted. Projection drawing and profile assets SHALL preserve source digest and view provenance.
+Native derivation SHALL retain every valid source solid. Drawing projection SHALL also include valid surfaced faces and shells outside solid bodies, and SHALL support valid face-only STEP sources. The solid-only input requirements of closed-profile derivation SHALL NOT reject these drawing sources. Loose STEP faces lacking any surface and belonging to no solid MAY be excluded with an explicit warning. Invalid solid bodies or invalid surfaced faces SHALL be reported rather than silently omitted. Projection drawing and profile assets SHALL preserve source digest and view provenance.
 
 Each view SHALL independently own its manual loops, unfinished stroke, undo history, selected vertex, placement offset, and converted-profile state. Selecting another view SHALL NOT transfer a drawing or overwrite another view. Rendering ALL THREE SHALL show all existing drawings concurrently, including inactive views. Each canvas SHALL have exactly one coordinate-aligned grid that follows pan and zoom; no screen-space decorative grid may be layered beneath it.
 
@@ -88,7 +90,7 @@ Camera scale SHALL be defined independently of pane dimensions, in screen pixels
 - **THEN** the failed pane shows its diagnostic while successful drawings remain selectable and available for closed-profile construction
 
 #### Scenario: Drawing succeeds while closed-profile construction fails
-- **GIVEN** native projection produces exact visible edges from a STEP assembly, including open curves and internal detail
+- **GIVEN** native projection produces exact drawing edges from a STEP assembly, including open curves and internal detail
 - **WHEN** the user requests all three views
 - **THEN** each successful drawing appears without requiring closed boundaries and Apply remains unavailable for a drawing alone
 - **WHEN** Build closed profile fails for the selected drawing
@@ -99,6 +101,19 @@ Camera scale SHALL be defined independently of pane dimensions, in screen pixels
 - **WHEN** the user projects the assembly
 - **THEN** all valid solids participate in the native drawing calculation without passing the null-surface faces to HLR
 - **AND** the result identifies the excluded loose faces in a warning
+
+#### Scenario: Drawing contains valid surfaces outside solids
+- **GIVEN** a STEP assembly contains valid solids and valid surfaced faces outside those solids, or a STEP source contains only valid surfaced faces
+- **WHEN** the user requests drawing projections
+- **THEN** native HLR includes those surfaces in the exact projected drawing without requiring a closed volume
+- **AND** closed-profile construction retains its separate solid and boundary validation
+
+#### Scenario: Expensive hidden-line removal does not block all-edge drawing
+- **GIVEN** a STEP model whose hidden-line removal exceeds the execution limit
+- **WHEN** the user projects it with the default All edges mode
+- **THEN** native projection returns exact edges without running hidden-line removal, and the drawing is labeled All edges
+- **WHEN** the user explicitly requests Visible edges
+- **THEN** the native visibility calculation either succeeds with that result mode or reports its bounded failure without silently returning All edges
 
 #### Scenario: Exact profile controls
 - **GIVEN** exact CAD evidence with sampled display contours

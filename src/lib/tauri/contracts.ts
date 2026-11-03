@@ -2274,7 +2274,8 @@ export type PrimitiveBinding = { parameterKey: string; scale?: number; offset?: 
 export type ProfileArtifactReference = { sourceArtifactPath: string; sourceArtifactDigest: string; operation: ProfileDerivationOperation; toleranceMm: number; accuracy: ProfileEvidenceAccuracy; profileAsset?: ProfileAsset | null }
 export type ProfileAsset = { artifactPath: string; artifactDigest: string }
 export type ProfileDerivationOperation = { kind: "section"; plane: ProfilePlane; offsetMm: number } | { kind: "projection"; view: ProfileView }
-export type ProfileDrawingProjectionResponse = { sourceArtifactPath: string; sourceArtifactDigest: string; view: ProfileView; toleranceMm: number; units: string; projectionAsset: ProfileAsset; displayEdges: (([number, number])[])[]; warnings: string[] }
+export type ProfileDrawingProjectionResponse = { sourceArtifactPath: string; sourceArtifactDigest: string; view: ProfileView; visibility: ProfileDrawingVisibility; toleranceMm: number; units: string; projectionAsset: ProfileAsset; displayEdges: (([number, number])[])[]; warnings: string[] }
+export type ProfileDrawingVisibility = "allEdges" | "visibleEdges"
 export type ProfileEvidenceAccuracy = "exactBrep" | "approximateMesh" | "approximatePolygon"
 export type ProfileFeatureApplyRequest = { threadId: string; baseMessageId?: string | null; expectedSource: string; loops?: ProfileLoop[] | null; plane: ProfilePlane; offsetMm: number; clearanceMm: number; depthMm: number; partName: string; reference?: ProfileArtifactReference | null; drawingProfile?: DrawingProfileApplyInput | null }
 export type ProfileFeatureApplyResponse = { source: string; draft: ManualCodeApplyResponse }
@@ -2300,7 +2301,7 @@ export type ProjectManifest = { schemaVersion: number; projectId: string; thread
  * thing distinguishing "user edited the file" from "clean".
  */
 sourceDigest: string; exportedAt: number }
-export type ProjectProfileDrawingRequest = { artifactPath: string; view: ProfileView; toleranceMm: number }
+export type ProjectProfileDrawingRequest = { artifactPath: string; view: ProfileView; visibility?: ProfileDrawingVisibility; toleranceMm: number }
 export type ProjectSourceDocument = { threadId: string; slug: string; folder: string; file: string; source: string }
 export type ProjectSyncState =
 /**

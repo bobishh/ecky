@@ -5478,6 +5478,7 @@ import {
     return projectProfileDrawing({
       artifactPath: profileStepArtifactPath,
       view: input.view,
+      visibility: input.visibility,
       toleranceMm: input.toleranceMm,
     });
   }

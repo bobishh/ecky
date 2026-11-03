@@ -8414,15 +8414,15 @@ struct ProfileSource {
     std::vector<std::string> warnings;
 };
 
-ProfileSource load_profile_source(const fs::path& source_path) {
+ProfileSource load_profile_source(const fs::path& source_path, bool include_loose_surface_faces) {
     STEPControl_Reader reader;
     if (reader.ReadFile(source_path.string().c_str()) != IFSelect_RetDone ||
         reader.TransferRoots() <= 0) {
         throw EvalError("profile source STEP could not be read or transferred");
     }
     const TopoDS_Shape transferred = reader.OneShape();
-    if (transferred.IsNull() || !TopExp_Explorer(transferred, TopAbs_SOLID).More()) {
-        throw EvalError("exact profile derivation requires at least one STEP solid");
+    if (transferred.IsNull()) {
+        throw EvalError("profile source STEP contains no transferable geometry");
     }
 
     std::vector<TopoDS_Solid> solids;
@@ -8439,22 +8439,44 @@ ProfileSource load_profile_source(const fs::path& source_path) {
     }
 
     std::size_t loose_null_surface_faces = 0;
+    std::vector<TopoDS_Face> loose_surface_faces;
     for (TopExp_Explorer explorer(transferred, TopAbs_FACE); explorer.More(); explorer.Next()) {
         const TopoDS_Face face = TopoDS::Face(explorer.Current());
         if (solid_faces.Contains(face)) continue;
         if (!BRep_Tool::Surface(face).IsNull()) {
-            throw EvalError("exact profile source contains a loose STEP face with a surface outside "
-                            "all solid bodies; projection is ambiguous and no geometry was omitted");
+            if (!include_loose_surface_faces) {
+                throw EvalError("exact profile source contains a loose STEP face with a surface outside "
+                                "all solid bodies; closed-profile derivation is ambiguous and no geometry was omitted");
+            }
+            if (!BRepCheck_Analyzer(face).IsValid()) {
+                throw EvalError("exact drawing source contains an invalid loose STEP face outside all solid bodies");
+            }
+            loose_surface_faces.push_back(face);
+            continue;
         }
         ++loose_null_surface_faces;
+    }
+
+    if (solids.empty() && loose_surface_faces.empty()) {
+        if (include_loose_surface_faces) {
+            throw EvalError("exact drawing projection requires a STEP solid or a valid surfaced face/shell");
+        }
+        throw EvalError("exact profile derivation requires at least one STEP solid");
     }
 
     TopoDS_Compound solid_compound;
     BRep_Builder solid_builder;
     solid_builder.MakeCompound(solid_compound);
     for (const TopoDS_Solid& solid : solids) solid_builder.Add(solid_compound, solid);
+    for (const TopoDS_Face& face : loose_surface_faces) solid_builder.Add(solid_compound, face);
     ProfileSource result{solid_compound, {}};
-    if (loose_null_surface_faces > 0) {
+    if (include_loose_surface_faces &&
+        (!loose_surface_faces.empty() || loose_null_surface_faces > 0)) {
+        result.warnings.push_back("Included " + std::to_string(loose_surface_faces.size()) +
+                                  " valid surfaced loose STEP face(s) outside solid bodies; retained " +
+                                  std::to_string(solids.size()) + " valid solid body/bodies; excluded " +
+                                  std::to_string(loose_null_surface_faces) + " loose face(s) with no surface.");
+    } else if (loose_null_surface_faces > 0) {
         result.warnings.push_back("Excluded " + std::to_string(loose_null_surface_faces) +
                                   " loose STEP face(s) with no surface and no containing solid; all valid solid bodies were retained.");
     }
@@ -8476,18 +8498,20 @@ void projection_frame(const std::string& view,
     }
 }
 
-Handle(HLRBRep_Algo) project_visible_curves(const TopoDS_Shape& shape) {
+Handle(HLRBRep_Algo) project_visible_curves(const TopoDS_Shape& shape, bool hide_occluded_edges) {
     Handle(HLRBRep_Algo) hidden_line = new HLRBRep_Algo();
     hidden_line->Add(shape);
     hidden_line->Projector(HLRAlgo_Projector(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1))));
     hidden_line->Update();
-    hidden_line->Hide();
+    if (hide_occluded_edges) hidden_line->Hide();
+    else hidden_line->ShowAll();
     return hidden_line;
 }
 
 struct ProfileDrawingRequest {
     fs::path source_path;
     std::string view;
+    std::string visibility = "allEdges";
     double tolerance_mm = 0.5;
 };
 
@@ -8499,10 +8523,20 @@ ProfileDrawingRequest parse_profile_drawing_request(yyjson_val* root) {
     if (!yyjson_is_str(source) || !yyjson_is_str(view) || !yyjson_is_num(tolerance)) {
         throw ParseError("drawing projection request needs sourceArtifactPath, view, and toleranceMm");
     }
-    ProfileDrawingRequest request{yyjson_get_str(source), yyjson_get_str(view), yyjson_get_num(tolerance)};
+    ProfileDrawingRequest request;
+    request.source_path = yyjson_get_str(source);
+    request.view = yyjson_get_str(view);
+    request.tolerance_mm = yyjson_get_num(tolerance);
+    if (yyjson_val* visibility = yyjson_obj_get(root, "visibility")) {
+        if (!yyjson_is_str(visibility)) throw ParseError("drawing projection visibility must be allEdges or visibleEdges");
+        request.visibility = yyjson_get_str(visibility);
+    }
     if (request.source_path.empty()) throw ParseError("sourceArtifactPath cannot be empty");
     if (request.view != "front" && request.view != "top" && request.view != "side") {
         throw ParseError("drawing projection view must be front, top, or side");
+    }
+    if (request.visibility != "allEdges" && request.visibility != "visibleEdges") {
+        throw ParseError("drawing projection visibility must be allEdges or visibleEdges");
     }
     if (!std::isfinite(request.tolerance_mm) || request.tolerance_mm < 1.0e-6 || request.tolerance_mm > 1.0) {
         throw ParseError("drawing projection toleranceMm must be between 0.000001 and 1 mm");
@@ -8511,13 +8545,14 @@ ProfileDrawingRequest parse_profile_drawing_request(yyjson_val* root) {
 }
 
 void project_exact_drawing(const ProfileDrawingRequest& request, const fs::path& output_dir) {
-    ProfileSource prepared = load_profile_source(request.source_path);
+    ProfileSource prepared = load_profile_source(request.source_path, true);
     gp_Pnt origin;
     gp_Dir normal;
     gp_Dir x_direction;
     projection_frame(request.view, origin, normal, x_direction);
     const TopoDS_Shape source = transform_shape_to_profile_plane(prepared.shape, origin, normal, x_direction);
-    HLRBRep_HLRToShape visible(project_visible_curves(source));
+    HLRBRep_HLRToShape visible(project_visible_curves(
+        source, request.visibility == "visibleEdges"));
     TopTools_IndexedMapOfShape unique_edges;
     const TopoDS_Shape visible_shape = visible.VCompound();
     const TopoDS_Shape outline_shape = visible.OutLineVCompound();
@@ -8555,6 +8590,9 @@ void project_exact_drawing(const ProfileDrawingRequest& request, const fs::path&
     if (point_degenerate_edges > 0) {
         prepared.warnings.push_back(std::to_string(point_degenerate_edges) +
                                     " point-degenerate projected edge(s) are shown as zero-length preview segments; exact topology remains in the STEP asset.");
+    }
+    if (request.visibility == "allEdges") {
+        prepared.warnings.push_back("All projected edges shown, including edges hidden behind other geometry.");
     }
     write_profile_drawing_file(output_dir / "display-edges.json", display_edges, prepared.warnings);
 }
@@ -8603,7 +8641,7 @@ ProfileDerivationRequest parse_profile_derivation_request(yyjson_val* root) {
 }
 
 void derive_exact_profile(const ProfileDerivationRequest& request, const fs::path& output_dir) {
-    ProfileSource prepared = load_profile_source(request.source_path);
+    ProfileSource prepared = load_profile_source(request.source_path, false);
     TopoDS_Shape source = prepared.shape;
     std::vector<std::string> warnings = std::move(prepared.warnings);
 
@@ -8662,7 +8700,7 @@ void derive_exact_profile(const ProfileDerivationRequest& request, const fs::pat
         loops = classify_profile_loops(wires, occupancy, classification_tolerance);
         profile_shape = build_profile_faces(loops);
     } else {
-        Handle(HLRBRep_Algo) hidden_line = project_visible_curves(source);
+        Handle(HLRBRep_Algo) hidden_line = project_visible_curves(source, true);
         HLRBRep_HLRToShape visible(hidden_line);
 
         BRep_Builder visible_builder;

@@ -94,6 +94,14 @@ pub enum ProfileView {
     Side,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Type, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ProfileDrawingVisibility {
+    #[default]
+    AllEdges,
+    VisibleEdges,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProfileGeometryRequest {
@@ -114,6 +122,8 @@ pub struct ProfileAsset {
 pub struct ProjectProfileDrawingRequest {
     pub artifact_path: String,
     pub view: ProfileView,
+    #[serde(default)]
+    pub visibility: ProfileDrawingVisibility,
     pub tolerance_mm: f64,
 }
 
@@ -123,6 +133,7 @@ pub struct ProfileDrawingProjectionResponse {
     pub source_artifact_path: String,
     pub source_artifact_digest: String,
     pub view: ProfileView,
+    pub visibility: ProfileDrawingVisibility,
     pub tolerance_mm: f64,
     pub units: String,
     pub projection_asset: ProfileAsset,
@@ -359,6 +370,7 @@ pub fn project_profile_drawing(
     let request_json = serde_json::json!({
         "sourceArtifactPath": request.artifact_path,
         "view": request.view,
+        "visibility": request.visibility,
         "toleranceMm": request.tolerance_mm,
     });
     let serialized_request = serde_json::to_vec(&request_json).map_err(|error| {
@@ -384,14 +396,7 @@ pub fn project_profile_drawing(
         180,
     )?;
     if !output.success {
-        return Err(AppError::with_details(
-            crate::contracts::AppErrorCode::Render,
-            "Native Direct OCCT drawing projection failed.",
-            format!(
-                "{}\n\nstdout:\n{}\n\nstderr:\n{}",
-                output.status, output.stdout, output.stderr
-            ),
-        ));
+        return Err(native_runner_failure("drawing projection", &output));
     }
     let report_path = work.join("display-edges.json");
     let report: ExactDrawingReport =
@@ -439,6 +444,7 @@ pub fn project_profile_drawing(
         source_artifact_path: request.artifact_path,
         source_artifact_digest: source_digest,
         view: request.view,
+        visibility: request.visibility,
         tolerance_mm: request.tolerance_mm,
         units: "mm".into(),
         projection_asset: ProfileAsset {
@@ -455,6 +461,65 @@ struct ProfileNativeRunnerOutput {
     status: String,
     stdout: String,
     stderr: String,
+}
+
+#[derive(Deserialize)]
+struct NativeRunnerError {
+    class: String,
+    code: String,
+    message: String,
+    details: String,
+}
+
+fn native_runner_failure(operation: &str, output: &ProfileNativeRunnerOutput) -> AppError {
+    let native_error = output
+        .stderr
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<NativeRunnerError>(line.trim()).ok());
+    if let Some(native_error) = native_error {
+        let details = if native_error.details.trim().is_empty()
+            || native_error.details.trim() == native_error.message.trim()
+        {
+            format!(
+                "runner {} · {}:{}",
+                output.status, native_error.class, native_error.code
+            )
+        } else {
+            format!(
+                "runner {} · {}:{}\n{}",
+                output.status,
+                native_error.class,
+                native_error.code,
+                bounded_native_excerpt(&native_error.details, 2_000)
+            )
+        };
+        return AppError::with_details(
+            crate::contracts::AppErrorCode::Render,
+            format!(
+                "Native Direct OCCT {operation} failed: {}",
+                native_error.message
+            ),
+            details,
+        );
+    }
+    AppError::with_details(
+        crate::contracts::AppErrorCode::Render,
+        format!("Native Direct OCCT {operation} failed ({}).", output.status),
+        format!(
+            "stdout:\n{}\n\nstderr:\n{}",
+            bounded_native_excerpt(&output.stdout, 2_000),
+            bounded_native_excerpt(&output.stderr, 2_000)
+        ),
+    )
+}
+
+fn bounded_native_excerpt(value: &str, max_chars: usize) -> String {
+    let mut result: String = value.chars().take(max_chars).collect();
+    if value.chars().count() > max_chars {
+        result.push_str("… [truncated]");
+    }
+    result
 }
 
 fn run_profile_native_command(
@@ -659,14 +724,7 @@ fn derive_exact_profile_geometry(
     )?;
     if !output.success {
         let _ = std::fs::remove_dir_all(&work);
-        return Err(AppError::with_details(
-            crate::contracts::AppErrorCode::Render,
-            "Native Direct OCCT exact profile derivation failed.",
-            format!(
-                "{}\n\nstdout:\n{}\n\nstderr:\n{}",
-                output.status, output.stdout, output.stderr
-            ),
-        ));
+        return Err(native_runner_failure("exact profile derivation", &output));
     }
     let report: ExactProfileReport =
         serde_json::from_slice(&std::fs::read(&report_path).map_err(|error| {
@@ -2169,6 +2227,56 @@ mod tests {
     }
 
     #[test]
+    fn drawing_visibility_defaults_to_all_edges_and_accepts_explicit_visible_edges() {
+        let default_request: ProjectProfileDrawingRequest =
+            serde_json::from_value(serde_json::json!({
+                "artifactPath": "/model.step",
+                "view": "front",
+                "toleranceMm": 0.05
+            }))
+            .unwrap();
+        assert_eq!(
+            default_request.visibility,
+            ProfileDrawingVisibility::AllEdges
+        );
+
+        let visible_request: ProjectProfileDrawingRequest =
+            serde_json::from_value(serde_json::json!({
+                "artifactPath": "/model.step",
+                "view": "front",
+                "visibility": "visibleEdges",
+                "toleranceMm": 0.05
+            }))
+            .unwrap();
+        assert_eq!(
+            visible_request.visibility,
+            ProfileDrawingVisibility::VisibleEdges
+        );
+    }
+
+    #[test]
+    fn native_runner_json_error_promotes_message_and_keeps_compact_status_details() {
+        let error = native_runner_failure(
+            "drawing projection",
+            &ProfileNativeRunnerOutput {
+                success: false,
+                status: "exit status: 3".into(),
+                stdout: String::new(),
+                stderr: r#"{"class":"validation_error","code":"validation_failed","message":"loose surfaced face is supported","details":"loose surfaced face is supported"}"#.into(),
+            },
+        );
+        assert_eq!(
+            error.message,
+            "Native Direct OCCT drawing projection failed: loose surfaced face is supported"
+        );
+        let details = error.details.expect("runner diagnostic metadata");
+        assert!(details.contains("exit status: 3"));
+        assert!(details.contains("validation_error:validation_failed"));
+        assert!(!details.contains("{\"class\""));
+        assert!(!details.contains("loose surfaced face is supported"));
+    }
+
+    #[test]
     fn exact_front_drawing_projection_persists_verified_asset_outside_profile_apply_namespace() {
         struct Resolver {
             root: PathBuf,
@@ -2226,6 +2334,7 @@ mod tests {
             ProjectProfileDrawingRequest {
                 artifact_path: source_path_text.to_string(),
                 view: ProfileView::Front,
+                visibility: ProfileDrawingVisibility::AllEdges,
                 tolerance_mm: 0.01,
             },
             &resolver,
@@ -2236,6 +2345,7 @@ mod tests {
             artifact_digest(&source_path_text).unwrap()
         );
         assert_eq!(response.units, "mm");
+        assert_eq!(response.visibility, ProfileDrawingVisibility::AllEdges);
         assert!(!response.display_edges.is_empty());
         assert!(response.display_edges.iter().all(|edge| edge.len() >= 2));
         assert!(response
@@ -2985,6 +3095,7 @@ mod tests {
                 ProjectProfileDrawingRequest {
                     artifact_path: source_step.to_string_lossy().into_owned(),
                     view,
+                    visibility: ProfileDrawingVisibility::AllEdges,
                     tolerance_mm: 0.01,
                 },
                 &resolver,

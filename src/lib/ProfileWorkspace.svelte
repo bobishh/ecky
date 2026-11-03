@@ -17,6 +17,7 @@
     type ProfileDeriveInput,
     type ProfileDrawingInput,
     type ProfileDrawingProjectionResponse,
+    type ProfileDrawingVisibility,
     type ProfileGeometryOperation,
     type ProfileLoop,
     type ProfileLoopRole,
@@ -140,6 +141,7 @@
   let sectionOffset = $state('0');
   let viewLayout = $state<'single' | 'allThree'>('single');
   let tolerance = $state('0.5');
+  let projectionVisibility = $state<ProfileDrawingVisibility>('allEdges');
   let clearance = $state('0');
   let depth = $state('10');
   let partName = $state('profile-feature');
@@ -904,15 +906,16 @@
       return;
     }
     const requestScope = scopeKey;
+    const visibility = projectionVisibility;
     setError('');
-    setStatus('Projecting the current model into front, top, and side views…');
+    setStatus(`Projecting ${visibility === 'allEdges' ? 'all edges' : 'visible edges'} into front, top, and side views…`);
     const tasks = PROFILE_VIEWS.map(async (view) => {
       const requestId = ++requestSequence;
       viewRequestIds = { ...viewRequestIds, [view]: requestId };
       viewPending = { ...viewPending, [view]: { scopeKey: requestScope, requestId, kind: 'drawing' } };
       viewErrors = { ...viewErrors, [view]: { scopeKey: requestScope, message: '' } };
       try {
-        const response = await onProjectDrawing({ view, toleranceMm });
+        const response = await onProjectDrawing({ view, toleranceMm, visibility });
         if (requestScope !== scopeKey || viewRequestIds[view] !== requestId) return;
         projectionDrawings = { ...projectionDrawings, [view]: { scopeKey: requestScope, response } };
         viewErrors = { ...viewErrors, [view]: null };
@@ -1496,6 +1499,14 @@
           <input aria-label="Tolerance (mm)" type="number" min="0.001" step="0.1" bind:value={tolerance} disabled={currentPending !== null} />
         </label>
         {#if deriveMode === 'exactProjection'}
+          <label>
+            Projection edges
+            <select aria-label="Projection edges" bind:value={projectionVisibility} disabled={currentPending !== null || currentViewsPending}>
+              <option value="allEdges">All edges</option>
+              <option value="visibleEdges">Visible edges</option>
+            </select>
+          </label>
+          <p class="inline-hint">All edges includes hidden edges. Visible edges removes occluded edges and can take longer.</p>
           <button class="action-button action-button--secondary" type="button" onclick={projectAllDrawings} disabled={!deriveAvailable || currentPending !== null || drawing || currentViewsPending}>
             {currentViewsPending ? 'Projecting…' : 'Project all three views'}
           </button>
@@ -1820,7 +1831,7 @@
           >
             <div class="sketch-pane__label">
               <button class="view-select" type="button" aria-label={`Select ${view} projection`} aria-pressed={selectedView === view} onclick={(event) => { event.stopPropagation(); selectView(view); }}>{view.toUpperCase()}</button>
-              <span>{photoForView(view)?.pending ? 'RECOGNIZING…' : photoForView(view)?.error ? 'ERROR' : viewPendingFor(view) ? (viewPendingKindFor(view) === 'profile' ? 'BUILDING PROFILE…' : 'PROJECTING…') : viewErrorFor(view) ? 'ERROR' : photoForView(view)?.accepted ? 'PROFILE ACCEPTED' : projectionDrawing && !photo ? 'PROJECTED EDGES' : viewLoops.length ? `${viewLoops.length} LOOPS` : photoForView(view) ? 'DRAWING PHOTO' : 'NO PROFILE'}</span>
+              <span>{photoForView(view)?.pending ? 'RECOGNIZING…' : photoForView(view)?.error ? 'ERROR' : viewPendingFor(view) ? (viewPendingKindFor(view) === 'profile' ? 'BUILDING PROFILE…' : 'PROJECTING…') : viewErrorFor(view) ? 'ERROR' : photoForView(view)?.accepted ? 'PROFILE ACCEPTED' : projectionDrawing && !photo ? `${projectionDrawing.visibility === 'allEdges' ? 'ALL EDGES' : 'VISIBLE EDGES'} · PROJECTED` : viewLoops.length ? `${viewLoops.length} LOOPS` : photoForView(view) ? 'DRAWING PHOTO' : 'NO PROFILE'}</span>
               <button class="sketch-pane__label-action" type="button" onclick={(event) => { event.stopPropagation(); resetPaneCamera(view); }}>FIT VIEW</button>
             </div>
             {#if photoForView(view)?.pending}
@@ -1953,7 +1964,7 @@
           <span>Image coordinates in pixels · set scale and recognize before applying.</span>
         {:else if currentProjectionDrawing && !currentEvidence}
           <span class="evidence-tag exact">EXACT CAD PROJECTION</span>
-          <span>{selectedView.toUpperCase()} · {currentProjectionDrawing.displayEdges.length} projected edges · preview only · build a closed profile before applying</span>
+          <span>{selectedView.toUpperCase()} · {currentProjectionDrawing.visibility === 'allEdges' ? 'all edges, including occluded' : 'visible edges only'} · {currentProjectionDrawing.displayEdges.length} projected edges · preview only · build a closed profile before applying</span>
         {:else if currentEvidence}
           <span class={['evidence-tag', { exact: isExactProfile }]}>{isExactProfile ? 'EXACT CAD PROFILE' : 'APPROXIMATE PROFILE'}</span>
           <span>

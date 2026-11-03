@@ -1003,6 +1003,90 @@ void given_annular_profile_when_offset_positive_or_negative_then_both_boundaries
     assert_offset(-1.0, 9.0, 5.0);
 }
 
+void given_exact_drawing_projection_when_step_has_surfaced_loose_face_then_retains_all_geometry() {
+    const fs::path root = fs::temp_directory_path() /
+        ("ecky-direct-occt-loose-face-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(root);
+    const TopoDS_Shape solid = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 10, 8, 6).Shape();
+    const TopoDS_Face loose_face = BRepBuilderAPI_MakeFace(
+        gp_Pln(gp_Pnt(20, 0, 10), gp_Dir(0, 0, 1)), 0, 7, 0, 5).Face();
+    assert(BRepCheck_Analyzer(solid).IsValid());
+    assert(BRepCheck_Analyzer(loose_face).IsValid());
+    BRep_Builder builder;
+    TopoDS_Compound source;
+    builder.MakeCompound(source);
+    builder.Add(source, solid);
+    builder.Add(source, loose_face);
+    const fs::path source_step = root / "mixed-solid-and-surface.step";
+    write_step_file(source_step, {source});
+
+    const ProfileSource prepared = load_profile_source(source_step, true);
+    std::size_t solid_count = 0;
+    std::size_t face_count = 0;
+    for (TopExp_Explorer explorer(prepared.shape, TopAbs_SOLID); explorer.More(); explorer.Next()) ++solid_count;
+    for (TopExp_Explorer explorer(prepared.shape, TopAbs_FACE); explorer.More(); explorer.Next()) ++face_count;
+    assert(solid_count == 1);
+    assert(face_count == 7);
+    assert(prepared.warnings.size() == 1);
+    assert(prepared.warnings.front().find("Included 1 valid surfaced loose STEP face") != std::string::npos);
+
+    bool strict_profile_rejected_loose_face = false;
+    try {
+        (void)load_profile_source(source_step, false);
+    } catch (const EvalError&) {
+        strict_profile_rejected_loose_face = true;
+    }
+    assert(strict_profile_rejected_loose_face);
+
+    const fs::path output_dir = root / "front-drawing";
+    project_exact_drawing(ProfileDrawingRequest{source_step, "front", "allEdges", 0.01}, output_dir);
+    std::ifstream report_file(output_dir / "display-edges.json");
+    const std::string report(std::istreambuf_iterator<char>(report_file), {});
+    assert(report.find("Included 1 valid surfaced loose STEP face") != std::string::npos);
+    STEPControl_Reader result_reader;
+    assert(result_reader.ReadFile((output_dir / "projection.step").string().c_str()) == IFSelect_RetDone);
+    assert(result_reader.TransferRoots() > 0);
+    TopTools_IndexedMapOfShape result_edges;
+    TopExp::MapShapes(result_reader.OneShape(), TopAbs_EDGE, result_edges);
+    assert(result_edges.Extent() >= 6);
+
+    const fs::path face_only_step = root / "loose-surfaced-face-only.step";
+    write_step_file(face_only_step, {loose_face});
+    const ProfileSource face_only_source = load_profile_source(face_only_step, true);
+    std::size_t face_only_solid_count = 0;
+    std::size_t face_only_face_count = 0;
+    for (TopExp_Explorer explorer(face_only_source.shape, TopAbs_SOLID); explorer.More(); explorer.Next()) {
+        ++face_only_solid_count;
+    }
+    for (TopExp_Explorer explorer(face_only_source.shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
+        ++face_only_face_count;
+    }
+    assert(face_only_solid_count == 0);
+    assert(face_only_face_count == 1);
+    bool strict_profile_rejected_face_only_source = false;
+    try {
+        (void)load_profile_source(face_only_step, false);
+    } catch (const EvalError&) {
+        strict_profile_rejected_face_only_source = true;
+    }
+    assert(strict_profile_rejected_face_only_source);
+
+    const fs::path face_only_output = root / "face-only-drawing";
+    project_exact_drawing(
+        ProfileDrawingRequest{face_only_step, "top", "allEdges", 0.01}, face_only_output);
+    std::ifstream face_only_report_file(face_only_output / "display-edges.json");
+    const std::string face_only_report(std::istreambuf_iterator<char>(face_only_report_file), {});
+    assert(face_only_report.find("\"displayEdges\":[[") != std::string::npos);
+    STEPControl_Reader face_only_reader;
+    assert(face_only_reader.ReadFile((face_only_output / "projection.step").string().c_str()) == IFSelect_RetDone);
+    assert(face_only_reader.TransferRoots() > 0);
+    TopTools_IndexedMapOfShape face_only_edges;
+    TopExp::MapShapes(face_only_reader.OneShape(), TopAbs_EDGE, face_only_edges);
+    assert(face_only_edges.Extent() >= 4);
+    fs::remove_all(root);
+}
+
 void given_native_profile_derivation_when_sectioned_or_projected_then_exact_loops_respect_material_occupancy() {
     const fs::path root = fs::temp_directory_path() /
         ("ecky-direct-occt-profile-derive-" + std::to_string(
@@ -1051,7 +1135,7 @@ void given_native_profile_derivation_when_sectioned_or_projected_then_exact_loop
     write_step_file(ring_step, {ring_cut.Shape()});
 
     const fs::path drawing_projection = root / "drawing-projection-top";
-    project_exact_drawing(ProfileDrawingRequest{ring_step, "top", 0.05}, drawing_projection);
+    project_exact_drawing(ProfileDrawingRequest{ring_step, "top", "allEdges", 0.05}, drawing_projection);
     const std::string drawing_preview = [&]() {
         std::ifstream file(drawing_projection / "display-edges.json");
         return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
@@ -1063,6 +1147,18 @@ void given_native_profile_derivation_when_sectioned_or_projected_then_exact_loop
         return std::abs(radius - 12.0) < 1.0e-6;
     }));
     assert(std::any_of(drawing_radii.begin(), drawing_radii.end(), [](double radius) {
+        return std::abs(radius - 4.0) < 1.0e-6;
+    }));
+    const fs::path visible_drawing_projection = root / "drawing-visible-edges-top";
+    project_exact_drawing(
+        ProfileDrawingRequest{ring_step, "top", "visibleEdges", 0.05},
+        visible_drawing_projection);
+    const std::vector<double> visible_drawing_radii = circular_edge_radii(
+        read_step(visible_drawing_projection / "projection.step"));
+    assert(std::any_of(visible_drawing_radii.begin(), visible_drawing_radii.end(), [](double radius) {
+        return std::abs(radius - 12.0) < 1.0e-6;
+    }));
+    assert(std::any_of(visible_drawing_radii.begin(), visible_drawing_radii.end(), [](double radius) {
         return std::abs(radius - 4.0) < 1.0e-6;
     }));
 
@@ -1272,5 +1368,6 @@ int main() {
     given_fused_capsule_cutter_when_cut_repeats_then_authored_faces_survive();
     given_annular_profile_when_offset_positive_or_negative_then_both_boundaries_move_and_hole_survives();
     given_overlapping_exact_projection_edges_when_arranged_then_curves_split_and_deduplicate();
+    given_exact_drawing_projection_when_step_has_surfaced_loose_face_then_retains_all_geometry();
     given_native_profile_derivation_when_sectioned_or_projected_then_exact_loops_respect_material_occupancy();
 }

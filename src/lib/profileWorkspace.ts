@@ -9,6 +9,7 @@ import type {
   ProfileLoopRole as ContractProfileLoopRole,
   ProfilePlane as ContractProfilePlane,
   ProfileDrawingProjectionResponse as ContractProfileDrawingProjectionResponse,
+  ProfileDrawingVisibility as ContractProfileDrawingVisibility,
   ProjectProfileDrawingRequest,
 } from './tauri/contracts';
 
@@ -21,7 +22,10 @@ export type ProfileGeometryAccuracy = ProfileEvidenceAccuracy;
 export type ProfileAssetReference = ProfileAsset;
 export type ProfileGeometryResponse = ContractProfileGeometryResponse;
 export type ProfileDrawingProjectionResponse = ContractProfileDrawingProjectionResponse;
-export type ProfileDrawingInput = Pick<ProjectProfileDrawingRequest, 'view' | 'toleranceMm'>;
+export type ProfileDrawingVisibility = ContractProfileDrawingVisibility;
+export type ProfileDrawingInput = Pick<ProjectProfileDrawingRequest, 'view' | 'toleranceMm'> & {
+  visibility: ProfileDrawingVisibility;
+};
 export type ProfileDeriveInput = Pick<ProfileGeometryRequest, 'operation' | 'toleranceMm'> & {
   source: 'step' | 'mesh';
 };
