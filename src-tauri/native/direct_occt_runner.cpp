@@ -8439,27 +8439,40 @@ std::optional<std::string> exact_display_curve_json(const TopoDS_Edge& edge) {
     }
 }
 
+struct ProfileDrawingDisplayLayer {
+    std::vector<std::vector<std::array<double, 2>>> edges;
+    std::vector<std::string> curves;
+};
+
 void write_profile_drawing_file(const fs::path& path,
-                                const std::vector<std::vector<std::array<double, 2>>>& edges,
-                                const std::vector<std::string>& curves,
+                                const ProfileDrawingDisplayLayer& visible,
+                                const ProfileDrawingDisplayLayer& hidden,
                                 const std::vector<std::string>& warnings) {
     std::ostringstream output;
-    output << std::setprecision(17) << "{\"displayEdges\":[";
-    for (std::size_t edge = 0; edge < edges.size(); ++edge) {
-        if (edge > 0) output << ',';
-        output << '[';
-        for (std::size_t point = 0; point < edges[edge].size(); ++point) {
-            if (point > 0) output << ',';
-            output << '[' << edges[edge][point][0] << ',' << edges[edge][point][1] << ']';
+    output << std::setprecision(17) << '{';
+    const auto write_layer = [&](const char* edge_key, const char* curve_key,
+                                 const ProfileDrawingDisplayLayer& layer) {
+        output << quote_json_string(edge_key) << ":[";
+        for (std::size_t edge = 0; edge < layer.edges.size(); ++edge) {
+            if (edge > 0) output << ',';
+            output << '[';
+            for (std::size_t point = 0; point < layer.edges[edge].size(); ++point) {
+                if (point > 0) output << ',';
+                output << '[' << layer.edges[edge][point][0] << ',' << layer.edges[edge][point][1] << ']';
+            }
+            output << ']';
+        }
+        output << "]," << quote_json_string(curve_key) << ":[";
+        for (std::size_t curve = 0; curve < layer.curves.size(); ++curve) {
+            if (curve > 0) output << ',';
+            output << layer.curves[curve];
         }
         output << ']';
-    }
-    output << "],\"displayCurves\":[";
-    for (std::size_t curve = 0; curve < curves.size(); ++curve) {
-        if (curve > 0) output << ',';
-        output << curves[curve];
-    }
-    output << "],\"warnings\":[";
+    };
+    write_layer("displayEdges", "displayCurves", visible);
+    output << ',';
+    write_layer("hiddenDisplayEdges", "hiddenDisplayCurves", hidden);
+    output << ",\"warnings\":[";
     for (std::size_t index = 0; index < warnings.size(); ++index) {
         if (index > 0) output << ',';
         output << quote_json_string(warnings[index]);
@@ -8580,7 +8593,7 @@ Handle(HLRBRep_Algo) project_visible_curves(const TopoDS_Shape& shape, bool hide
 struct ProfileDrawingRequest {
     fs::path source_path;
     std::string view;
-    std::string visibility = "allEdges";
+    std::string visibility = "visibleEdges";
     double tolerance_mm = 0.5;
 };
 
@@ -8620,45 +8633,46 @@ void project_exact_drawing(const ProfileDrawingRequest& request, const fs::path&
     gp_Dir x_direction;
     projection_frame(request.view, origin, normal, x_direction);
     const TopoDS_Shape source = transform_shape_to_profile_plane(prepared.shape, origin, normal, x_direction);
-    HLRBRep_HLRToShape visible(project_visible_curves(
-        source, request.visibility == "visibleEdges"));
-    TopTools_IndexedMapOfShape unique_edges;
-    const TopoDS_Shape visible_shape = visible.VCompound();
-    const TopoDS_Shape outline_shape = visible.OutLineVCompound();
-    if (!visible_shape.IsNull()) TopExp::MapShapes(visible_shape, TopAbs_EDGE, unique_edges);
-    if (!outline_shape.IsNull()) TopExp::MapShapes(outline_shape, TopAbs_EDGE, unique_edges);
-    if (unique_edges.Extent() == 0) {
-        throw EvalError("exact CAD drawing projection returned no visible curves");
-    }
-
+    // Classify occlusion even when hidden edges are requested. ShowAll loses that evidence.
+    HLRBRep_HLRToShape projection(project_visible_curves(source, true));
     BRep_Builder builder;
     TopoDS_Compound exact_edges;
     builder.MakeCompound(exact_edges);
-    std::vector<std::vector<std::array<double, 2>>> display_edges;
-    std::vector<std::string> display_curves;
     std::size_t point_degenerate_edges = 0;
-    display_edges.reserve(static_cast<std::size_t>(unique_edges.Extent()));
-    display_curves.reserve(static_cast<std::size_t>(unique_edges.Extent()));
-    for (int index = 1; index <= unique_edges.Extent(); ++index) {
-        const TopoDS_Edge edge = TopoDS::Edge(unique_edges(index));
-        TopLoc_Location location;
-        Standard_Real first;
-        Standard_Real last;
-        if (BRep_Tool::Curve(edge, location, first, last).IsNull() &&
-            !BRepLib::BuildCurves3d(edge, request.tolerance_mm * 0.01)) {
-            throw EvalError("exact drawing projection could not lift an HLR edge's planar pcurve");
+    const auto collect_layer = [&](const TopoDS_Shape& sharp, const TopoDS_Shape& outline) {
+        TopTools_IndexedMapOfShape unique_edges;
+        if (!sharp.IsNull()) TopExp::MapShapes(sharp, TopAbs_EDGE, unique_edges);
+        if (!outline.IsNull()) TopExp::MapShapes(outline, TopAbs_EDGE, unique_edges);
+        ProfileDrawingDisplayLayer layer;
+        for (int index = 1; index <= unique_edges.Extent(); ++index) {
+            const TopoDS_Edge edge = TopoDS::Edge(unique_edges(index));
+            TopLoc_Location location;
+            Standard_Real first;
+            Standard_Real last;
+            if (BRep_Tool::Curve(edge, location, first, last).IsNull() &&
+                !BRepLib::BuildCurves3d(edge, request.tolerance_mm * 0.01)) {
+                throw EvalError("exact drawing projection could not lift an HLR edge's planar pcurve");
+            }
+            if (BRep_Tool::Curve(edge, location, first, last).IsNull()) {
+                throw EvalError("exact drawing projection HLR edge has no exact 3D curve");
+            }
+            builder.Add(exact_edges, edge);
+            if (auto analytic = exact_display_curve_json(edge)) {
+                layer.curves.push_back(std::move(*analytic));
+            } else {
+                bool point_degenerate = false;
+                layer.edges.push_back(sample_profile_edge(edge, request.tolerance_mm, point_degenerate));
+                if (point_degenerate) ++point_degenerate_edges;
+            }
         }
-        if (BRep_Tool::Curve(edge, location, first, last).IsNull()) {
-            throw EvalError("exact drawing projection HLR edge has no exact 3D curve");
-        }
-        builder.Add(exact_edges, edge);
-        if (auto analytic = exact_display_curve_json(edge)) {
-            display_curves.push_back(std::move(*analytic));
-        } else {
-            bool point_degenerate = false;
-            display_edges.push_back(sample_profile_edge(edge, request.tolerance_mm, point_degenerate));
-            if (point_degenerate) ++point_degenerate_edges;
-        }
+        return layer;
+    };
+    const auto visible = collect_layer(projection.VCompound(), projection.OutLineVCompound());
+    const auto hidden = request.visibility == "allEdges"
+        ? collect_layer(projection.HCompound(), projection.OutLineHCompound())
+        : ProfileDrawingDisplayLayer{};
+    if (visible.edges.empty() && visible.curves.empty() && hidden.edges.empty() && hidden.curves.empty()) {
+        throw EvalError("exact CAD drawing projection returned no display curves");
     }
     fs::create_directories(output_dir);
     write_step_file(output_dir / "projection.step", {exact_edges});
@@ -8666,11 +8680,7 @@ void project_exact_drawing(const ProfileDrawingRequest& request, const fs::path&
         prepared.warnings.push_back(std::to_string(point_degenerate_edges) +
                                     " point-degenerate projected edge(s) are shown as zero-length preview segments; exact topology remains in the STEP asset.");
     }
-    if (request.visibility == "allEdges") {
-        prepared.warnings.push_back("All projected edges shown, including edges hidden behind other geometry.");
-    }
-    write_profile_drawing_file(
-        output_dir / "display-edges.json", display_edges, display_curves, prepared.warnings);
+    write_profile_drawing_file(output_dir / "display-edges.json", visible, hidden, prepared.warnings);
 }
 
 ProfileDerivationRequest parse_profile_derivation_request(yyjson_val* root) {

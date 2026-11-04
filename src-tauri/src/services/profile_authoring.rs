@@ -159,8 +159,8 @@ pub enum ProfileView {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Type, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum ProfileDrawingVisibility {
-    #[default]
     AllEdges,
+    #[default]
     VisibleEdges,
 }
 
@@ -201,6 +201,8 @@ pub struct ProfileDrawingProjectionResponse {
     pub projection_asset: ProfileAsset,
     pub display_edges: Vec<Vec<[f64; 2]>>,
     pub display_curves: Vec<ProfileDisplayCurve>,
+    pub hidden_display_edges: Vec<Vec<[f64; 2]>>,
+    pub hidden_display_curves: Vec<ProfileDisplayCurve>,
     pub warnings: Vec<String>,
 }
 
@@ -473,7 +475,13 @@ pub fn project_profile_drawing(
         })?;
     let display_edges = validate_display_edges(report.display_edges)?;
     let display_curves = validate_display_curves(report.display_curves)?;
-    if display_edges.is_empty() && display_curves.is_empty() {
+    let hidden_display_edges = validate_display_edges(report.hidden_display_edges)?;
+    let hidden_display_curves = validate_display_curves(report.hidden_display_curves)?;
+    if display_edges.is_empty()
+        && display_curves.is_empty()
+        && hidden_display_edges.is_empty()
+        && hidden_display_curves.is_empty()
+    {
         return Err(AppError::validation(
             "Exact drawing projection returned no display curves.",
         ));
@@ -524,6 +532,8 @@ pub fn project_profile_drawing(
         },
         display_edges,
         display_curves,
+        hidden_display_edges,
+        hidden_display_curves,
         warnings,
     })
 }
@@ -664,6 +674,8 @@ struct ExactDrawingReport {
     display_edges: Vec<Vec<[f64; 2]>>,
     #[serde(default)]
     display_curves: Vec<ProfileDisplayCurve>,
+    hidden_display_edges: Vec<Vec<[f64; 2]>>,
+    hidden_display_curves: Vec<ProfileDisplayCurve>,
     #[serde(default)]
     warnings: Vec<String>,
 }
@@ -2543,7 +2555,7 @@ mod tests {
     }
 
     #[test]
-    fn drawing_visibility_defaults_to_all_edges_and_accepts_explicit_visible_edges() {
+    fn drawing_visibility_defaults_to_visible_edges_and_accepts_explicit_all_edges() {
         let default_request: ProjectProfileDrawingRequest =
             serde_json::from_value(serde_json::json!({
                 "artifactPath": "/model.step",
@@ -2553,20 +2565,20 @@ mod tests {
             .unwrap();
         assert_eq!(
             default_request.visibility,
-            ProfileDrawingVisibility::AllEdges
+            ProfileDrawingVisibility::VisibleEdges
         );
 
-        let visible_request: ProjectProfileDrawingRequest =
+        let all_edges_request: ProjectProfileDrawingRequest =
             serde_json::from_value(serde_json::json!({
                 "artifactPath": "/model.step",
                 "view": "front",
-                "visibility": "visibleEdges",
+                "visibility": "allEdges",
                 "toleranceMm": 0.05
             }))
             .unwrap();
         assert_eq!(
-            visible_request.visibility,
-            ProfileDrawingVisibility::VisibleEdges
+            all_edges_request.visibility,
+            ProfileDrawingVisibility::AllEdges
         );
     }
 

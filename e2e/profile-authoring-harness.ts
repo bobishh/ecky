@@ -34,7 +34,7 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
         }
       }
       if (raw === null) throw new Error(`No native projection edges found for ${view} in ${options.nativeProjectionDirectory}.`);
-      return [view, JSON.parse(raw) as { displayEdges: number[][][]; displayCurves?: any[]; warnings?: string[] }] as const;
+      return [view, JSON.parse(raw) as { displayEdges: number[][][]; displayCurves?: any[]; hiddenDisplayEdges?: number[][][]; hiddenDisplayCurves?: any[]; warnings?: string[] }] as const;
     }))
     : [];
   const images = {
@@ -44,7 +44,7 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
   await page.addInitScript((payload) => {
     const mockOptions = payload.options;
     const imageDataUrls = payload.images;
-    const nativeProjectionByView = Object.fromEntries(payload.nativeProjectionEntries ?? []) as Record<string, { displayEdges: number[][][]; displayCurves?: any[]; warnings?: string[] }>;
+    const nativeProjectionByView = Object.fromEntries(payload.nativeProjectionEntries ?? []) as Record<string, { displayEdges: number[][][]; displayCurves?: any[]; hiddenDisplayEdges?: number[][][]; hiddenDisplayCurves?: any[]; warnings?: string[] }>;
     const design = {
       title: 'Flange fixture',
       versionName: 'V1',
@@ -330,6 +330,8 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
           units: 'mm',
           projectionAsset: { artifactPath: `/mock/profile-projections/${request.view}.step`, artifactDigest: `sha256:projection-${request.view}` },
           displayEdges: nativeProjection?.displayEdges ?? fixtureDisplayEdges,
+          hiddenDisplayEdges: request.visibility === 'allEdges' ? (nativeProjection?.hiddenDisplayEdges ?? [[[-8, -4], [8, -4]]]) : [],
+          hiddenDisplayCurves: request.visibility === 'allEdges' ? (nativeProjection?.hiddenDisplayCurves ?? [{ kind: 'circle', centerMm: [0, 0], radiusMm: 7 }]) : [],
           displayCurves: nativeProjection?.displayCurves ?? (mockOptions.analyticProjectionCurves ? [
               { kind: 'line', startMm: [-20, 0], endMm: [20, 0] },
               { kind: 'circle', centerMm: [0, 0], radiusMm: 5 },

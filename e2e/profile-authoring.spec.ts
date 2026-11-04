@@ -165,26 +165,44 @@ test('projected circles, arcs, and ellipses render from analytic curves', async 
   await expect(front.locator('polyline.projected-edge')).toHaveCount(4);
 });
 
-test('projection visibility defaults to all edges and existing drawings keep their recorded mode', async ({ page }) => {
-  await installProfileMocks(page);
+test('Given a projected part When hidden edges are requested Then blueprint separates solid and dashed layers', async ({ page }) => {
+  await installProfileMocks(page, { analyticProjectionCurves: true });
   const workspace = await openSketch(page);
   await workspace.getByLabel('Derivation mode').selectOption('exactProjection');
 
   const visibility = workspace.getByLabel('Projection edges');
-  await expect(visibility).toHaveValue('allEdges');
+  await expect(visibility).toHaveValue('visibleEdges');
   await workspace.getByRole('button', { name: 'Project all three views' }).click();
   await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.projectionDrawingCalls.length === 3);
   let calls = await page.evaluate(() => (window as any).__PROFILE_AUTHORING__.projectionDrawingCalls);
-  expect(calls.map((call: any) => call.visibility)).toEqual(['allEdges', 'allEdges', 'allEdges']);
-  await expect(workspace.getByTestId('profile-view-front').getByText('ALL EDGES · PROJECTED', { exact: true })).toBeVisible();
+  expect(calls.map((call: any) => call.visibility)).toEqual(['visibleEdges', 'visibleEdges', 'visibleEdges']);
+  const front = workspace.getByTestId('profile-view-front');
+  await expect(front.getByText('VISIBLE EDGES · PROJECTED', { exact: true })).toBeVisible();
+  await expect(front.locator('[data-projection-visibility="hidden"]')).toHaveCount(0);
 
-  await visibility.selectOption('visibleEdges');
-  await expect(workspace.getByTestId('profile-view-front').getByText('ALL EDGES · PROJECTED', { exact: true })).toBeVisible();
+  await visibility.selectOption('allEdges');
+  await expect(front.getByText('VISIBLE EDGES · PROJECTED', { exact: true })).toBeVisible();
   await workspace.getByRole('button', { name: 'Project all three views' }).click();
   await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.projectionDrawingCalls.length === 6);
   calls = await page.evaluate(() => (window as any).__PROFILE_AUTHORING__.projectionDrawingCalls);
-  expect(calls.slice(3).map((call: any) => call.visibility)).toEqual(['visibleEdges', 'visibleEdges', 'visibleEdges']);
-  await expect(workspace.getByTestId('profile-view-front').getByText('VISIBLE EDGES · PROJECTED', { exact: true })).toBeVisible();
+  expect(calls.slice(3).map((call: any) => call.visibility)).toEqual(['allEdges', 'allEdges', 'allEdges']);
+  await expect(front.getByText('VISIBLE + HIDDEN · PROJECTED', { exact: true })).toBeVisible();
+  const visible = front.locator('[data-projection-visibility="visible"] .projected-line').first();
+  const hidden = front.locator('[data-projection-visibility="hidden"] .projected-circle');
+  await expect(visible).toHaveCount(1);
+  await expect(hidden).toBeVisible();
+  const visibleStyle = await visible.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { dash: style.strokeDasharray, width: Number.parseFloat(style.strokeWidth), color: style.stroke };
+  });
+  const hiddenStyle = await hidden.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { dash: style.strokeDasharray, width: Number.parseFloat(style.strokeWidth), color: style.stroke };
+  });
+  expect(visibleStyle.dash).toBe('none');
+  expect(hiddenStyle.dash).not.toBe('none');
+  expect(hiddenStyle.width).toBeLessThan(visibleStyle.width);
+  expect(hiddenStyle.color).not.toBe(visibleStyle.color);
 });
 
 test('one exact projection action fills all views; selected top builds and applies a closed profile', async ({ page }) => {
@@ -238,24 +256,30 @@ test('one exact projection action fills all views; selected top builds and appli
   await page.waitForFunction(() => (window as any).__PROFILE_AUTHORING__?.projectionRequests.some((request: any) => request.preferredMessageId === 'profile-version-2'));
 });
 
-test('native STEP projection output renders independently in front, top, and side', async ({ page }) => {
+test('native STEP projection output renders classified blueprint layers in all three views', async ({ page }) => {
   const nativeProjectionDirectory = process.env.PROFILE_AUTHORING_NATIVE_OUTPUTS_DIR;
   test.skip(!nativeProjectionDirectory, 'Set PROFILE_AUTHORING_NATIVE_OUTPUTS_DIR to inspect saved native STEP projection output.');
   await installProfileMocks(page, { nativeProjectionDirectory });
   const workspace = await openSketch(page);
   await workspace.getByRole('button', { name: 'All three views', exact: true }).click();
   await workspace.getByRole('button', { name: 'Project all three views' }).click();
-
   for (const view of ['front', 'top', 'side']) {
-    await expect(workspace.getByTestId(`profile-view-${view}`).locator('polyline.projected-edge').first()).toHaveCount(1);
-    await expect(workspace.getByTestId(`profile-view-${view}`).getByText('ALL EDGES · PROJECTED', { exact: true })).toBeVisible();
-    await expect(workspace.getByTestId(`profile-view-${view}`).locator('polygon.outer')).toHaveCount(0);
+    const pane = workspace.getByTestId(`profile-view-${view}`);
+    await expect(pane.locator('[data-projection-visibility="visible"] > *').first()).toHaveCount(1);
+    await expect(pane.getByText('VISIBLE EDGES · PROJECTED', { exact: true })).toBeVisible();
+    await expect(pane.locator('[data-projection-visibility="hidden"]')).toHaveCount(0);
+    await expect(pane.locator('polygon.outer')).toHaveCount(0);
   }
-  await expect(workspace.getByTestId('profile-view-front').locator('circle.projected-circle')).toHaveCount(3);
-  await expect(workspace.getByTestId('profile-view-front').locator('path.projected-circular-arc')).toHaveCount(256);
-  await expect(workspace.getByTestId('profile-view-side').locator('path.projected-circular-arc')).toHaveCount(8);
+  await workspace.getByRole('button', { name: 'Show front view' }).click();
   if (process.env.PROFILE_AUTHORING_PROJECTION_SCREENSHOT_PATH) {
     await page.screenshot({ path: process.env.PROFILE_AUTHORING_PROJECTION_SCREENSHOT_PATH, fullPage: true });
+  }
+  await workspace.getByLabel('Projection edges').selectOption('allEdges');
+  await workspace.getByRole('button', { name: 'Project all three views' }).click();
+  await expect(workspace.getByTestId('profile-view-front').getByText('VISIBLE + HIDDEN · PROJECTED', { exact: true })).toBeVisible();
+  await expect(workspace.getByTestId('profile-view-front').locator('[data-projection-visibility="hidden"] > *').first()).toHaveCount(1);
+  if (process.env.PROFILE_AUTHORING_HIDDEN_SCREENSHOT_PATH) {
+    await page.screenshot({ path: process.env.PROFILE_AUTHORING_HIDDEN_SCREENSHOT_PATH, fullPage: true });
   }
 });
 

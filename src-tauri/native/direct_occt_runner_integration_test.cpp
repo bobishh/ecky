@@ -1368,7 +1368,49 @@ void given_exact_conic_arc_when_encoded_for_display_then_preserves_center_radii_
 
 }  // namespace
 
+void given_counterbore_on_back_when_projected_then_hidden_curves_keep_their_visibility() {
+    const fs::path root = fs::temp_directory_path() /
+        ("ecky-blueprint-visibility-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(root);
+    const TopoDS_Shape block = BRepPrimAPI_MakeBox(30, 30, 10).Shape();
+    const TopoDS_Shape bore = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(15, 15, -1), gp_Dir(0, 0, 1)), 3, 12).Shape();
+    const TopoDS_Shape counterbore = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(15, 15, -1), gp_Dir(0, 0, 1)), 6, 6).Shape();
+    const TopoDS_Shape drilled = BRepAlgoAPI_Cut(BRepAlgoAPI_Cut(block, bore).Shape(), counterbore).Shape();
+    const fs::path source = root / "counterbore.step";
+    write_step_file(source, {drilled});
+
+    const auto has_radius = [](yyjson_val* curves, double radius) {
+        std::size_t index, maximum;
+        yyjson_val* curve;
+        yyjson_arr_foreach(curves, index, maximum, curve) {
+            const char* kind = yyjson_get_str(yyjson_obj_get(curve, "kind"));
+            if (kind && std::string(kind) == "circle" &&
+                std::abs(yyjson_get_num(yyjson_obj_get(curve, "radiusMm")) - radius) < 1e-6) return true;
+        }
+        return false;
+    };
+    for (const std::string visibility : {"allEdges", "visibleEdges"}) {
+        const fs::path output = root / visibility;
+        project_exact_drawing(ProfileDrawingRequest{source, "top", visibility, 0.05}, output);
+        yyjson_doc* report = yyjson_read_file((output / "display-edges.json").string().c_str(), 0, nullptr, nullptr);
+        assert(report);
+        yyjson_val* drawing = yyjson_doc_get_root(report);
+        yyjson_val* visible = yyjson_obj_get(drawing, "displayCurves");
+        yyjson_val* hidden = yyjson_obj_get(drawing, "hiddenDisplayCurves");
+        assert(yyjson_is_arr(hidden));
+        assert(has_radius(visible, 3));
+        assert(!has_radius(visible, 6));
+        assert(has_radius(hidden, 6) == (visibility == "allEdges"));
+        yyjson_doc_free(report);
+    }
+    fs::remove_all(root);
+}
+
 int main() {
+    given_counterbore_on_back_when_projected_then_hidden_curves_keep_their_visibility();
     given_linear_sweep_when_path_has_authored_corners_then_all_corners_shape_sweep();
     given_multi_point_linear_sweep_when_path_has_corners_then_volume_tracks_full_path();
     given_curved_sampled_sweep_when_profile_is_round_then_section_keeps_nine_by_nine_span();

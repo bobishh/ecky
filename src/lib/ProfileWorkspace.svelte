@@ -20,6 +20,7 @@
     type ProfileDeriveInput,
     type ProfileDrawingInput,
     type ProfileDrawingProjectionResponse,
+    type ProfileDisplayCurve,
     type ProfileDrawingVisibility,
     type ProfileGeometryOperation,
     type ProfileLoop,
@@ -144,7 +145,7 @@
   let sectionOffset = $state('0');
   let viewLayout = $state<'single' | 'allThree'>('single');
   let tolerance = $state('0.5');
-  let projectionVisibility = $state<ProfileDrawingVisibility>('allEdges');
+  let projectionVisibility = $state<ProfileDrawingVisibility>('visibleEdges');
   let clearance = $state('0');
   let depth = $state('10');
   let partName = $state('profile-feature');
@@ -1201,7 +1202,10 @@
     const loops = evidence?.loops ?? (view === selectedView ? currentLoops : profileEditorFor(view).loops);
     const profileBoundsForView = loops.length ? profileBounds(loops) : null;
     const drawing = projectionDrawingForView(view);
-    const drawingBoundsForView = drawing ? profileDrawingBounds(drawing.displayEdges, drawing.displayCurves) : null;
+    const drawingBoundsForView = drawing ? profileDrawingBounds(
+      [...drawing.displayEdges, ...drawing.hiddenDisplayEdges],
+      [...drawing.displayCurves, ...drawing.hiddenDisplayCurves],
+    ) : null;
     if (profileBoundsForView && drawingBoundsForView) {
       const minX = Math.min(profileBoundsForView.minX, drawingBoundsForView.minX);
       const minY = Math.min(profileBoundsForView.minY, drawingBoundsForView.minY);
@@ -1497,6 +1501,27 @@
   }
 </script>
 
+{#snippet projectedGeometry(curves: ProfileDisplayCurve[], edges: ProfilePoint[][])}
+  {#each curves as curve, curveIndex (curveIndex)}
+    {#if curve.kind === 'line'}
+      <line class="projected-line" data-testid="projected-line" x1={curve.startMm[0]} y1={-curve.startMm[1]} x2={curve.endMm[0]} y2={-curve.endMm[1]} />
+    {:else if curve.kind === 'circle'}
+      <circle class="projected-circle" data-testid="projected-circle" cx={curve.centerMm[0]} cy={-curve.centerMm[1]} r={curve.radiusMm} />
+    {:else if curve.kind === 'circularArc'}
+      <path class="projected-circular-arc" data-testid="projected-circular-arc" d={profileDisplayCurveArcPath(curve)} />
+    {:else if curve.kind === 'ellipse'}
+      {@const rotationDegrees = (-curve.rotationRad * 180) / Math.PI}
+      <ellipse class="projected-ellipse" data-testid="projected-ellipse" cx={curve.centerMm[0]} cy={-curve.centerMm[1]} rx={curve.majorRadiusMm} ry={curve.minorRadiusMm} transform={`rotate(${rotationDegrees} ${curve.centerMm[0]} ${-curve.centerMm[1]})`} />
+    {:else}
+      <path class="projected-elliptical-arc" data-testid="projected-elliptical-arc" d={profileDisplayCurveArcPath(curve)} />
+    {/if}
+  {/each}
+  {#each edges as edge, edgeIndex (edgeIndex)}
+    {@const edgePoints = edge.map(([x, y]) => `${x},${-y}`).join(' ')}
+    <polyline class="projected-edge" data-testid="projected-edge" points={edgePoints} />
+  {/each}
+{/snippet}
+
 <section class="profile-workspace" data-testid="profile-workspace" aria-label="Sketch workspace">
   <div class="workspace-grid">
     <aside class="controls-pane" aria-label="Profile controls">
@@ -1535,11 +1560,11 @@
           <label>
             Projection edges
             <select aria-label="Projection edges" bind:value={projectionVisibility} disabled={currentPending !== null || currentViewsPending}>
-              <option value="allEdges">All edges</option>
+              <option value="allEdges">Visible + hidden edges</option>
               <option value="visibleEdges">Visible edges</option>
             </select>
           </label>
-          <p class="inline-hint">All edges includes hidden edges. Visible edges removes occluded edges and can take longer.</p>
+          <p class="inline-hint">Visible edges are solid. Hidden edges, when requested, are thin and dashed.</p>
           <button class="action-button action-button--secondary" type="button" onclick={projectAllDrawings} disabled={!deriveAvailable || currentPending !== null || drawing || currentViewsPending}>
             {currentViewsPending ? 'Projecting…' : 'Project all three views'}
           </button>
@@ -1872,7 +1897,7 @@
           >
             <div class="sketch-pane__label">
               <button class="view-select" type="button" aria-label={`Select ${view} projection`} aria-pressed={selectedView === view} onclick={(event) => { event.stopPropagation(); selectView(view); }}>{view.toUpperCase()}</button>
-              <span>{photoForView(view)?.pending ? 'RECOGNIZING…' : photoForView(view)?.error ? 'ERROR' : viewPendingFor(view) ? (viewPendingKindFor(view) === 'profile' ? 'BUILDING PROFILE…' : 'PROJECTING…') : viewErrorFor(view) ? 'ERROR' : photoForView(view)?.accepted ? 'PROFILE ACCEPTED' : projectionDrawing && !photo ? `${projectionDrawing.visibility === 'allEdges' ? 'ALL EDGES' : 'VISIBLE EDGES'} · PROJECTED` : viewLoops.length ? `${viewLoops.length} LOOPS` : photoForView(view) ? 'DRAWING PHOTO' : 'NO PROFILE'}</span>
+              <span>{photoForView(view)?.pending ? 'RECOGNIZING…' : photoForView(view)?.error ? 'ERROR' : viewPendingFor(view) ? (viewPendingKindFor(view) === 'profile' ? 'BUILDING PROFILE…' : 'PROJECTING…') : viewErrorFor(view) ? 'ERROR' : photoForView(view)?.accepted ? 'PROFILE ACCEPTED' : projectionDrawing && !photo ? `${projectionDrawing.visibility === 'allEdges' ? 'VISIBLE + HIDDEN' : 'VISIBLE EDGES'} · PROJECTED` : viewLoops.length ? `${viewLoops.length} LOOPS` : photoForView(view) ? 'DRAWING PHOTO' : 'NO PROFILE'}</span>
               <button class="sketch-pane__label-action" type="button" onclick={(event) => { event.stopPropagation(); resetPaneCamera(view); }}>FIT VIEW</button>
             </div>
             {#if photoForView(view)?.pending}
@@ -1966,24 +1991,14 @@
                 {/each}
               {/if}
               {#if projectionDrawing && !photo}
-                {#each projectionDrawing.displayCurves as curve, curveIndex (`projected-curve-${view}-${curveIndex}`)}
-                  {#if curve.kind === 'line'}
-                    <line class="projected-line" data-testid="projected-line" x1={curve.startMm[0]} y1={-curve.startMm[1]} x2={curve.endMm[0]} y2={-curve.endMm[1]} />
-                  {:else if curve.kind === 'circle'}
-                    <circle class="projected-circle" data-testid="projected-circle" cx={curve.centerMm[0]} cy={-curve.centerMm[1]} r={curve.radiusMm} />
-                  {:else if curve.kind === 'circularArc'}
-                    <path class="projected-circular-arc" data-testid="projected-circular-arc" d={profileDisplayCurveArcPath(curve)} />
-                  {:else if curve.kind === 'ellipse'}
-                    {@const rotationDegrees = (-curve.rotationRad * 180) / Math.PI}
-                    <ellipse class="projected-ellipse" data-testid="projected-ellipse" cx={curve.centerMm[0]} cy={-curve.centerMm[1]} rx={curve.majorRadiusMm} ry={curve.minorRadiusMm} transform={`rotate(${rotationDegrees} ${curve.centerMm[0]} ${-curve.centerMm[1]})`} />
-                  {:else}
-                    <path class="projected-elliptical-arc" data-testid="projected-elliptical-arc" d={profileDisplayCurveArcPath(curve)} />
-                  {/if}
-                {/each}
-                {#each projectionDrawing.displayEdges as edge, edgeIndex (`projected-edge-${view}-${edgeIndex}`)}
-                  {@const edgePoints = edge.map(([x, y]) => `${x},${-y}`).join(' ')}
-                  <polyline class="projected-edge" data-testid="projected-edge" points={edgePoints} />
-                {/each}
+                {#if projectionDrawing.visibility === 'allEdges'}
+                  <g class="projected-layer projected-layer--hidden" data-projection-visibility="hidden">
+                    {@render projectedGeometry(projectionDrawing.hiddenDisplayCurves, projectionDrawing.hiddenDisplayEdges)}
+                  </g>
+                {/if}
+                <g class="projected-layer" data-projection-visibility="visible">
+                  {@render projectedGeometry(projectionDrawing.displayCurves, projectionDrawing.displayEdges)}
+                </g>
               {/if}
               {#each viewLoops as loop, loopIndex (`${view}-${loopIndex}-${loop.points.length}-${loop.role}`)}
                 {@const pathPoints = loop.points.map(([x, y]) => `${x},${-y}`).join(' ')}
@@ -2023,7 +2038,7 @@
           <span>Image coordinates in pixels · set scale and recognize before applying.</span>
         {:else if currentProjectionDrawing && !currentEvidence}
           <span class="evidence-tag exact">EXACT CAD PROJECTION</span>
-          <span>{selectedView.toUpperCase()} · {currentProjectionDrawing.visibility === 'allEdges' ? 'all edges, including occluded' : 'visible edges only'} · {currentProjectionDrawing.displayEdges.length + currentProjectionDrawing.displayCurves.length} projected edges · preview only · build a closed profile before applying</span>
+          <span>{selectedView.toUpperCase()} · {currentProjectionDrawing.displayEdges.length + currentProjectionDrawing.displayCurves.length} visible edges{#if currentProjectionDrawing.visibility === 'allEdges'} · {currentProjectionDrawing.hiddenDisplayEdges.length + currentProjectionDrawing.hiddenDisplayCurves.length} hidden edges{/if} · preview only · build a closed profile before applying</span>
         {:else if currentEvidence}
           <span class={['evidence-tag', { exact: isExactProfile }]}>{isExactProfile ? 'EXACT CAD PROFILE' : 'APPROXIMATE PROFILE'}</span>
           <span>
@@ -2293,6 +2308,12 @@
   .analytic-profile-circle.hole { fill: color-mix(in srgb, #aa5b50 20%, transparent); stroke: #c78274; }
   .projected-edge { fill: none; stroke: #82b1a2; stroke-width: 1.05; vector-effect: non-scaling-stroke; pointer-events: none; }
   .projected-line, .projected-circle, .projected-circular-arc, .projected-ellipse, .projected-elliptical-arc { fill: none; stroke: #82b1a2; stroke-width: 1.05; vector-effect: non-scaling-stroke; pointer-events: none; }
+  .projected-layer--hidden :is(line, circle, path, ellipse, polyline) {
+    stroke: #607d78;
+    stroke-width: 0.7;
+    stroke-dasharray: 5 4;
+    stroke-linecap: butt;
+  }
   .sketch-pane polygon.open-draft { fill: none; stroke-dasharray: 4 3; }
   .drawing-region { fill: color-mix(in srgb, var(--profile-secondary) 16%, transparent); stroke: var(--profile-secondary); stroke-width: 1.2; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; pointer-events: none; }
   .drawing-pick-point { fill: #f1c879; stroke: #17120a; stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
