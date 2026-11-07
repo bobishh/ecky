@@ -139,7 +139,7 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
       microwave: { humId: null, dingId: null, muted: true }, voice: { sttLanguageCode: 'en-US' },
       mcp: { port: null, maxSessions: null, mode: 'passive', primaryAgentId: null, promptTimeoutSecs: 1800, eckyAstAuthoring: false, autoAgents: [] },
       hasSeenOnboarding: true, connectionType: 'api_key', defaultEngineKind: 'eckyRust',
-      providerModels: { codex: '', agy: '' },
+      providerModels: { codex: '', agy: '', grok: '' },
       defaultSourceLanguage: 'eckyScheme', defaultGeometryBackend: 'eckyRust', maxGenerationAttempts: 1, maxVerifyAttempts: 0,
     };
 
@@ -513,6 +513,7 @@ test.describe('Codex provider integration', () => {
     expect(calls.find((call: any) => call.cmd === 'save_config')?.args?.config?.providerModels).toEqual({
       codex: '',
       agy: 'claude-sonnet-4-6',
+      grok: '',
     });
     expect(calls).toContainEqual({
       cmd: 'send_agy_provider_prompt',

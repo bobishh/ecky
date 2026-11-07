@@ -281,6 +281,8 @@ import {
     formatBackendError,
     getAgyProvider,
     getAgyProviderMessages,
+    getGrokProvider,
+    getGrokProviderMessages,
     getCodexTakeover,
     getJevClassificationResults,
     getCodexTakeoverMessages,
@@ -330,8 +332,10 @@ import {
     queueAgentPrompt,
     removeAgyQueuedPrompt,
     removeCodexQueuedPrompt,
+    removeGrokQueuedPrompt,
     retryAgyQueuedPrompt,
     retryCodexQueuedPrompt,
+    retryGrokQueuedPrompt,
     resolveAgentConfirm,
     submitAgentPromptReply,
     resolveAgentViewportScreenshot,
@@ -339,15 +343,18 @@ import {
     sendAgentTerminalInput,
     sendAgyProviderPrompt,
     sendCodexTakeoverPrompt,
+    sendGrokProviderPrompt,
     steerCodexTakeover,
     stopExplorationRun,
     stopAgyProvider,
     stopCodexTakeover,
+    stopGrokProvider,
     repairVersionRuntime,
     updateVersionPreview,
     type PostProcessingSpec,
     type AgyProviderSnapshot,
     type CodexTakeoverSnapshot,
+    type GrokProviderSnapshot,
   } from './lib/tauri/client';
   import { listen } from '@tauri-apps/api/event';
   import type { ClassificationResult } from './lib/tauri/contracts';
@@ -1091,19 +1098,40 @@ import {
   });
   const codexDialogueStateStore = writable(createProviderDialogueState());
   const agyDialogueStateStore = writable(createProviderDialogueState());
+  const grokDialogueStateStore = writable(createProviderDialogueState());
   const codexDialogueState = $derived($codexDialogueStateStore);
   const agyDialogueState = $derived($agyDialogueStateStore);
+  const grokDialogueState = $derived($grokDialogueStateStore);
   const codexTakeoverSnapshot = $derived(codexDialogueState.snapshot as CodexTakeoverSnapshot | null);
   const agyProviderSnapshot = $derived(agyDialogueState.snapshot as AgyProviderSnapshot | null);
-  const codexTakeoverLoading = $derived($config.connectionType === 'provider:agy' ? agyDialogueState.loading : codexDialogueState.loading);
-  const codexTakeoverError = $derived($config.connectionType === 'provider:agy' ? agyDialogueState.error : codexDialogueState.error);
+  const grokProviderSnapshot = $derived(grokDialogueState.snapshot as GrokProviderSnapshot | null);
+  const codexTakeoverLoading = $derived(
+    $config.connectionType === 'provider:agy'
+      ? agyDialogueState.loading
+      : $config.connectionType === 'provider:grok'
+        ? grokDialogueState.loading
+        : codexDialogueState.loading,
+  );
+  const codexTakeoverError = $derived(
+    $config.connectionType === 'provider:agy'
+      ? agyDialogueState.error
+      : $config.connectionType === 'provider:grok'
+        ? grokDialogueState.error
+        : codexDialogueState.error,
+  );
   const codexTakeoverLoadToken = $derived(codexDialogueState.loadToken);
   let codexTakeoverRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   const agyProviderLoadToken = $derived(agyDialogueState.loadToken);
   let agyProviderRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  const grokProviderLoadToken = $derived(grokDialogueState.loadToken);
+  let grokProviderRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let optimisticQueuedAgentMessages = $state<Record<string, OptimisticQueuedDialogueMessage>>({});
-  const activeProviderSnapshot = $derived.by<CodexTakeoverSnapshot | AgyProviderSnapshot | null>(() =>
-    $config.connectionType === 'provider:agy' ? agyProviderSnapshot : codexTakeoverSnapshot,
+  const activeProviderSnapshot = $derived.by<CodexTakeoverSnapshot | AgyProviderSnapshot | GrokProviderSnapshot | null>(() =>
+    $config.connectionType === 'provider:agy'
+      ? agyProviderSnapshot
+      : $config.connectionType === 'provider:grok'
+        ? grokProviderSnapshot
+        : codexTakeoverSnapshot,
   );
   function reduceCodexProvider(action: Parameters<typeof applyProviderDialogueAction>[1]) {
     codexDialogueStateStore.update((state) => applyProviderDialogueAction(state, action));
@@ -1111,22 +1139,43 @@ import {
   function reduceAgyProvider(action: Parameters<typeof applyProviderDialogueAction>[1]) {
     agyDialogueStateStore.update((state) => applyProviderDialogueAction(state, action));
   }
+  function reduceGrokProvider(action: Parameters<typeof applyProviderDialogueAction>[1]) {
+    grokDialogueStateStore.update((state) => applyProviderDialogueAction(state, action));
+  }
   function setProviderError(error: string | null) {
+    const action = error === null ? { type: 'clearError' as const } : { type: 'error' as const, error };
     if ($config.connectionType === 'provider:agy') {
-      reduceAgyProvider(error === null ? { type: 'clearError' } : { type: 'error', error });
+      reduceAgyProvider(action);
       return;
     }
-    reduceCodexProvider(error === null ? { type: 'clearError' } : { type: 'error', error });
+    if ($config.connectionType === 'provider:grok') {
+      reduceGrokProvider(action);
+      return;
+    }
+    reduceCodexProvider(action);
+  }
+  function providerConversationId(
+    snapshot: CodexTakeoverSnapshot | AgyProviderSnapshot | GrokProviderSnapshot,
+  ): string {
+    if ('grokSessionId' in snapshot.binding) return snapshot.binding.grokSessionId;
+    if ('agyConversationId' in snapshot.binding) return snapshot.binding.agyConversationId;
+    return snapshot.binding.codexThreadId;
   }
   const codexDialogueMessages = $derived.by<Message[]>(() =>
     activeProviderSnapshot
       ? projectProviderDialogue({
         ...activeProviderSnapshot,
-        providerId: $config.connectionType === 'provider:agy' ? 'agy' : 'codex',
-        providerLabel: $config.connectionType === 'provider:agy' ? 'Agy' : 'Codex',
-        externalConversationId: 'agyConversationId' in activeProviderSnapshot.binding
-          ? activeProviderSnapshot.binding.agyConversationId
-          : activeProviderSnapshot.binding.codexThreadId,
+        providerId: $config.connectionType === 'provider:agy'
+          ? 'agy'
+          : $config.connectionType === 'provider:grok'
+            ? 'grok'
+            : 'codex',
+        providerLabel: $config.connectionType === 'provider:agy'
+          ? 'Agy'
+          : $config.connectionType === 'provider:grok'
+            ? 'Grok'
+            : 'Codex',
+        externalConversationId: providerConversationId(activeProviderSnapshot),
       } as ProviderDialogueSnapshot)
       : [],
   );
@@ -1172,11 +1221,14 @@ import {
     const threadId = $activeThreadId;
     const usesCodexProvider = $config.connectionType === 'provider:codex';
     const usesAgyProvider = $config.connectionType === 'provider:agy';
+    const usesGrokProvider = $config.connectionType === 'provider:grok';
     untrack(() => {
       reduceCodexProvider({ type: 'snapshot', snapshot: null, preserveLoadedPages: false });
       reduceAgyProvider({ type: 'snapshot', snapshot: null, preserveLoadedPages: false });
+      reduceGrokProvider({ type: 'snapshot', snapshot: null, preserveLoadedPages: false });
       if (threadId && usesCodexProvider) void loadCodexTakeover(threadId, false);
       if (threadId && usesAgyProvider) void loadAgyProvider(threadId, false);
+      if (threadId && usesGrokProvider) void loadGrokProvider(threadId, false);
     });
   });
 
@@ -1230,7 +1282,50 @@ import {
     }
   }
 
+  function applyGrokProviderSnapshot(next: GrokProviderSnapshot, preserveLoadedPages: boolean, authoritative = false) {
+    reduceGrokProvider(authoritative
+      ? { type: 'authoritativeSnapshot', snapshot: next as unknown as ProviderDialogueSnapshot, preserveLoadedPages }
+      : { type: 'snapshot', snapshot: next as unknown as ProviderDialogueSnapshot, preserveLoadedPages });
+  }
+
+  function grokProviderError(snapshot: GrokProviderSnapshot | null | undefined): string | null {
+    return snapshot?.runtime.error
+      ?? snapshot?.queue.find((item) => item.status === 'failed')?.error
+      ?? null;
+  }
+
+  async function loadGrokProvider(threadId: string, preserveLoadedPages: boolean) {
+    const token = grokProviderLoadToken + 1;
+    reduceGrokProvider({ type: 'loadStarted', token });
+    try {
+      const snapshot = await getGrokProvider(threadId);
+      if (token !== grokProviderLoadToken || get(activeThreadId) !== threadId) return;
+      if (snapshot) applyGrokProviderSnapshot(snapshot, preserveLoadedPages);
+      else reduceGrokProvider({ type: 'snapshot', snapshot: null, preserveLoadedPages: false, token });
+    } catch (error) {
+      if (token === grokProviderLoadToken && get(activeThreadId) === threadId) {
+        reduceGrokProvider({ type: 'error', error: formatBackendError(error) });
+      }
+    }
+  }
+
   async function handleLoadEarlierCodexMessages() {
+    if ($config.connectionType === 'provider:grok') {
+      const snapshot = grokProviderSnapshot;
+      if (!snapshot?.nextCursor) return;
+      try {
+        const page = await getGrokProviderMessages({
+          eckyThreadId: snapshot.binding.eckyThreadId,
+          cursor: snapshot.nextCursor,
+          direction: 'older',
+        });
+        reduceGrokProvider({ type: 'page', page, direction: 'older' });
+      } catch (error) {
+        setProviderError(formatBackendError(error));
+        throw error;
+      }
+      return;
+    }
     if ($config.connectionType === 'provider:agy') {
       const snapshot = agyProviderSnapshot;
       if (!snapshot?.nextCursor) return;
@@ -1283,6 +1378,21 @@ import {
   }
 
   async function handleStopCodexTakeover() {
+    if ($config.connectionType === 'provider:grok') {
+      const snapshot = grokProviderSnapshot;
+      const turnId = snapshot?.runtime.activeTurnId;
+      if (!snapshot || !turnId) return;
+      try {
+        applyGrokProviderSnapshot(await stopGrokProvider({
+          eckyThreadId: snapshot.binding.eckyThreadId,
+          turnId,
+        }), true, true);
+      } catch (error) {
+        setProviderError(formatBackendError(error));
+        throw error;
+      }
+      return;
+    }
     if ($config.connectionType === 'provider:agy') {
       const snapshot = agyProviderSnapshot;
       const turnId = snapshot?.runtime.activeTurnId;
@@ -1314,6 +1424,17 @@ import {
   }
 
   async function handleRetryCodexQueue(queueId: string) {
+    if ($config.connectionType === 'provider:grok') {
+      const eckyThreadId = grokProviderSnapshot?.binding.eckyThreadId;
+      if (!eckyThreadId) return;
+      try {
+        applyGrokProviderSnapshot(await retryGrokQueuedPrompt(eckyThreadId, queueId), true, true);
+      } catch (error) {
+        setProviderError(formatBackendError(error));
+        throw error;
+      }
+      return;
+    }
     if ($config.connectionType === 'provider:agy') {
       const eckyThreadId = agyProviderSnapshot?.binding.eckyThreadId;
       if (!eckyThreadId) return;
@@ -1337,6 +1458,17 @@ import {
   }
 
   async function handleRemoveCodexQueue(queueId: string) {
+    if ($config.connectionType === 'provider:grok') {
+      const eckyThreadId = grokProviderSnapshot?.binding.eckyThreadId;
+      if (!eckyThreadId) return;
+      try {
+        applyGrokProviderSnapshot(await removeGrokQueuedPrompt(eckyThreadId, queueId), true, true);
+      } catch (error) {
+        setProviderError(formatBackendError(error));
+        throw error;
+      }
+      return;
+    }
     if ($config.connectionType === 'provider:agy') {
       const eckyThreadId = agyProviderSnapshot?.binding.eckyThreadId;
       if (!eckyThreadId) return;
@@ -1401,6 +1533,36 @@ import {
           if (!isProviderResultCurrent(agyProviderSnapshot, eckyThreadId)) return;
           if (next) applyAgyProviderSnapshot(next, true);
           setProviderError(agyProviderError(next));
+        })
+        .catch((error) => { setProviderError(formatBackendError(error)); });
+    }, terminalEvent ? 40 : 250);
+  }
+
+  function scheduleGrokProviderRefresh(event: {
+    conversationId?: string | null;
+    method: string;
+    liveMessages?: GrokProviderSnapshot['liveMessages'];
+    turnTraces?: GrokProviderSnapshot['turnTraces'];
+    runtime?: GrokProviderSnapshot['runtime'];
+  }) {
+    const snapshot = grokProviderSnapshot;
+    if (!snapshot || event.conversationId !== snapshot.binding.grokSessionId) return;
+    const terminalEvent = event.method === 'turn/result'
+      || event.method === 'turn/terminal'
+      || event.method === 'turn/persisted';
+    if (event.liveMessages && event.runtime) {
+      reduceGrokProvider({ type: 'live', liveMessages: event.liveMessages, turnTraces: event.turnTraces, runtime: event.runtime });
+      if (!terminalEvent) return;
+    }
+    if (grokProviderRefreshTimer) clearTimeout(grokProviderRefreshTimer);
+    grokProviderRefreshTimer = setTimeout(() => {
+      grokProviderRefreshTimer = null;
+      const eckyThreadId = snapshot.binding.eckyThreadId;
+      void getGrokProvider(eckyThreadId)
+        .then((next) => {
+          if (!isProviderResultCurrent(grokProviderSnapshot, eckyThreadId)) return;
+          if (next) applyGrokProviderSnapshot(next, true);
+          setProviderError(grokProviderError(next));
         })
         .catch((error) => { setProviderError(formatBackendError(error)); });
     }, terminalEvent ? 40 : 250);
@@ -1708,7 +1870,17 @@ import {
               supportsStop: agyProviderSnapshot.capabilities.stop,
             }
           : null
-        : codexTakeoverSnapshot?.binding ?? null,
+        : $config.connectionType === 'provider:grok'
+          ? grokProviderSnapshot
+            ? {
+                providerId: 'grok',
+                externalConversationId: grokProviderSnapshot.binding.grokSessionId,
+                label: 'Grok',
+                supportsSteer: grokProviderSnapshot.capabilities.steer,
+                supportsStop: grokProviderSnapshot.capabilities.stop,
+              }
+            : null
+          : codexTakeoverSnapshot?.binding ?? null,
     );
   });
 
@@ -4047,6 +4219,16 @@ import {
               true,
               true,
             );
+          } else if (dialogueState.providerId === 'grok') {
+            applyGrokProviderSnapshot(
+              await sendGrokProviderPrompt({
+                eckyThreadId,
+                promptText: prompt,
+                attachments: prepared.attachments,
+              }),
+              true,
+              true,
+            );
           } else {
             applyCodexTakeoverSnapshot(
               await sendCodexTakeoverPrompt({
@@ -4557,6 +4739,16 @@ import {
       'agy-provider-updated',
       (event) => scheduleAgyProviderRefresh(event.payload),
     ) : noopUnlisten;
+    const unlistenGrokProvider = canListenToTauri ? listen<{
+      conversationId?: string | null;
+      method: string;
+      liveMessages?: GrokProviderSnapshot['liveMessages'];
+      turnTraces?: GrokProviderSnapshot['turnTraces'];
+      runtime?: GrokProviderSnapshot['runtime'];
+    }>(
+      'grok-provider-updated',
+      (event) => scheduleGrokProviderRefresh(event.payload),
+    ) : noopUnlisten;
     void (async () => {
       await boot();
       await loadCampaignDefinitions();
@@ -4597,8 +4789,10 @@ import {
       void unlistenCodexTakeover.then(fn => fn());
       void unlistenJevClassification.then(fn => fn());
       void unlistenAgyProvider.then(fn => fn());
+      void unlistenGrokProvider.then(fn => fn());
       if (codexTakeoverRefreshTimer) clearTimeout(codexTakeoverRefreshTimer);
       if (agyProviderRefreshTimer) clearTimeout(agyProviderRefreshTimer);
+      if (grokProviderRefreshTimer) clearTimeout(grokProviderRefreshTimer);
       if (recoveryResetTimer) clearTimeout(recoveryResetTimer);
     };
   });

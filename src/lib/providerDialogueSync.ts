@@ -29,7 +29,7 @@ export function codexProviderUpdateTarget(
 }
 
 export type ProviderDialogueSnapshot = {
-  providerId: 'codex' | 'agy';
+  providerId: 'codex' | 'agy' | 'grok';
   providerLabel: string;
   externalConversationId: string;
   binding?: { eckyThreadId: string } | AgyProviderBinding;

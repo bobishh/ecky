@@ -74,6 +74,11 @@ import {
   type AgyPromptInput,
   type AgyProviderSnapshot,
   type AgyStopInput,
+  type GrokMessagePage,
+  type GrokMessagePageInput,
+  type GrokPromptInput,
+  type GrokProviderSnapshot,
+  type GrokStopInput,
   type ProviderWriterActivationInput,
   type CodexMessagePage,
   type CodexMessagePageInput,
@@ -182,6 +187,8 @@ export type {
   CodexTakeoverSnapshot,
   AgyMessagePage,
   AgyProviderSnapshot,
+  GrokMessagePage,
+  GrokProviderSnapshot,
 };
 
 export async function activateProviderWriter(
@@ -235,6 +242,47 @@ export async function compactAgyProvider(
   eckyThreadId: string,
 ): Promise<AgyProviderSnapshot> {
   return invokeCommand(commands.compactAgyProvider(eckyThreadId));
+}
+
+export async function getGrokProvider(
+  eckyThreadId: string,
+): Promise<GrokProviderSnapshot | null> {
+  return invokeCommand(commands.getGrokProvider(eckyThreadId));
+}
+
+export async function getGrokProviderMessages(
+  input: GrokMessagePageInput,
+): Promise<GrokMessagePage> {
+  return invokeCommand(commands.getGrokProviderMessages(input));
+}
+
+export async function sendGrokProviderPrompt(
+  input: Omit<GrokPromptInput, 'attachments'> & { attachments?: Attachment[] },
+): Promise<GrokProviderSnapshot> {
+  return invokeCommand(commands.sendGrokProviderPrompt({
+    ...input,
+    attachments: (input.attachments ?? []).map(toContractAttachment),
+  } as GrokPromptInput));
+}
+
+export async function stopGrokProvider(
+  input: GrokStopInput,
+): Promise<GrokProviderSnapshot> {
+  return invokeCommand(commands.stopGrokProvider(input));
+}
+
+export async function retryGrokQueuedPrompt(
+  eckyThreadId: string,
+  queueId: string,
+): Promise<GrokProviderSnapshot> {
+  return invokeCommand(commands.retryGrokQueuedPrompt(eckyThreadId, queueId));
+}
+
+export async function removeGrokQueuedPrompt(
+  eckyThreadId: string,
+  queueId: string,
+): Promise<GrokProviderSnapshot> {
+  return invokeCommand(commands.removeGrokQueuedPrompt(eckyThreadId, queueId));
 }
 
 export async function getCodexTakeover(

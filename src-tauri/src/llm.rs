@@ -510,7 +510,46 @@ pub async fn list_agent_models(cmd: &str) -> Result<crate::contracts::AgentModel
         .unwrap_or(cmd)
         .to_lowercase();
 
-    if cmd_name == "agy" || cmd_name.contains("antigravity") {
+    if cmd_name == "grok" {
+        let resolved = crate::services::provider_executable::resolve_provider_executable(
+            "grok",
+            "ECKY_GROK_BIN",
+            "Grok CLI",
+        )
+        .map_err(|error| error.details.unwrap_or(error.message))?;
+        let output = tokio::process::Command::new(&resolved.path)
+            .arg("models")
+            .env("PATH", &resolved.spawn_path)
+            .output()
+            .await
+            .map_err(|error| {
+                format!(
+                    "Failed to run Grok CLI '{} models': {error}",
+                    resolved.path.display()
+                )
+            })?;
+        if !output.status.success() {
+            let detail = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Err(format!(
+                "Grok CLI model discovery failed: {}",
+                detail.trim()
+            ));
+        }
+        let models = crate::services::grok_provider::parse_grok_models(&String::from_utf8_lossy(
+            &output.stdout,
+        ));
+        if models.is_empty() {
+            return Err("Grok CLI model discovery returned no models.".to_string());
+        }
+        Ok(crate::contracts::AgentModelList {
+            models,
+            is_live: true,
+        })
+    } else if cmd_name == "agy" || cmd_name.contains("antigravity") {
         let resolved = crate::services::provider_executable::resolve_provider_executable(
             "agy",
             "ECKY_AGY_BIN",

@@ -19,6 +19,7 @@ pub mod fem;
 pub mod fem_artifacts;
 pub mod fem_solver_worker;
 pub mod fem_topology_artifacts;
+pub mod grok_provider;
 pub mod history;
 pub mod imported_model;
 pub mod inline_component_import;

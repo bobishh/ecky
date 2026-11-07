@@ -483,6 +483,7 @@ pub struct AppState {
     pub mcp_status: Arc<Mutex<McpServerStatus>>,
     pub codex_app_server: Arc<crate::services::codex_app_server::CodexAppServerSupervisor>,
     pub agy_provider: Arc<crate::services::agy_provider::AgyProviderSupervisor>,
+    pub grok_provider: Arc<crate::services::grok_provider::GrokProviderSupervisor>,
     pub mcp_session_registry: McpSessionRegistry,
     /// Current provider capability policy keyed by canonical Ecky thread.
     /// MCP enforcement reads this registry so a reused provider connection
@@ -747,6 +748,7 @@ impl AppState {
                 crate::services::codex_app_server::CodexAppServerSupervisor::new(),
             ),
             agy_provider: Arc::new(crate::services::agy_provider::AgyProviderSupervisor::new()),
+            grok_provider: Arc::new(crate::services::grok_provider::GrokProviderSupervisor::new()),
             mcp_session_registry: McpSessionRegistry {
                 sessions: mcp_session_map,
                 read_resources: Arc::clone(&mcp_session_read_resources),
@@ -1183,9 +1185,11 @@ impl AppState {
         *self.app_handle.lock().unwrap() = Some(handle.clone());
         let codex_app_server = self.codex_app_server.clone();
         let agy_provider = self.agy_provider.clone();
+        let grok_provider = self.grok_provider.clone();
         tauri::async_runtime::spawn(async move {
             codex_app_server.set_app_handle(handle.clone()).await;
-            agy_provider.set_app_handle(handle).await;
+            agy_provider.set_app_handle(handle.clone()).await;
+            grok_provider.set_app_handle(handle).await;
         });
     }
 

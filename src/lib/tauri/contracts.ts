@@ -101,6 +101,54 @@ async compactAgyProvider(eckyThreadId: string) : Promise<Result<AgyProviderSnaps
     else return { status: "error", error: e  as any };
 }
 },
+async getGrokProvider(eckyThreadId: string) : Promise<Result<GrokProviderSnapshot | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_grok_provider", { eckyThreadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getGrokProviderMessages(input: GrokMessagePageInput) : Promise<Result<GrokMessagePage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_grok_provider_messages", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async sendGrokProviderPrompt(input: GrokPromptInput) : Promise<Result<GrokProviderSnapshot, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("send_grok_provider_prompt", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async stopGrokProvider(input: GrokStopInput) : Promise<Result<GrokProviderSnapshot, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("stop_grok_provider", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async retryGrokQueuedPrompt(eckyThreadId: string, queueId: string) : Promise<Result<GrokProviderSnapshot, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retry_grok_queued_prompt", { eckyThreadId, queueId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async removeGrokQueuedPrompt(eckyThreadId: string, queueId: string) : Promise<Result<GrokProviderSnapshot, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_grok_queued_prompt", { eckyThreadId, queueId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async activateProviderWriter(input: ProviderWriterActivationInput) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("activate_provider_writer", { input }) };
@@ -2148,6 +2196,12 @@ export type GenieTraits = { version?: number; seed: number; colorHue: number; ve
 export type GeometryBackend = "freecad" | "build123d" | "mesh"
 export type GeometryProvenance = { representation: GeometryRepresentation; sourceMeshDigests: string[]; closed?: boolean | null; boundaryOrNonManifoldEdgeCount?: number | null }
 export type GeometryRepresentation = "meshNative" | "facetedPolyBrep" | "analyticBrep" | "hybrid"
+export type GrokMessagePage = { messages: CodexDialogueMessage[]; nextCursor: string | null; backwardsCursor: string | null }
+export type GrokMessagePageInput = { eckyThreadId: string; cursor: string | null; direction: string | null }
+export type GrokPromptInput = { eckyThreadId: string; promptText: string; attachments?: Attachment[] }
+export type GrokProviderBinding = { eckyThreadId: string; grokSessionId: string; label: string; cwd: string; bootstrapVersion: number; createdAt: number; updatedAt: number }
+export type GrokProviderSnapshot = { binding: GrokProviderBinding; messages: CodexDialogueMessage[]; liveMessages: CodexDialogueMessage[]; turnTraces: ProviderTurnTrace[]; nextCursor: string | null; backwardsCursor: string | null; runtime: CodexTakeoverRuntime; queue: CodexQueuedPrompt[]; capabilities: ProviderCapabilities }
+export type GrokStopInput = { eckyThreadId: string; turnId: string }
 export type ImportModelIntent = { source: ImportedModelSource; threadId?: string | null; title?: string | null }
 export type ImportedModelProjection = { threadId: string; messageId: string; title: string; message: Message; designOutput: DesignOutput; artifactBundle: ArtifactBundle; modelManifest: ModelManifest; snapshotId: string }
 export type ImportedModelSource = { kind: "fcstd"; sourcePath: string } | { kind: "freecadLibrary"; item: FreecadLibraryItem }
@@ -2334,7 +2388,7 @@ export type PromptTranscription = { text: string; provider: string; model: strin
 export type ProposalStatusEdit = { proposalId: string; status: EnrichmentStatus }
 export type ProviderCapabilities = { steer: boolean; stop: boolean }
 export type ProviderEventKind = "assistant" | "activity"
-export type ProviderModels = { codex?: string; agy?: string }
+export type ProviderModels = { codex?: string; agy?: string; grok?: string }
 export type ProviderTurnTrace = { turnId: string; status: string; messages: CodexDialogueMessage[]; completedAt: number }
 export type ProviderWriterActivationInput = { eckyThreadId: string; provider: string }
 export type QueueAgentPromptInput = { threadId?: string | null; promptText: string; attachments?: Attachment[] }

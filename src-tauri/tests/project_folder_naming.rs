@@ -170,7 +170,7 @@ fn startup_renames_untitled_folder_preserving_dirty_source_manifest_and_history(
 fn startup_updates_all_owned_provider_cwds_and_preserves_conversation_and_queue() {
     let fixture = ProjectFixture::new();
     let old = fixture.bind_legacy("thread-12345678");
-    for provider in ["codex", "agy"] {
+    for provider in ["codex", "agy", "grok"] {
         codex_takeover::upsert_agent_binding(
             &fixture.conn,
             &codex_takeover::AgentThreadBindingRecord {
@@ -192,7 +192,7 @@ fn startup_updates_all_owned_provider_cwds_and_preserves_conversation_and_queue(
     let bound = thread_source_binding::get_binding(&fixture.conn, &old.thread_id)
         .unwrap()
         .unwrap();
-    for provider in ["codex", "agy"] {
+    for provider in ["codex", "agy", "grok"] {
         let agent =
             codex_takeover::get_agent_binding_for_provider(&fixture.conn, &old.thread_id, provider)
                 .unwrap()

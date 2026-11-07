@@ -33,7 +33,7 @@
   } from './threadTimeline';
   import { modelEngineLabel } from './modelEngineLabel';
   import type { DialogueState } from './composables/dialogueState';
-  import type { AgyProviderSnapshot, CodexQueuedPrompt, CodexTakeoverSnapshot } from './tauri/contracts';
+  import type { AgyProviderSnapshot, CodexQueuedPrompt, CodexTakeoverSnapshot, GrokProviderSnapshot } from './tauri/contracts';
   import type { AuthoredVerifyChip } from './controllers/structuralVerification';
   import { buildVersionAuthoredVerifyChipMap } from './versionAuthoredVerifyCards';
   import {
@@ -122,7 +122,7 @@
     generationUnavailableReason?: string | null;
     imageAttachmentUnavailableReason?: string | null;
     dialogueState?: DialogueState;
-    codexTakeover?: CodexTakeoverSnapshot | AgyProviderSnapshot | null;
+    codexTakeover?: CodexTakeoverSnapshot | AgyProviderSnapshot | GrokProviderSnapshot | null;
     codexTakeoverError?: string | null;
     onLoadEarlierCodexMessages?: () => Promise<void>;
     onSteerCodexTakeover?: (prompt: string, attachments: Attachment[]) => Promise<void>;

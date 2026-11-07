@@ -329,6 +329,7 @@ export interface AppConfig {
   providerModels: {
     codex: string;
     agy: string;
+    grok: string;
   };
   jevClassifier: { enabled: boolean; apiKey: string };
   defaultEngineKind: EngineKind;
@@ -1346,6 +1347,7 @@ export function normalizeConfig(
     providerModels: {
       codex: `${(config as AppConfig).providerModels?.codex ?? ""}`.trim(),
       agy: `${(config as AppConfig).providerModels?.agy ?? ""}`.trim(),
+      grok: `${(config as AppConfig).providerModels?.grok ?? ""}`.trim(),
     },
     jevClassifier: {
       enabled: (config as AppConfig).jevClassifier?.enabled === true,

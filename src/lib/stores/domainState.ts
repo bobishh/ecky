@@ -40,7 +40,7 @@ export const config = writable<AppConfig>({
   },
   hasSeenOnboarding: false,
   connectionType: null,
-  providerModels: { codex: '', agy: '' },
+  providerModels: { codex: '', agy: '', grok: '' },
   jevClassifier: { enabled: false, apiKey: '' },
   defaultEngineKind: 'ecky',
   defaultSourceLanguage: 'ecky',

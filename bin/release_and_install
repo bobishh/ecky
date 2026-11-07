@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+SOURCE_APP="$ROOT/src-tauri/target/release/bundle/macos/Ecky CAD.app"
+TARGET_APP="/Applications/Ecky CAD.app"
+
+cd "$ROOT"
+npm run tauri build -- --bundles app
+
+rm -rf "$TARGET_APP"
+cp -R "$SOURCE_APP" "$TARGET_APP"

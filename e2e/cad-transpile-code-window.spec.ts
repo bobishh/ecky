@@ -32,7 +32,7 @@ async function installMocks(page: Page, mode: Mode, provider = false) {
           mcp: { mode: 'passive', primaryAgentId: null, promptTimeoutSecs: 1800, autoAgents: [] },
           hasSeenOnboarding: true,
           connectionType: provider ? 'provider:agy' : null,
-          providerModels: { codex: '', agy: 'claude-sonnet-4-6' },
+          providerModels: { codex: '', agy: 'claude-sonnet-4-6', grok: '' },
           defaultEngineKind: 'build123d',
           defaultSourceLanguage: 'ecky',
           defaultGeometryBackend: 'build123d',

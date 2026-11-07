@@ -163,6 +163,10 @@ pub fn encode_config(config: &Config) -> AppResult<SteelDataValue> {
                     "agy",
                     SteelDataValue::String(config.provider_models.agy.clone()),
                 ),
+                (
+                    "grok",
+                    SteelDataValue::String(config.provider_models.grok.clone()),
+                ),
             ]),
         ),
         (
@@ -502,7 +506,7 @@ pub fn decode_config(value: &SteelDataValue) -> AppResult<Config> {
         provider_models: root
             .optional("provider-models")
             .map(|value| -> AppResult<ProviderModels> {
-                let fields = Fields::new(value, "provider-models", &["codex", "agy"])?;
+                let fields = Fields::new(value, "provider-models", &["codex", "agy", "grok"])?;
                 Ok(ProviderModels {
                     codex: fields
                         .optional("codex")
@@ -512,6 +516,11 @@ pub fn decode_config(value: &SteelDataValue) -> AppResult<Config> {
                     agy: fields
                         .optional("agy")
                         .map(|value| string(value, "provider-models.agy"))
+                        .transpose()?
+                        .unwrap_or_default(),
+                    grok: fields
+                        .optional("grok")
+                        .map(|value| string(value, "provider-models.grok"))
                         .transpose()?
                         .unwrap_or_default(),
                 })
@@ -996,11 +1005,13 @@ mod tests {
         config.provider_models = ProviderModels {
             codex: "gpt-5.6".into(),
             agy: "claude-sonnet-4-6".into(),
+            grok: "grok-4.6".into(),
         };
         let edn = encode_config(&config).unwrap();
         let rendered = crate::steel_data::write_steel_data(&edn).unwrap();
         assert!(rendered.contains(":provider-models"));
         assert!(rendered.contains("gpt-5.6"));
+        assert!(rendered.contains("grok-4.6"));
         assert_eq!(decode_config(&edn).unwrap(), config);
     }
     #[test]

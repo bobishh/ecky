@@ -18,6 +18,7 @@ pub mod exploration_run;
 pub mod external_shape_edit;
 pub mod fem;
 pub mod generation;
+pub mod grok_provider;
 pub mod history;
 pub mod inline_component_import;
 pub mod jev_classifications;

@@ -18,6 +18,10 @@ pub async fn activate_provider_writer(
             crate::commands::agy_provider::activate_bound_writer(&state, &input.ecky_thread_id)
                 .await
         }
+        "grok" => {
+            crate::commands::grok_provider::activate_bound_writer(&state, &input.ecky_thread_id)
+                .await
+        }
         provider => Err(AppError::validation(format!(
             "Unsupported provider writer '{provider}'."
         ))),

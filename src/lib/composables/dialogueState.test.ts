@@ -71,6 +71,26 @@ test('deriveDialogueState exposes exact owned Codex id after binding loads', () 
   );
 });
 
+test('deriveDialogueState labels Grok and keeps steer off until the snapshot says otherwise', () => {
+  assert.deepEqual(
+    deriveDialogueState(null, false, 'provider:grok', {
+      providerId: 'grok',
+      externalConversationId: 'grok-session-7',
+      label: 'Grok',
+      supportsSteer: false,
+      supportsStop: true,
+    }),
+    {
+      mode: 'provider',
+      providerId: 'grok',
+      externalConversationId: 'grok-session-7',
+      label: 'Grok',
+      supportsSteer: false,
+      supportsStop: true,
+    },
+  );
+});
+
 test('deriveDialogueState exposes Agy capabilities without inventing steer', () => {
   assert.deepEqual(
     deriveDialogueState(null, false, 'provider:agy', {

@@ -5,7 +5,7 @@ async function openSettings(page: Page) {
     const stored = sessionStorage.getItem('jev-settings-fixture');
     let config = stored ? JSON.parse(stored) : {
       engines: [], selectedEngineId: '', assets: [], hasSeenOnboarding: true,
-      connectionType: 'provider:codex', providerModels: { codex: '', agy: '' },
+      connectionType: 'provider:codex', providerModels: { codex: '', agy: '', grok: '' },
       defaultEngineKind: 'ecky', defaultSourceLanguage: 'ecky', defaultGeometryBackend: 'mesh',
       maxGenerationAttempts: 3, maxVerifyAttempts: 0,
     };

@@ -683,6 +683,11 @@ pub fn run() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
+            if let Err(error) =
+                crate::services::grok_provider::fail_inflight_queue(&conn, startup_now)
+            {
+                eprintln!("[BOOT] failed to reconcile Grok providers: {error}");
+            }
             match crate::services::agy_provider::reconcile_stale_deliveries(
                 &conn,
                 &crate::services::agy_provider::SystemAgyProcessReaper,
@@ -800,6 +805,10 @@ pub fn run() {
                 state.clone(),
                 app.handle().clone(),
             );
+            crate::commands::grok_provider::initialize_grok_queue_supervisor(
+                state.clone(),
+                app.handle().clone(),
+            );
 
             {
                 // Project folder watcher: external edits to
@@ -891,7 +900,10 @@ pub fn run() {
             return;
         }
         let state = app_handle.state::<AppState>();
-        tauri::async_runtime::block_on(state.agy_provider.shutdown_all());
+        tauri::async_runtime::block_on(async {
+            state.agy_provider.shutdown_all().await;
+            state.grok_provider.shutdown_all().await;
+        });
     });
 }
 

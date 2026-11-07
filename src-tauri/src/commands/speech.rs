@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn managed_dialogue_never_falls_back_to_nvidia_speech() {
-        for connection_type in ["provider:codex", "provider:agy", "mcp"] {
+        for connection_type in ["provider:codex", "provider:agy", "provider:grok", "mcp"] {
             let mut cfg = config(
                 vec![engine(
                     "nim",

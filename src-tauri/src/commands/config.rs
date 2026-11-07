@@ -190,6 +190,9 @@ pub async fn list_provider_models(
         "agy" => crate::llm::list_agent_models("agy")
             .await
             .map_err(crate::contracts::AppError::provider),
+        "grok" => crate::llm::list_agent_models("grok")
+            .await
+            .map_err(crate::contracts::AppError::provider),
         _ => Err(AppError::validation(format!(
             "Unsupported provider model catalog '{provider}'."
         ))),

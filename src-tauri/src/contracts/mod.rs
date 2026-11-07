@@ -61,6 +61,8 @@ mod codex;
 pub use codex::*;
 mod agy;
 pub use agy::*;
+mod grok;
+pub use grok::*;
 mod provider;
 pub use provider::*;
 pub type DesignParams = BTreeMap<String, ParamValue>;

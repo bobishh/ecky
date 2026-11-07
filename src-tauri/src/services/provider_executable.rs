@@ -9,6 +9,7 @@ use crate::contracts::{AppError, AppResult};
 
 const COMMON_USER_BIN_SUFFIXES: &[&str] = &[
     ".local/bin",
+    ".grok/bin",
     "bin",
     ".asdf/shims",
     ".volta/bin",

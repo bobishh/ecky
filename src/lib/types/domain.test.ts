@@ -502,6 +502,20 @@ test("normalizeConfig preserves configured STT language code", () => {
   assert.equal(config.voice.sttLanguageCode, "ru-RU");
 });
 
+test("normalizeConfig keeps a missing Grok model selection blank", () => {
+  const config = normalizeConfig({
+    engines: [],
+    selectedEngineId: "",
+    providerModels: { codex: "gpt-6", agy: "" },
+  } as any);
+
+  assert.deepEqual(config.providerModels, {
+    codex: "gpt-6",
+    agy: "",
+    grok: "",
+  });
+});
+
 test("normalizeConfig preserves CAD text font path", () => {
   const config = normalizeConfig({
     engines: [],

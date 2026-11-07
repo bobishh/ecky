@@ -82,7 +82,9 @@
     };
   }
   if (!config.providerModels) {
-    config.providerModels = { codex: '', agy: '' };
+    config.providerModels = { codex: '', agy: '', grok: '' };
+  } else if (config.providerModels.grok == null) {
+    config.providerModels = { ...config.providerModels, grok: '' };
   }
   if (!config.jevClassifier) {
     config.jevClassifier = { enabled: false, apiKey: '' };
@@ -209,17 +211,23 @@
   const providerIntegrations = [
     { id: 'codex', label: 'CODEX' },
     { id: 'agy', label: 'AGY' },
+    { id: 'grok', label: 'GROK' },
   ] as const;
+  type HostedProvider = typeof providerIntegrations[number]['id'];
 
   // Per-agent fetched model lists (keyed by agent id)
   let agentModelLists = $state<Record<string, string[]>>({});
   let agentModelIsLive = $state<Record<string, boolean>>({});
   let agentModelFetching = $state<Record<string, boolean>>({});
-  let providerModelLists = $state<Record<'codex' | 'agy', string[]>>({ codex: [], agy: [] });
-  let providerModelFetching = $state<Record<'codex' | 'agy', boolean>>({ codex: false, agy: false });
-  let providerModelAutoFetched = $state<Record<'codex' | 'agy', boolean>>({ codex: false, agy: false });
+  let providerModelLists = $state<Record<HostedProvider, string[]>>({ codex: [], agy: [], grok: [] });
+  let providerModelFetching = $state<Record<HostedProvider, boolean>>({ codex: false, agy: false, grok: false });
+  let providerModelAutoFetched = $state<Record<HostedProvider, boolean>>({ codex: false, agy: false, grok: false });
 
-  async function fetchProviderModels(provider: 'codex' | 'agy') {
+  function isHostedProvider(value: string): value is HostedProvider {
+    return value === 'codex' || value === 'agy' || value === 'grok';
+  }
+
+  async function fetchProviderModels(provider: HostedProvider) {
     providerModelFetching = { ...providerModelFetching, [provider]: true };
     message = '';
     try {
@@ -232,7 +240,7 @@
     }
   }
 
-  function selectProvider(provider: 'codex' | 'agy') {
+  function selectProvider(provider: HostedProvider) {
     config = {
       ...config,
       connectionType: `provider:${provider}`,
@@ -240,7 +248,7 @@
     };
   }
 
-  function selectProviderModel(provider: 'codex' | 'agy', value: unknown) {
+  function selectProviderModel(provider: HostedProvider, value: unknown) {
     config = {
       ...config,
       providerModels: {
@@ -255,7 +263,7 @@
       ? config.connectionType.slice('provider:'.length)
       : '';
     if (
-      (provider !== 'codex' && provider !== 'agy')
+      !isHostedProvider(provider)
       || providerModelLists[provider].length > 0
       || providerModelFetching[provider]
       || providerModelAutoFetched[provider]
@@ -1576,7 +1584,11 @@
           </div>
 
         {:else if connectionType === 'provider'}
-          {@const selectedProvider = config.connectionType === 'provider:agy' ? 'agy' : 'codex'}
+          {@const selectedProvider = config.connectionType === 'provider:agy'
+            ? 'agy'
+            : config.connectionType === 'provider:grok'
+              ? 'grok'
+              : 'codex'}
           <div class="field">
             <div class="field-title">PROVIDER INTEGRATION</div>
             <div class="field-help">Hosted agent conversation owned by each Ecky thread.</div>

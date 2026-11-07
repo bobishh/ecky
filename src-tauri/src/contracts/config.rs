@@ -247,6 +247,8 @@ pub struct ProviderModels {
     pub codex: String,
     #[serde(default)]
     pub agy: String,
+    #[serde(default)]
+    pub grok: String,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]

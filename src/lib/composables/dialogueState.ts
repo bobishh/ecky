@@ -39,7 +39,7 @@ export function deriveDialogueState(
       externalConversationId: codexBinding?.externalConversationId
         ?? codexBinding?.codexThreadId
         ?? null,
-      label: providerId === 'agy' ? 'Agy' : providerId === 'codex' ? 'Codex' : providerId,
+      label: providerId === 'agy' ? 'Agy' : providerId === 'grok' ? 'Grok' : providerId === 'codex' ? 'Codex' : providerId,
       supportsSteer: codexBinding?.supportsSteer ?? providerId === 'codex',
       supportsStop: codexBinding?.supportsStop ?? true,
     };
