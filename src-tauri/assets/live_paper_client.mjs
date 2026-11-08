@@ -5,12 +5,42 @@ const video = document.querySelector('#camera');
 const startButton = document.querySelector('#start');
 const stopButton = document.querySelector('#stop');
 const status = document.querySelector('#status');
+const help = document.querySelector('#help');
+const wholeFrame = document.querySelector('#whole-frame');
 let peer = null;
 let stream = null;
 let wakeLock = null;
 let generation = 0;
 
 function report(message) { status.textContent = message; }
+
+function updateViewport() {
+  const viewport = window.visualViewport;
+  const root = document.documentElement.style;
+  root.setProperty('--viewport-width', `${viewport?.width ?? window.innerWidth}px`);
+  root.setProperty('--viewport-height', `${viewport?.height ?? window.innerHeight}px`);
+  root.setProperty('--viewport-top', `${viewport?.offsetTop ?? 0}px`);
+  root.setProperty('--viewport-left', `${viewport?.offsetLeft ?? 0}px`);
+}
+
+function cameraConstraints() {
+  const portrait = window.matchMedia('(orientation: portrait)').matches;
+  return {
+    facingMode: { ideal: 'environment' },
+    width: { ideal: portrait ? 720 : 1280, max: portrait ? 1080 : 1920 },
+    height: { ideal: portrait ? 1280 : 720, max: portrait ? 1920 : 1080 },
+    frameRate: { ideal: 15, max: 20 },
+  };
+}
+
+updateViewport();
+window.addEventListener('resize', updateViewport);
+window.visualViewport?.addEventListener('resize', updateViewport);
+window.visualViewport?.addEventListener('scroll', updateViewport);
+
+document.querySelector('#help-open').addEventListener('click', () => help.showModal());
+document.querySelector('#help-close').addEventListener('click', () => help.close());
+wholeFrame.addEventListener('change', () => video.classList.toggle('whole-frame', wholeFrame.checked));
 
 async function releaseWakeLock() {
   const active = wakeLock;
@@ -64,9 +94,7 @@ export async function startCamera() {
   stopButton.disabled = false;
   report('Requesting camera permission…');
   try {
-    const media = await navigator.mediaDevices.getUserMedia({ audio: false, video: {
-      facingMode: { ideal: 'environment' }, width: { ideal: 1280, max: 1920 }, height: { ideal: 720, max: 1080 }, frameRate: { ideal: 15, max: 20 },
-    } });
+    const media = await navigator.mediaDevices.getUserMedia({ audio: false, video: cameraConstraints() });
     if (attempt !== generation) { for (const track of media.getTracks()) track.stop(); return; }
     stream = media;
     video.srcObject = stream;

@@ -15,18 +15,17 @@ FIXTURES = ROOT / 'src-tauri/tests/fixtures/live-paper'
 CENTERS = [(17,30),(193,30),(193,266),(17,266)]
 DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 
-def main():
-    FIXTURES.mkdir(parents=True, exist_ok=True)
-    pdf = canvas.Canvas(str(ASSETS / 'live-paper-template.pdf'), pagesize=(210*mm,297*mm), invariant=1)
-    pdf.setTitle('Ecky live paper - A4 100 percent scale')
-    pdf.setFont('Helvetica-Bold', 13)
-    pdf.drawCentredString(105*mm, 285*mm, 'ECKY / LIVE PAPER')
+def render_template(view, base_id, filename):
+    pdf = canvas.Canvas(str(ASSETS / filename), pagesize=(210*mm,297*mm), invariant=1)
+    pdf.setTitle(f'Ecky {view} live paper - A4 100 percent scale')
+    pdf.setFont('Helvetica-Bold', 20)
+    pdf.drawCentredString(105*mm, 285*mm, f'ECKY / {view}')
     pdf.setFont('Helvetica', 8)
-    pdf.drawCentredString(105*mm, 280*mm, 'A4 - print at 100% / actual size - keep all four markers visible')
+    pdf.drawCentredString(105*mm, 280*mm, 'LIVE PAPER - A4 - print at 100% / actual size - keep all four markers visible')
     scale = 4
     sheet = np.full((297*scale,210*scale),255,np.uint8)
     for i,(cx,cy) in enumerate(CENTERS):
-        marker = cv2.aruco.generateImageMarker(DICT,i,6)
+        marker = cv2.aruco.generateImageMarker(DICT,base_id+i,6)
         for y in range(6):
             for x in range(6):
                 if marker[y,x] == 0:
@@ -44,6 +43,15 @@ def main():
     pdf.line(130*mm,13*mm,130*mm,17*mm)
     pdf.drawCentredString(105*mm,9*mm,'Scale check: measure this segment = 50 mm')
     pdf.showPage();pdf.save()
+    cv2.putText(sheet, f'ECKY / {view}', (155,55), cv2.FONT_HERSHEY_SIMPLEX, 1.1, 0, 2, cv2.LINE_AA)
+    return sheet
+
+def main():
+    FIXTURES.mkdir(parents=True, exist_ok=True)
+    sheet = render_template('FRONT', 0, 'live-paper-template.pdf')
+    top = render_template('TOP', 4, 'live-paper-template-top.pdf')
+    side = render_template('SIDE', 8, 'live-paper-template-side.pdf')
+    scale = 4
     cv2.imwrite(str(FIXTURES/'blank.png'),sheet)
     def pt(x,y): return (round((25+x)*scale),round((258-y)*scale))
     mixed=sheet.copy()
@@ -52,6 +60,10 @@ def main():
     cv2.circle(mixed,pt(115,140),round(12*scale),0,3)
     cv2.circle(mixed,pt(115,185),3,0,-1)
     cv2.imwrite(str(FIXTURES/'primitives.png'),mixed)
+    for view, view_sheet in [('top', top), ('side', side)]:
+        # Copy identical known geometry; only perimeter identifiers/header change.
+        view_sheet[38*scale:258*scale,25*scale:185*scale] = mixed[38*scale:258*scale,25*scale:185*scale]
+        cv2.imwrite(str(FIXTURES/f'primitives-{view}.png'),view_sheet)
     src=np.float32([[0,0],[840,0],[840,1188],[0,1188]])
     dst=np.float32([[80,45],[850,110],[800,1160],[30,1100]])
     warp=cv2.getPerspectiveTransform(src,dst)

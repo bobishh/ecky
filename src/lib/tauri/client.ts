@@ -1558,6 +1558,10 @@ export async function getLivePaper(): Promise<LivePaperSnapshot | null> {
   return commands.getLivePaper();
 }
 
+export async function setLivePaperView(sessionId: string, view: SketchView): Promise<LivePaperSnapshot> {
+  return invokeCommand(commands.setLivePaperView(sessionId, view));
+}
+
 export async function stopLivePaper(sessionId: string): Promise<LivePaperSnapshot> {
   return invokeCommand(commands.stopLivePaper(sessionId));
 }

@@ -32,9 +32,9 @@
 </g>
 
 <style>
-  .primitive { fill: none; stroke: var(--primary, #ad8158); stroke-width: 2; cursor: pointer; }
+  .primitive { fill: none; stroke: var(--profile-secondary); stroke-width: 2; cursor: pointer; }
   .primitive :is(line, circle, polygon, polyline) { vector-effect: non-scaling-stroke; }
-  .primitive .point { fill: var(--primary, #ad8158); }
-  .pending { stroke: var(--secondary, #d1b391); stroke-dasharray: 5 4; }
-  .selected { stroke: #f0d0a7; stroke-width: 3; }
+  .primitive .point { fill: var(--profile-secondary); }
+  .pending { stroke: var(--profile-muted); stroke-dasharray: 5 4; }
+  .selected { stroke: var(--profile-primary); stroke-width: 3; }
 </style>

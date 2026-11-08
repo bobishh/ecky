@@ -41,13 +41,18 @@ For a concrete example, the repository contains a [bicycle bottle holder](sites/
 
 ## Live paper sketch
 
-In the expanded **SKETCH** workspace, start **Live paper**. Open the local camera
-certificate trust page on the iPhone, print the linked A4 template at actual size,
+In the expanded **SKETCH** workspace, choose **Camera** and assign FRONT, TOP,
+or SIDE. Open the camera connection dialog, trust the local camera certificate
+on the iPhone, and print that view’s labelled A4 template at actual size,
 and check its 50 mm scale segment. Scan the camera QR code in Safari, allow camera
 access, and keep all four markers visible. Phone and computer use the same local
 network. The desktop capture server supplies HTTPS and WebRTC signaling.
 
-The corrected 160 × 220 mm paper appears beneath the sketch grid. Stable pen
+The live camera fills the Sketch pane immediately, before markers are found.
+The phone shows full viewport video with overlaid controls. Once its four markers
+match the selected view, corrected 160 × 220 mm paper appears beneath the grid.
+Switch views while the camera stays connected; each view retains its own draft.
+A different view’s sheet stays visible but cannot add geometry to the wrong view. Stable pen
 points, lines, circles, and polylines enter after three agreeing observations.
 Select geometry to edit coordinates, confirm uncertain junctions or broken strokes,
 or remove unwanted observations. Missing markers pause updates; accepted geometry

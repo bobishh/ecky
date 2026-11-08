@@ -1,5 +1,6 @@
 //! Fiducial-calibrated, transient paper observations. No model history writes.
 use super::live_paper::LivePaperPrimitive;
+use crate::contracts::SketchView;
 use image::DynamicImage;
 
 #[derive(Debug)]
@@ -9,6 +10,7 @@ pub struct LivePaperCandidate {
 }
 #[derive(Debug)]
 pub struct LivePaperObservation {
+    pub view: SketchView,
     pub preview_data_url: String,
     pub width_mm: f64,
     pub height_mm: f64,
@@ -49,7 +51,7 @@ pub fn recognize_live_paper(image: &DynamicImage) -> Result<LivePaperObservation
         );
     }
     let resized = image.thumbnail(1280, 1280).to_luma8();
-    let projection = paper_projection(&resized)?;
+    let (projection, view) = paper_projection(&resized)?;
     let mut rectified = GrayImage::from_pixel(WIDTH_PX, HEIGHT_PX, Luma([255]));
     warp_into(
         &resized,
@@ -249,6 +251,7 @@ pub fn recognize_live_paper(image: &DynamicImage) -> Result<LivePaperObservation
         .write_to(&mut encoded, ImageFormat::Png)
         .map_err(|e| format!("Could not encode paper preview: {e}"))?;
     Ok(LivePaperObservation {
+        view,
         preview_data_url: format!(
             "data:image/png;base64,{}",
             BASE64.encode(encoded.into_inner())
@@ -284,7 +287,7 @@ fn path_length(points: &[[f64; 2]]) -> f64 {
         .sum()
 }
 
-fn paper_projection(gray: &GrayImage) -> Result<Projection, String> {
+fn paper_projection(gray: &GrayImage) -> Result<(Projection, SketchView), String> {
     let view = ImageView::new(
         gray.as_raw(),
         gray.width() as usize,
@@ -300,36 +303,45 @@ fn paper_projection(gray: &GrayImage) -> Result<Projection, String> {
         .detect(&view, None, None, false)
         .map_err(|e| format!("Marker detection failed: {e}"))?
         .reassemble_owned();
-    let mut from = [(0.0f32, 0.0f32); 4];
-    let mut markers = [None, None, None, None];
+    let mut boards = [None; 12];
     for detection in &detections {
-        if detection.id > 3 {
+        if detection.id >= boards.len() as u32 {
             continue;
         }
         let id = detection.id as usize;
-        if markers[id].is_some() {
+        if boards[id].is_some() {
             return Err(format!(
                 "Duplicate marker {id}; use one complete Ecky template."
             ));
         }
-        let corners = detection.corners.map(|p| (p[0] as f32, p[1] as f32));
+        boards[id] = Some(detection.corners.map(|p| (p[0] as f32, p[1] as f32)));
+    }
+    let complete_boards = [0, 4, 8]
+        .into_iter()
+        .filter(|base| boards[*base..*base + 4].iter().all(Option::is_some))
+        .collect::<Vec<_>>();
+    let base = match complete_boards.as_slice() {
+        [base] => *base,
+        [] => return Err("Paper marker lost or incomplete template. Keep all four markers from one FRONT, TOP, or SIDE sheet visible; geometry updates paused.".into()),
+        _ => return Err("Multiple complete paper templates are visible. Show one FRONT, TOP, or SIDE sheet at a time; geometry updates paused.".into()),
+    };
+    let detected_view = match base {
+        0 => SketchView::Front,
+        4 => SketchView::Top,
+        8 => SketchView::Side,
+        _ => return Err("Paper template identifiers are invalid.".into()),
+    };
+    let mut from = [(0.0f32, 0.0f32); 4];
+    for (index, corners) in boards[base..base + 4].iter().enumerate() {
+        let corners = corners.ok_or("Paper marker lost; keep all four printed markers visible.")?;
         let square = Projection::from_control_points(
             [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
             corners,
         )
         .ok_or("Marker corners are degenerate; flatten the sheet.")?;
+        // Corner ownership uses ID modulo four; the board's ID range identifies its view.
         // The projective center is the intersection of diagonals, not a corner average.
-        from[id] = square * (0.5, 0.5);
-        markers[id] = Some(corners);
-    }
-    if markers.iter().any(Option::is_none) {
-        let missing = markers
-            .iter()
-            .enumerate()
-            .filter_map(|(i, m)| m.is_none().then_some(i.to_string()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(format!("Paper marker lost ({missing}). Keep all four printed markers visible; geometry updates paused."));
+        from[index] = square * (0.5, 0.5);
     }
     let to = MARKER_CENTERS_MM.map(|(x, y)| {
         (
@@ -339,7 +351,7 @@ fn paper_projection(gray: &GrayImage) -> Result<Projection, String> {
     });
     let projection = Projection::from_control_points(from, to)
         .ok_or("Paper markers are degenerate; flatten the sheet and move the camera back.")?;
-    for corners in markers.into_iter().flatten() {
+    for corners in boards[base..base + 4].iter().flatten() {
         let rectified = corners.map(|p| projection * p);
         for i in 0..4 {
             let a = rectified[i];
@@ -350,10 +362,21 @@ fn paper_projection(gray: &GrayImage) -> Result<Projection, String> {
             }
         }
     }
-    Ok(projection)
+    Ok((projection, detected_view))
+}
+pub fn template_pdf_for_view(view: &SketchView) -> Result<Vec<u8>, String> {
+    let bytes: &[u8] = match view {
+        SketchView::Front => include_bytes!("../../assets/live-paper-template.pdf"),
+        SketchView::Top => include_bytes!("../../assets/live-paper-template-top.pdf"),
+        SketchView::Side => include_bytes!("../../assets/live-paper-template-side.pdf"),
+        SketchView::Custom => {
+            return Err("Select FRONT, TOP, or SIDE for a printable live-paper template.".into())
+        }
+    };
+    Ok(bytes.to_vec())
 }
 pub fn template_pdf() -> Result<Vec<u8>, String> {
-    Ok(include_bytes!("../../assets/live-paper-template.pdf").to_vec())
+    template_pdf_for_view(&SketchView::Front)
 }
 
 #[cfg(test)]
@@ -361,6 +384,12 @@ mod tests {
     use super::*;
     fn fixture(name: &str) -> DynamicImage {
         let bytes: &[u8] = match name {
+            "primitives-top.png" => {
+                include_bytes!("../../tests/fixtures/live-paper/primitives-top.png")
+            }
+            "primitives-side.png" => {
+                include_bytes!("../../tests/fixtures/live-paper/primitives-side.png")
+            }
             "primitives.png" => include_bytes!("../../tests/fixtures/live-paper/primitives.png"),
             "perspective-noise.png" => {
                 include_bytes!("../../tests/fixtures/live-paper/perspective-noise.png")
@@ -371,6 +400,62 @@ mod tests {
             _ => panic!("Unknown fixture {name}"),
         };
         image::load_from_memory(bytes).unwrap()
+    }
+    #[test]
+    fn given_each_view_template_when_recognized_then_recovers_same_metric_geometry() {
+        for (name, view) in [
+            ("primitives.png", SketchView::Front),
+            ("primitives-top.png", SketchView::Top),
+            ("primitives-side.png", SketchView::Side),
+        ] {
+            let result = recognize_live_paper(&fixture(name)).unwrap();
+            assert_eq!(result.view, view);
+            assert!(result.primitives.iter().any(|p|matches!(&p.primitive,LivePaperPrimitive::Circle{center_mm,radius_mm,..} if (center_mm[0]-115.0).abs()<1.0 && (center_mm[1]-140.0).abs()<1.0 && (radius_mm-12.0).abs()<0.8)),"{name}");
+        }
+    }
+    #[test]
+    fn given_multiple_complete_templates_when_recognized_then_rejects_ambiguous_view() {
+        let front = fixture("primitives.png").to_luma8();
+        let top = fixture("primitives-top.png").to_luma8();
+        let mut combined = GrayImage::from_pixel(front.width() * 2, front.height(), Luma([255]));
+        image::imageops::replace(&mut combined, &front, 0, 0);
+        image::imageops::replace(&mut combined, &top, i64::from(front.width()), 0);
+        let error = recognize_live_paper(&DynamicImage::ImageLuma8(combined))
+            .expect_err("Multiple complete templates must be rejected");
+        assert!(error.contains("Multiple complete"), "{error}");
+    }
+    #[test]
+    fn given_top_and_side_templates_rotated_or_missing_markers_then_preserves_view_or_pauses() {
+        for (name, view) in [
+            ("primitives-top.png", SketchView::Top),
+            ("primitives-side.png", SketchView::Side),
+        ] {
+            let result = recognize_live_paper(&fixture(name).rotate90()).unwrap();
+            assert_eq!(result.view, view);
+            let mut missing = fixture(name).to_luma8();
+            for y in 80..160 {
+                for x in 30..110 {
+                    missing.put_pixel(x, y, Luma([255]));
+                }
+            }
+            let error = recognize_live_paper(&DynamicImage::ImageLuma8(missing))
+                .expect_err("Incomplete board must pause");
+            assert!(error.contains("marker"), "{error}");
+        }
+    }
+    #[test]
+    fn given_printable_view_when_requested_then_returns_distinct_pdf_and_rejects_custom_view() {
+        let front = template_pdf_for_view(&SketchView::Front).unwrap();
+        let top = template_pdf_for_view(&SketchView::Top).unwrap();
+        let side = template_pdf_for_view(&SketchView::Side).unwrap();
+        assert!(
+            front.starts_with(b"%PDF-") && top.starts_with(b"%PDF-") && side.starts_with(b"%PDF-")
+        );
+        assert_ne!(front, top);
+        assert_ne!(front, side);
+        assert_ne!(top, side);
+        assert_eq!(template_pdf().unwrap(), front);
+        assert!(template_pdf_for_view(&SketchView::Custom).is_err());
     }
     #[test]
     fn given_printed_markers_and_pen_when_observed_then_recovers_metric_primitives() {

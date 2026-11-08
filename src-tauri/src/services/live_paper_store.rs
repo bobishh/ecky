@@ -10,6 +10,15 @@ pub struct PaperDraft {
     pub scope_key: String,
     pub view: SketchView,
     pub accepted: Vec<LivePaperPrimitive>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_views: Vec<PaperViewDraft>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PaperViewDraft {
+    pub view: SketchView,
+    pub accepted: Vec<LivePaperPrimitive>,
 }
 
 const MAX_DRAFT_BYTES: u64 = 16 * 1024 * 1024;
@@ -80,6 +89,7 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("draft.json");
         let draft = PaperDraft {
+            other_views: Vec::new(),
             scope_key: "model-head".into(),
             view: SketchView::Front,
             accepted: vec![LivePaperPrimitive::Point {

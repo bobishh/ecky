@@ -11,7 +11,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use image::{DynamicImage, GrayImage};
+use image::{DynamicImage, RgbImage};
 use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
 use serde::Deserialize;
@@ -106,7 +106,10 @@ async fn pairing_qr(Path(session_id): Path<String>, Query(auth): Query<Authoriza
             "Live-paper pairing expired. Open a new link from Ecky.",
         );
     }
-    let Some(session) = hub().current() else {
+    let Some(session) = hub()
+        .current()
+        .filter(|session| session.session_id == session_id)
+    else {
         return error(StatusCode::NOT_FOUND, "Start live paper in Ecky first.");
     };
     match qrcode::QrCode::new(session.phone_url.as_bytes()) {
@@ -134,7 +137,13 @@ async fn template(Path(session_id): Path<String>, Query(auth): Query<Authorizati
             "Live-paper pairing expired. Open a new link from Ecky.",
         );
     }
-    match crate::services::live_paper_vision::template_pdf() {
+    let Some(session) = hub()
+        .current()
+        .filter(|session| session.session_id == session_id)
+    else {
+        return error(StatusCode::NOT_FOUND, "Paper session was replaced.");
+    };
+    match crate::services::live_paper_vision::template_pdf_for_view(&session.view) {
         Ok(bytes) => (
             [
                 (header::CONTENT_TYPE, "application/pdf"),
@@ -419,18 +428,14 @@ async fn receive_h264(
                         runtime.block_on(decode_status("error", Some("Camera video exceeds 1920×1080. Restart with a lower camera resolution.".into())));
                         break;
                     }
-                    let stride = decoded.strides().0;
-                    let mut luminance = Vec::with_capacity(width * height);
-                    for row in decoded.y().chunks(stride).take(height) {
-                        luminance.extend_from_slice(&row[..width]);
-                    }
-                    if let Some(gray) = GrayImage::from_raw(width as u32, height as u32, luminance)
-                    {
+                    let mut rgb = vec![0u8; width * height * 3];
+                    decoded.write_rgb8(&mut rgb);
+                    if let Some(frame) = RgbImage::from_raw(width as u32, height as u32, rgb) {
                         decode_last_ms.store(clock.elapsed().as_millis() as u64, Ordering::Release);
                         if decode_stalled.swap(false, Ordering::AcqRel) {
                             runtime.block_on(decode_status("streaming", None));
                         }
-                        runtime.block_on(sink(DynamicImage::ImageLuma8(gray)));
+                        runtime.block_on(sink(DynamicImage::ImageRgb8(frame)));
                     }
                 }
                 Ok(None) => (),

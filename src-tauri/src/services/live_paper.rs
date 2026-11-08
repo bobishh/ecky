@@ -56,6 +56,8 @@ pub struct LivePaperSnapshot {
     pub width_mm: f64,
     pub height_mm: f64,
     pub preview_data_url: Option<String>,
+    pub camera_preview_data_url: Option<String>,
+    pub preview_kind: String,
     pub accepted: Vec<LivePaperPrimitive>,
     pub pending: Vec<LivePaperPrimitive>,
     pub diagnostics: Vec<String>,
@@ -65,6 +67,33 @@ pub struct LivePaperSnapshot {
 mod tests {
     use super::*;
 
+    fn assert_restored(actual: &[LivePaperPrimitive], expected: &[LivePaperPrimitive]) {
+        fn close(a: &serde_json::Value, b: &serde_json::Value) {
+            match (a, b) {
+                (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
+                    assert!((a.as_f64().unwrap() - b.as_f64().unwrap()).abs() < 1e-9)
+                }
+                (serde_json::Value::Array(a), serde_json::Value::Array(b)) => {
+                    assert_eq!(a.len(), b.len());
+                    for (a, b) in a.iter().zip(b) {
+                        close(a, b);
+                    }
+                }
+                (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
+                    assert_eq!(a.len(), b.len());
+                    for (key, value) in a {
+                        close(value, b.get(key).unwrap());
+                    }
+                }
+                _ => assert_eq!(a, b),
+            }
+        }
+        close(
+            &serde_json::to_value(actual).unwrap(),
+            &serde_json::to_value(expected).unwrap(),
+        );
+    }
+
     fn line(id: &str, x: f64) -> LivePaperPrimitive {
         LivePaperPrimitive::Line {
             id: id.into(),
@@ -72,6 +101,150 @@ mod tests {
             end_mm: [x + 30.0, 10.0],
             residual_mm: 0.1,
         }
+    }
+
+    async fn processed(
+        events: &mut tokio::sync::broadcast::Receiver<LivePaperSnapshot>,
+        sequence: u64,
+    ) -> LivePaperSnapshot {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let snapshot = events.recv().await.unwrap();
+                if snapshot.sequence >= sequence {
+                    return snapshot;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn given_camera_without_markers_when_first_frame_arrives_then_show_pixels_before_recognition(
+    ) {
+        let service = Arc::new(LivePaperHub::default());
+        let session = service.start("https://127.0.0.1:40000");
+        let mut events = service.subscribe();
+        service
+            .ingest_frame(
+                &session.session_id,
+                1,
+                image::DynamicImage::new_rgb8(800, 600),
+            )
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first.sequence, 0,
+            "Preview must arrive before marker recognition finishes"
+        );
+        assert_eq!(first.preview_kind, "camera");
+        assert!(first
+            .camera_preview_data_url
+            .as_ref()
+            .is_some_and(|url| url.starts_with("data:image/jpeg;base64,")));
+        let lost = processed(&mut events, 1).await;
+        assert_eq!(lost.state, "markerLost");
+        assert!(lost.camera_preview_data_url.is_some());
+        assert!(lost.accepted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn given_distinct_view_templates_when_camera_view_changes_then_gate_wrong_paper_and_preserve_each_view(
+    ) {
+        use crate::contracts::SketchView;
+        let service = Arc::new(LivePaperHub::default());
+        let directory =
+            std::env::temp_dir().join(format!("ecky-paper-views-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("draft.json");
+        service.configure_storage(path.clone()).unwrap();
+        let session = service.start("https://127.0.0.1:40000");
+        let mut events = service.subscribe();
+        let front = image::load_from_memory(include_bytes!(
+            "../../tests/fixtures/live-paper/primitives.png"
+        ))
+        .unwrap();
+        let top = image::load_from_memory(include_bytes!(
+            "../../tests/fixtures/live-paper/primitives-top.png"
+        ))
+        .unwrap();
+        for sequence in 1..=3 {
+            service
+                .ingest_frame(&session.session_id, sequence, front.clone())
+                .await
+                .unwrap();
+            processed(&mut events, sequence).await;
+        }
+        let accepted_front = service.current().unwrap().accepted;
+        assert_eq!(accepted_front.len(), 4);
+        let switched = service
+            .set_view(&session.session_id, SketchView::Top)
+            .unwrap();
+        assert!(switched.accepted.is_empty());
+        assert_eq!(switched.phone_url, session.phone_url);
+        assert_ne!(switched.template_data_url, session.template_data_url);
+        service
+            .ingest_frame(&session.session_id, 4, front)
+            .await
+            .unwrap();
+        let mismatch = processed(&mut events, 4).await;
+        assert_eq!(mismatch.state, "templateMismatch");
+        assert!(mismatch.accepted.is_empty());
+        assert!(mismatch.camera_preview_data_url.is_some());
+        for sequence in 5..=7 {
+            service
+                .ingest_frame(&session.session_id, sequence, top.clone())
+                .await
+                .unwrap();
+            processed(&mut events, sequence).await;
+        }
+        let accepted_top = service.current().unwrap().accepted;
+        assert_eq!(accepted_top.len(), 4);
+        assert_eq!(
+            service
+                .set_view(&session.session_id, SketchView::Front)
+                .unwrap()
+                .accepted,
+            accepted_front
+        );
+        assert_eq!(
+            service
+                .set_view(&session.session_id, SketchView::Top)
+                .unwrap()
+                .accepted,
+            accepted_top
+        );
+        let restored = LivePaperHub::default();
+        restored.configure_storage(path).unwrap();
+        let saved = restored.current().unwrap();
+        assert_eq!(saved.view, SketchView::Top);
+        assert_restored(&saved.accepted, &accepted_top);
+        assert_restored(
+            &restored
+                .set_view(&saved.session_id, SketchView::Front)
+                .unwrap()
+                .accepted,
+            &accepted_front,
+        );
+        restored.stop(&saved.session_id).unwrap();
+        let reconnect = restored.start_scoped(
+            "https://127.0.0.1:40000",
+            saved.scope_key.clone(),
+            SketchView::Front,
+        );
+        assert_restored(&reconnect.accepted, &accepted_front);
+        assert_ne!(reconnect.session_id, saved.session_id);
+        assert_restored(
+            &restored
+                .set_view(&reconnect.session_id, SketchView::Top)
+                .unwrap()
+                .accepted,
+            &accepted_top,
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -165,10 +338,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let first = tokio::time::timeout(std::time::Duration::from_secs(10), updates.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let first = processed(&mut updates, 10).await;
         assert_eq!(first.sequence, 10);
         assert_eq!(first.state, "streaming");
         for sequence in 11..=12 {
@@ -176,10 +346,7 @@ mod tests {
                 .ingest_frame(&session.session_id, sequence, image.clone())
                 .await
                 .unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(10), updates.recv())
-                .await
-                .unwrap()
-                .unwrap();
+            processed(&mut updates, sequence).await;
         }
         let accepted = service.current().unwrap().accepted;
         assert!(accepted
@@ -193,10 +360,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let paused = tokio::time::timeout(std::time::Duration::from_secs(10), updates.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let paused = processed(&mut updates, 13).await;
         assert_eq!(paused.state, "markerLost");
         assert_eq!(paused.accepted, accepted);
         service
@@ -257,6 +421,7 @@ mod tests {
             session.observe(sequence, geometry.clone());
         }
         let profile = prepare_profile(&session.snapshot).unwrap();
+        assert_eq!(profile.view, crate::contracts::SketchView::Front);
         assert_eq!(profile.sketch_loops.len(), 2);
         let hole = profile
             .sketch_loops
@@ -294,6 +459,20 @@ mod tests {
             .await
             .is_err());
         assert_eq!(service.current().unwrap().state, "error");
+        assert_eq!(
+            service
+                .set_view(&session.session_id, crate::contracts::SketchView::Top)
+                .unwrap()
+                .state,
+            "error"
+        );
+        assert_eq!(
+            service
+                .set_view(&session.session_id, crate::contracts::SketchView::Front)
+                .unwrap()
+                .state,
+            "error"
+        );
         service
             .set_transport_state(&session.session_id, "streaming", None)
             .await;
@@ -302,10 +481,7 @@ mod tests {
             .ingest_frame(&session.session_id, 3, image)
             .await
             .unwrap();
-        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let snapshot = processed(&mut events, 3).await;
         assert_eq!(snapshot.state, "streaming");
         assert_eq!(snapshot.sequence, 3);
     }
@@ -328,6 +504,7 @@ mod tests {
                 sequence,
                 0,
                 Ok(super::super::live_paper_vision::LivePaperObservation {
+                    view: crate::contracts::SketchView::Top,
                     preview_data_url: "data:image/png;base64,transient".into(),
                     width_mm: 160.0,
                     height_mm: 220.0,
@@ -593,6 +770,14 @@ struct Track {
 }
 
 #[derive(Clone)]
+struct ViewDraft {
+    accepted: Vec<LivePaperPrimitive>,
+    tracks: BTreeMap<String, Track>,
+    aliases: BTreeMap<String, Vec<LivePaperPrimitive>>,
+    rejected: Vec<LivePaperPrimitive>,
+}
+
+#[derive(Clone)]
 struct Session {
     token: String,
     snapshot: LivePaperSnapshot,
@@ -600,6 +785,7 @@ struct Session {
     // Original observations also identify an element after a deliberate edit.
     aliases: BTreeMap<String, Vec<LivePaperPrimitive>>,
     rejected: Vec<LivePaperPrimitive>,
+    other_views: BTreeMap<String, ViewDraft>,
     latest_received: u64,
     media_epoch: u64,
     media_available: bool,
@@ -652,6 +838,8 @@ impl Session {
                 width_mm: 160.0,
                 height_mm: 220.0,
                 preview_data_url: None,
+                camera_preview_data_url: None,
+                preview_kind: "camera".into(),
                 accepted: Vec::new(),
                 pending: Vec::new(),
                 diagnostics: Vec::new(),
@@ -660,10 +848,69 @@ impl Session {
             tracks: BTreeMap::new(),
             aliases: BTreeMap::new(),
             rejected: Vec::new(),
+            other_views: BTreeMap::new(),
             latest_received: 0,
             media_epoch: 0,
             media_available: true,
         }
+    }
+
+    fn refresh_template(&mut self) -> Result<(), String> {
+        use base64::Engine;
+        self.snapshot.template_data_url = format!(
+            "data:application/pdf;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(
+                super::live_paper_vision::template_pdf_for_view(&self.snapshot.view)?
+            )
+        );
+        Ok(())
+    }
+
+    fn set_view(&mut self, view: crate::contracts::SketchView) -> Result<(), String> {
+        if view == crate::contracts::SketchView::Custom {
+            return Err("Choose FRONT, TOP, or SIDE for the camera.".into());
+        }
+        if self.snapshot.view == view {
+            return self.refresh_template();
+        }
+        let old = ViewDraft {
+            accepted: std::mem::take(&mut self.snapshot.accepted),
+            tracks: std::mem::take(&mut self.tracks),
+            aliases: std::mem::take(&mut self.aliases),
+            rejected: std::mem::take(&mut self.rejected),
+        };
+        self.other_views
+            .insert(view_key(&self.snapshot.view).into(), old);
+        if let Some(draft) = self.other_views.remove(view_key(&view)) {
+            self.snapshot.accepted = draft.accepted;
+            self.tracks = draft.tracks;
+            self.aliases = draft.aliases;
+            self.rejected = draft.rejected;
+        }
+        self.snapshot.view = view;
+        self.snapshot.preview_data_url = None;
+        self.snapshot.preview_kind = if self.snapshot.state == "stopped" {
+            "paper"
+        } else {
+            "camera"
+        }
+        .into();
+        self.snapshot.diagnostics.clear();
+        if self.snapshot.state != "stopped" && self.media_available {
+            self.snapshot.state = if self.snapshot.camera_preview_data_url.is_some() {
+                "streaming"
+            } else {
+                "waiting"
+            }
+            .into();
+            self.snapshot.detail = Some(format!(
+                "Camera assigned to {}. Show that view's four printed markers to calibrate.",
+                view_key(&self.snapshot.view).to_uppercase()
+            ));
+        }
+        self.media_epoch = self.media_epoch.wrapping_add(1);
+        self.refresh_pending();
+        self.refresh_template()
     }
 
     fn refresh_pending(&mut self) {
@@ -859,9 +1106,21 @@ impl LivePaperHub {
             .storage_path = Some(path.clone());
         let saved = super::live_paper_store::load(&path)?;
         if let Some(draft) = &saved {
-            if draft.scope_key.len() > 4096
+            if draft.view == crate::contracts::SketchView::Custom
+                || draft.scope_key.len() > 4096
                 || draft.accepted.len() > MAX_ELEMENTS
                 || draft.accepted.iter().any(|p| !p.valid())
+                || draft.other_views.len() > 2
+                || draft.other_views.iter().any(|v| {
+                    v.view == draft.view
+                        || v.view == crate::contracts::SketchView::Custom
+                        || v.accepted.len() > MAX_ELEMENTS
+                        || v.accepted.iter().any(|p| !p.valid())
+                })
+                || draft
+                    .other_views
+                    .windows(2)
+                    .any(|views| views[0].view == views[1].view)
             {
                 return Err(
                     "Accepted paper draft contains invalid geometry; its file was preserved."
@@ -876,11 +1135,27 @@ impl LivePaperHub {
         state.storage_path = Some(path);
         state.saved_draft = saved.clone();
         if state.session.is_none() {
-            if let Some(draft) = saved.filter(|draft| !draft.accepted.is_empty()) {
+            if let Some(draft) = saved.filter(|draft| {
+                !draft.accepted.is_empty()
+                    || draft.other_views.iter().any(|v| !v.accepted.is_empty())
+            }) {
                 let mut session = Session::new("");
                 session.snapshot.scope_key = draft.scope_key;
                 session.snapshot.view = draft.view;
                 session.snapshot.accepted = draft.accepted;
+                for other in draft.other_views {
+                    session.other_views.insert(
+                        view_key(&other.view).into(),
+                        ViewDraft {
+                            accepted: other.accepted,
+                            tracks: BTreeMap::new(),
+                            aliases: BTreeMap::new(),
+                            rejected: Vec::new(),
+                        },
+                    );
+                }
+                session.snapshot.preview_kind = "paper".into();
+                session.refresh_template()?;
                 session.snapshot.state = "stopped".into();
                 session.snapshot.detail = Some("Restored accepted paper draft. Geometry remains editable; start a new capture to reconnect a phone.".into());
                 state.session = Some(session);
@@ -914,8 +1189,29 @@ impl LivePaperHub {
     ) -> LivePaperSnapshot {
         let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let mut session = Session::new(base_url);
-        session.snapshot.scope_key = scope_key;
-        session.snapshot.view = view;
+        session.snapshot.scope_key = scope_key.clone();
+        if let Some(previous) = state
+            .session
+            .take()
+            .filter(|previous| previous.snapshot.scope_key == scope_key)
+        {
+            session.snapshot.view = previous.snapshot.view;
+            session.snapshot.accepted = previous.snapshot.accepted;
+            session.tracks = previous.tracks;
+            session.aliases = previous.aliases;
+            session.rejected = previous.rejected;
+            session.other_views = previous.other_views;
+        }
+        if let Err(error) = session.set_view(view) {
+            session.snapshot.state = "error".into();
+            session.snapshot.detail = Some(error);
+        }
+        // New session identity already invalidates every previous camera frame.
+        session.media_epoch = 0;
+        if let Err(error) = session.refresh_template() {
+            session.snapshot.state = "error".into();
+            session.snapshot.detail = Some(error);
+        }
         let snapshot = session.snapshot.clone();
         state.session = Some(session);
         state.queued = None;
@@ -951,6 +1247,13 @@ impl LivePaperHub {
                     .map(|s| s.token == token)
             })
             .unwrap_or(false)
+    }
+    pub fn set_view(
+        &self,
+        session_id: &str,
+        view: crate::contracts::SketchView,
+    ) -> Result<LivePaperSnapshot, String> {
+        self.mutate(session_id, |session| session.set_view(view))
     }
     pub fn set_trust_url(
         &self,
@@ -1116,6 +1419,9 @@ impl LivePaperHub {
             let service = Arc::clone(&self);
             let failure_id = id.clone();
             let result = tokio::task::spawn_blocking(move || {
+                if let Ok(preview) = camera_preview(&frame.image) {
+                    service.publish_camera(&id, sequence, media_epoch, preview);
+                }
                 let result = super::live_paper_vision::recognize_live_paper(&frame.image);
                 service.finish_frame(&id, sequence, media_epoch, result);
             })
@@ -1128,6 +1434,30 @@ impl LivePaperHub {
                 )
                 .await;
             }
+        }
+    }
+
+    fn publish_camera(&self, id: &str, sequence: u64, media_epoch: u64, preview: String) {
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(session) = state.session.as_mut().filter(|s| {
+            s.snapshot.session_id == id
+                && s.snapshot.state != "stopped"
+                && s.media_available
+                && s.media_epoch == media_epoch
+                && sequence > s.snapshot.sequence
+        }) else {
+            return;
+        };
+        session.snapshot.camera_preview_data_url = Some(preview);
+        if session.snapshot.preview_kind == "camera" {
+            if matches!(session.snapshot.state.as_str(), "waiting" | "connecting") {
+                session.snapshot.state = "streaming".into();
+                session.snapshot.detail = Some(format!(
+                    "Live camera. Align all four {} markers to recognize a metric sketch.",
+                    view_key(&session.snapshot.view).to_uppercase()
+                ));
+            }
+            self.emit(&session.snapshot);
         }
     }
 
@@ -1149,7 +1479,17 @@ impl LivePaperHub {
             return;
         };
         match result {
+            Ok(observation) if observation.view != session.snapshot.view => {
+                session.snapshot.state = "templateMismatch".into();
+                session.snapshot.preview_kind = "camera".into();
+                session.snapshot.detail=Some(format!("{} template detected; camera is assigned to {}. Select the matching view or use its printed template.",view_key(&observation.view).to_uppercase(),view_key(&session.snapshot.view).to_uppercase()));
+                session.snapshot.sequence = sequence;
+                for track in session.tracks.values_mut() {
+                    track.hits = 0;
+                }
+            }
             Ok(observation) => {
+                session.snapshot.preview_kind = "paper".into();
                 session.snapshot.state = "streaming".into();
                 session.snapshot.detail = None;
                 session.snapshot.preview_data_url = Some(observation.preview_data_url);
@@ -1166,6 +1506,7 @@ impl LivePaperHub {
                 );
             }
             Err(error) => {
+                session.snapshot.preview_kind = "camera".into();
                 session.snapshot.state = "markerLost".into();
                 session.snapshot.detail = Some(error);
                 session.snapshot.sequence = sequence;
@@ -1201,6 +1542,14 @@ fn persist_locked(state: &mut HubState) -> Result<(), String> {
         scope_key: session.snapshot.scope_key.clone(),
         view: session.snapshot.view.clone(),
         accepted: session.snapshot.accepted.clone(),
+        other_views: session
+            .other_views
+            .iter()
+            .map(|(view, draft)| super::live_paper_store::PaperViewDraft {
+                view: parse_view(view),
+                accepted: draft.accepted.clone(),
+            })
+            .collect(),
     };
     if state.saved_draft.as_ref() == Some(&draft) {
         return Ok(());
@@ -1208,6 +1557,33 @@ fn persist_locked(state: &mut HubState) -> Result<(), String> {
     super::live_paper_store::save(path, &draft)?;
     state.saved_draft = Some(draft);
     Ok(())
+}
+
+fn view_key(view: &crate::contracts::SketchView) -> &'static str {
+    match view {
+        crate::contracts::SketchView::Front => "front",
+        crate::contracts::SketchView::Top => "top",
+        crate::contracts::SketchView::Side => "side",
+        crate::contracts::SketchView::Custom => "custom",
+    }
+}
+fn parse_view(view: &str) -> crate::contracts::SketchView {
+    match view {
+        "top" => crate::contracts::SketchView::Top,
+        "side" => crate::contracts::SketchView::Side,
+        _ => crate::contracts::SketchView::Front,
+    }
+}
+fn camera_preview(image: &image::DynamicImage) -> Result<String, String> {
+    use base64::Engine;
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image.thumbnail(960, 960).to_rgb8())
+        .write_to(&mut buffer, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("Could not display live camera: {e}"))?;
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(buffer.into_inner())
+    ))
 }
 
 fn active_session<'a>(state: &'a HubState, id: &str) -> Result<&'a Session, String> {
@@ -1223,6 +1599,7 @@ fn active_session<'a>(state: &'a HubState, id: &str) -> Result<&'a Session, Stri
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct LivePaperProfile {
+    pub view: crate::contracts::SketchView,
     pub loops: Vec<super::profile_authoring::ProfileLoop>,
     pub sketch_loops: Vec<super::profile_authoring::ProfileSketchLoop>,
     pub diagnostics: Vec<String>,
@@ -1336,6 +1713,7 @@ pub fn prepare_profile(snapshot: &LivePaperSnapshot) -> Result<LivePaperProfile,
         });
     }
     Ok(LivePaperProfile {
+        view: snapshot.view.clone(),
         loops,
         sketch_loops,
         diagnostics: reviewed.diagnostics,

@@ -2,9 +2,9 @@
 
 ## Required behavior
 
-iPhone Safari streams its camera continuously over WebRTC to Ecky's local TLS server. Rust decodes video, rectifies a marked sheet, recognizes black pen centerlines, and owns capture state and geometry identity. The Sketch workspace shows the corrected paper below its grid and editable points, lines, circles, and polylines.
+iPhone Safari streams its camera continuously over WebRTC to Ecky's local TLS server. Rust decodes video, rectifies a marked sheet, recognizes black pen centerlines, and owns capture state and geometry identity. The decoded camera image appears immediately in the Sketch pane, including before marker lock. Once calibrated, corrected paper appears below its grid and editable points, lines, circles, and polylines. Camera connection, view selection, and review use the existing Sketch controls and inspector. The phone camera fills its viewport with compact controls and status overlaid on the video.
 
-Ecky supplies an A4 PDF with four identified perimeter fiducials, a blank 160 × 220 mm drawing region, and a 50 mm print-scale check. Marker positions establish perspective and millimeter coordinates. Printing instructions require actual size and checking the scale segment.
+Ecky supplies distinct labelled FRONT, TOP, and SIDE A4 PDFs with separate marker IDs and four identified perimeter fiducials, a blank 160 × 220 mm drawing region, and a 50 mm print-scale check. Marker positions establish perspective and millimeter coordinates. Selecting FRONT, TOP, or SIDE assigns the connected camera without restarting it and preserves each view’s accepted draft. A template for another view keeps the camera visible and pauses geometry updates with an actionable mismatch state. Printing instructions require actual size and checking the scale segment.
 
 Stable, unambiguous observations enter automatically after repeated agreement. Joins, crossings, broken strokes, and uncertain fits remain reviewable candidates with confirm, edit, and reject actions. Accepted elements retain identity through later frames, occlusion, and local draft restoration after restart. Missing observations preserve accepted geometry. Marker loss pauses geometry updates and shows an actionable state. Session replacement and stopping invalidate late frames and close media resources. Processing retains only the newest waiting frame.
 
@@ -12,6 +12,8 @@ Accepted geometry can enter the existing Sketch editing and normal model-applica
 
 ## Acceptance criteria
 
+- Given a connected camera before any markers are visible, Sketch shows its live image immediately and the phone shows full viewport video with overlaid controls. Marker loss keeps live camera pixels visible and preserves accepted geometry.
+- Given FRONT, TOP, and SIDE templates, view selection keeps the camera connected, gates recognition to the matching template, and restores each view’s draft after switching and restart.
 - Given a browser camera fixture containing the marked sheet, when paired through real WebRTC, Rust receives and decodes continuous video and Sketch displays corrected paper with metric geometry.
 - Given known line, circle, closed outline, and point fixtures under perspective and modest noise, recognition recovers editable primitives within the declared fitting tolerance. A library comparison uses representative fixtures and records quality and native packaging evidence.
 - Given repeated or stale frames, accepted geometry keeps its IDs and count. Given an occluding hand or missing markers, accepted geometry survives and marker loss pauses updates. Reacquisition resumes without duplicates.

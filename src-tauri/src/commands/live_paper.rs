@@ -68,6 +68,18 @@ pub async fn start_live_paper(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn set_live_paper_view(
+    session_id: String,
+    view: crate::contracts::SketchView,
+) -> AppResult<LivePaperSnapshot> {
+    tauri::async_runtime::spawn_blocking(move || hub().set_view(&session_id, view))
+        .await
+        .map_err(|error| AppError::internal(format!("Camera view worker failed: {error}")))?
+        .map_err(AppError::validation)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn get_live_paper() -> Option<LivePaperSnapshot> {
     hub().current()
 }

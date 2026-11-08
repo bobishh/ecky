@@ -13,6 +13,8 @@ type ProfileMockOptions = {
   drawingMode?: 'success' | 'recognition-error' | 'review-error';
   livePaper?: boolean;
   restoreForeignLivePaper?: boolean;
+  livePaperProfileView?: 'front' | 'top' | 'side';
+  holdLivePaperProfile?: boolean;
 };
 
 export async function installProfileMocks(page: Page, options: ProfileMockOptions = {}) {
@@ -20,9 +22,10 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
     status: 200, contentType: 'image/svg+xml',
     body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="white"/><path d="M10 10h25v25H10zM65 10h25v25H65zM10 65h25v25H10z" fill="black"/></svg>',
   }));
-  const [sourceImage, transformedPreview] = await Promise.all([
+  const [sourceImage, transformedPreview, cameraQr] = await Promise.all([
     readFile(new URL('./fixtures/plate-drawing-source.png', import.meta.url)),
     readFile(new URL('./fixtures/plate-drawing-preview.png', import.meta.url)),
+    readFile(new URL('./fixtures/live-camera-qr.svg', import.meta.url)),
   ]);
   const nativeProjectionEntries = options.nativeProjectionDirectory
     ? await Promise.all((['front', 'top', 'side'] as const).map(async (view) => {
@@ -46,6 +49,7 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
   const images = {
     source: `data:image/png;base64,${sourceImage.toString('base64')}`,
     transformed: `data:image/png;base64,${transformedPreview.toString('base64')}`,
+    cameraQr: `data:image/svg+xml;base64,${cameraQr.toString('base64')}`,
   };
   await page.addInitScript((payload) => {
     const mockOptions = payload.options;
@@ -163,9 +167,12 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
       recognitionCalls: [] as Array<Record<string, any>>,
       reviewCalls: [] as Array<Record<string, any>>,
       livePaperStarts: [] as Array<Record<string, unknown>>,
+      livePaperViewChanges: [] as Array<Record<string, unknown>>,
+      resolveLivePaperProfile: null as (() => void) | null,
     };
-    const makeLivePaper = (scopeKey: string, view: string) => ({ sessionId: 'live-test', scopeKey, view, trustUrl: null, phoneUrl: 'https://127.0.0.1:4444/live-paper?session=live-test&token=test', phoneQrDataUrl: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"%3E%3Crect width="100" height="100" fill="white"/%3E%3C/svg%3E', templateDataUrl: 'data:application/pdf;base64,JVBERi0xLjQK', templateUrl: 'https://127.0.0.1:4444/api/live-paper/live-test/template.pdf?token=test', state: 'waiting', detail: 'Open the camera link on your phone.', sequence: 0, widthMm: 160, heightMm: 220, previewDataUrl: null, accepted: [], pending: [], diagnostics: [] });
+    const makeLivePaper = (scopeKey: string, view: string) => ({ sessionId: 'live-test', scopeKey, view, trustUrl: null, phoneUrl: 'https://127.0.0.1:4444/live-paper?session=live-test&token=test', phoneQrDataUrl: imageDataUrls.cameraQr, templateDataUrl: 'data:application/pdf;base64,JVBERi0xLjQK', templateUrl: 'https://127.0.0.1:4444/api/live-paper/live-test/template.pdf?token=test', state: 'waiting', detail: 'Open the camera link on your phone.', sequence: 0, widthMm: 160, heightMm: 220, previewDataUrl: null, cameraPreviewDataUrl: null, previewKind: 'camera', accepted: [], pending: [], diagnostics: [] });
     let livePaper: any = mockOptions.restoreForeignLivePaper ? { ...makeLivePaper('other-project', 'top'), accepted: [{kind: 'line', id: 'foreign-line', startMm: [0, 0], endMm: [20, 0], residualMm: 0.1}] } : null;
+    const livePaperViews = new Map<string, any>();
     const pendingDerivationRejectors: Array<(error: Error) => void> = [];
     mock.rejectPendingDerivation = () => {
       for (const reject of pendingDerivationRejectors.splice(0)) reject(new Error('Mock profile derivation failed.'));
@@ -218,6 +225,15 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
         livePaper = makeLivePaper(String(args?.scopeKey ?? ''), String(args?.view ?? 'front'));
         return livePaper;
       }
+      if (command === 'set_live_paper_view') {
+        mock.livePaperViewChanges.push(args ?? {});
+        livePaperViews.set(livePaper.view, { accepted: livePaper.accepted, pending: livePaper.pending });
+        const target = livePaperViews.get(args?.view) ?? { accepted: [], pending: [] };
+        livePaper = { ...livePaper, ...target, view: args?.view, previewKind: 'camera', previewDataUrl: null,
+          state: 'templateMismatch', detail: `Show the ${String(args?.view).toUpperCase()} template. Geometry updates paused.`,
+          templateDataUrl: `data:application/pdf;base64,${btoa('%PDF-1.4\n' + String(args?.view).toUpperCase())}` };
+        return livePaper;
+      }
       if (command === 'stop_live_paper') return livePaper = { ...livePaper, state: 'stopped', detail: 'Capture stopped. Accepted geometry retained.' };
       if (command === 'confirm_live_paper') {
         const primitive = livePaper.pending.find((item: any) => item.id === args?.primitiveId);
@@ -236,7 +252,8 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
       if (command === 'prepare_live_paper_profile') {
         const circle = livePaper.accepted.find((item: any) => item.kind === 'circle');
         const outline = [[10, 10], [90, 10], [90, 60], [10, 60]];
-        return {
+        const profile = {
+          view: mockOptions.livePaperProfileView ?? livePaper.view,
           loops: [
             { role: 'outer', parentIndex: null, points: outline },
             { role: 'hole', parentIndex: 0, points: [] },
@@ -246,6 +263,10 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
             { role: 'hole', parentIndex: 0, geometry: { kind: 'circle', centerMm: circle.centerMm, radiusMm: circle.radiusMm } },
           ], diagnostics: [],
         };
+        if (mockOptions.holdLivePaperProfile) {
+          return new Promise((resolve) => { mock.resolveLivePaperProfile = () => resolve(profile); });
+        }
+        return profile;
       }
       if (command === 'plugin:event|listen') {
         const event = String(args?.event ?? '');

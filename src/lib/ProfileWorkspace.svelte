@@ -1,7 +1,7 @@
 <script lang="ts">
   import LivePaperPanel from './LivePaperPanel.svelte';
   import LivePaperOverlay from './LivePaperOverlay.svelte';
-  import { prepareLivePaperProfile, livePaperStateLabel, livePaperScopeToken, type LivePaperSnapshot } from './livePaper';
+  import { prepareLivePaperProfile, livePaperStateLabel, livePaperScopeToken, livePaperCoordinates, editLivePaperCoordinate, type LivePaperSnapshot, type LivePaperPrimitive } from './livePaper';
   import {
     normalizeProfileLoops,
     profileBounds,
@@ -53,7 +53,7 @@
     PreparedDrawingImage,
     ReviewDrawingProfileRequest,
   } from './tauri/contracts';
-  import { formatBackendError } from './tauri/client';
+  import { formatBackendError, editLivePaper, confirmLivePaper, rejectLivePaper, setLivePaperView } from './tauri/client';
 
   type ProfileView = 'front' | 'top' | 'side';
   type PaneCamera = { zoom: number; centerX: number; centerY: number };
@@ -178,10 +178,17 @@
   let photoRequestSequence = 0;
   let photoImportRequestId = 0;
   let photoPrimitiveSequence = 0;
+  let sourceMode = $state<'profile' | 'camera'>('profile');
+  let liveMutationPending = $state(false);
   let livePaper = $state.raw<LivePaperSnapshot | null>(null);
   let liveSelectedId = $state<string | null>(null);
   let liveScopeBinding = $state.raw<{ sourceScope: string; token: string } | null>(null);
   let liveScopeToken = $derived(liveScopeBinding?.sourceScope === scopeKey ? liveScopeBinding.token : '');
+  let scopedLivePaper = $derived(liveScopeToken && livePaper?.scopeKey === liveScopeToken ? livePaper : null);
+  let livePrimitive = $derived(scopedLivePaper
+    ? [...scopedLivePaper.accepted, ...scopedLivePaper.pending].find((primitive) => primitive.id === liveSelectedId) ?? null
+    : null);
+  let livePrimitiveNeedsConfirmation = $derived(Boolean(livePrimitive && scopedLivePaper?.pending.some((primitive) => primitive.id === livePrimitive.id)));
 
   // WebCrypto is asynchronous; retain the source scope to discard obsolete digests.
   $effect(() => {
@@ -198,7 +205,7 @@
   });
 
   function livePaperForView(view: ProfileView): LivePaperSnapshot | null {
-    return liveScopeToken && livePaper?.view === view && livePaper.scopeKey === liveScopeToken ? livePaper : null;
+    return sourceMode === 'camera' && liveScopeToken && livePaper?.view === view && livePaper.scopeKey === liveScopeToken ? livePaper : null;
   }
 
   function livePaperProfileView(): ProfileView | null {
@@ -209,30 +216,97 @@
   function bindLivePaperView(): void {
     const view = livePaperProfileView();
     if (!view || !liveScopeToken || livePaper?.scopeKey !== liveScopeToken) return;
+    sourceMode = 'camera';
     selectedView = view;
     resetPaneCamera(view);
   }
 
   async function useLivePaperProfile(): Promise<void> {
-    if (!livePaper || !liveScopeToken || livePaper.scopeKey !== liveScopeToken) throw new Error('Stop capture, then start live paper for the current model before using its profile.');
-    const requestScope = scopeKey;
+    if (liveMutationPending) return;
     const view = livePaperProfileView();
-    if (!view) throw new Error('Choose FRONT, TOP, or SIDE for live paper.');
-    const profile = await prepareLivePaperProfile(livePaper.sessionId, liveScopeToken);
-    if (requestScope !== scopeKey) return;
-    selectedView = view;
-    const loops = profile.loops.map((loop, index) => {
-      const geometry = profile.sketchLoops?.[index]?.geometry;
-      return geometry?.kind === 'circle'
-        ? { ...loop, points: profileCirclePoints(geometry.centerMm, geometry.radiusMm), analyticCircle: geometry }
-        : loop;
-    });
-    geometryEvidence = { ...geometryEvidence, [view]: null };
-    photoStates = { ...photoStates, [view]: null };
-    replaceLoops(loops);
-    patchProfileEditor(view, { placementPlane: VIEW_PLANE[view], placementOffset: '0', convertedExact: true });
+    if (!livePaper || !liveScopeToken || livePaper.scopeKey !== liveScopeToken || !view) {
+      setError('Start live paper for this model and choose FRONT, TOP, or SIDE before using its profile.');
+      return;
+    }
+    const requestScope = scopeKey;
+    const sessionId = livePaper.sessionId;
+    liveMutationPending = true;
     setError('');
-    setStatus(`Live paper profile ready for normal Apply. Image-derived · check dimensions.${profile.diagnostics?.length ? ` ${profile.diagnostics.join(' ')}` : ''}`);
+    try {
+      const profile = await prepareLivePaperProfile(sessionId, liveScopeToken);
+      if (requestScope !== scopeKey) return;
+      if (profile.view !== view || livePaper?.view !== view || livePaper.sessionId !== sessionId) {
+        throw new Error('Camera view changed while preparing the profile. Select the intended view and use its accepted profile again.');
+      }
+      selectedView = view;
+      const loops = profile.loops.map((loop, index) => {
+        const geometry = profile.sketchLoops?.[index]?.geometry;
+        return geometry?.kind === 'circle'
+          ? { ...loop, points: profileCirclePoints(geometry.centerMm, geometry.radiusMm), analyticCircle: geometry }
+          : loop;
+      });
+      geometryEvidence = { ...geometryEvidence, [view]: null };
+      photoStates = { ...photoStates, [view]: null };
+      replaceLoops(loops);
+      patchProfileEditor(view, { placementPlane: VIEW_PLANE[view], placementOffset: '0', convertedExact: true });
+      sourceMode = 'profile';
+      resetPaneCamera(view);
+      setStatus(`Live paper profile ready for normal Apply. Image-derived · check dimensions.${profile.diagnostics?.length ? ` ${profile.diagnostics.join(' ')}` : ''}`);
+    } catch (cause) { if (requestScope === scopeKey) setError(formatBackendError(cause)); }
+    finally { liveMutationPending = false; }
+  }
+
+  async function mutateLiveGeometry(operation: () => Promise<LivePaperSnapshot>): Promise<void> {
+    if (liveMutationPending || !scopedLivePaper) return;
+    const requestScope = liveScopeToken;
+    const sessionId = scopedLivePaper.sessionId;
+    liveMutationPending = true;
+    setError('');
+    try {
+      const next = await operation();
+      if (requestScope === liveScopeToken && livePaper?.sessionId === sessionId) livePaper = next;
+    } catch (cause) { if (requestScope === liveScopeToken) setError(formatBackendError(cause)); }
+    finally { liveMutationPending = false; }
+  }
+
+  function editLiveCoordinate(primitive: LivePaperPrimitive, index: number, axis: 0 | 1, value: string): void {
+    try {
+      if (!scopedLivePaper || value.trim() === '') throw new Error('Coordinate must be a finite number.');
+      const edited = editLivePaperCoordinate(primitive, index, axis, Number(value));
+      const sessionId = scopedLivePaper.sessionId;
+      void mutateLiveGeometry(() => editLivePaper(sessionId, edited));
+    } catch (cause) { setError(formatBackendError(cause)); }
+  }
+
+  function editLiveRadius(primitive: Extract<LivePaperPrimitive, { kind: 'circle' }>, value: string): void {
+    const radiusMm = Number(value);
+    if (!scopedLivePaper || !Number.isFinite(radiusMm) || radiusMm <= 0) { setError('Radius must be greater than zero.'); return; }
+    const sessionId = scopedLivePaper.sessionId;
+    void mutateLiveGeometry(() => editLivePaper(sessionId, { ...primitive, radiusMm }));
+  }
+
+  async function switchLivePaperView(view: ProfileView): Promise<void> {
+    if (!scopedLivePaper || scopedLivePaper.view === view || liveMutationPending) return;
+    const requestScope = liveScopeToken;
+    const sessionId = scopedLivePaper.sessionId;
+    liveMutationPending = true;
+    setError('');
+    try {
+      const next = await setLivePaperView(sessionId, view);
+      if (requestScope !== liveScopeToken || livePaper?.sessionId !== sessionId) return;
+      livePaper = next;
+      selectedView = view;
+      liveSelectedId = null;
+      activePan = null;
+      drag = null;
+      resetPaneCamera(view);
+    } catch (cause) { if (requestScope === liveScopeToken) setError(formatBackendError(cause)); }
+    finally { liveMutationPending = false; }
+  }
+
+  function chooseSketchSource(value: string): void {
+    sourceMode = value === 'camera' ? 'camera' : 'profile';
+    if (sourceMode === 'camera') void switchLivePaperView(selectedView);
   }
 
   $effect(() => {
@@ -371,7 +445,7 @@
   );
   let staleEvidence = $derived(PROFILE_VIEWS.some((view) => geometryEvidence[view]?.scopeKey !== undefined && geometryEvidence[view]?.scopeKey !== scopeKey));
   let applyDisabled = $derived(
-    Boolean(disabledReason)
+    sourceMode === 'camera' || Boolean(disabledReason)
       || currentPending !== null
       || viewPendingFor(selectedView)
       || drawing
@@ -1232,6 +1306,10 @@
   }
 
   function selectView(view: ProfileView): void {
+    if (sourceMode === 'camera' && scopedLivePaper && scopedLivePaper.view !== view) {
+      void switchLivePaperView(view);
+      return;
+    }
     if (view === selectedView) return;
     if (photoPickMode) cancelPhotoPicking();
     selectedView = view;
@@ -1589,6 +1667,48 @@
 <section class="profile-workspace" data-testid="profile-workspace" aria-label="Sketch workspace">
   <div class="workspace-grid">
     <aside class="controls-pane" aria-label="Profile controls">
+      {#if sourceMode === 'camera'}
+        <section class="control-section camera-inspector" data-testid="camera-inspector" aria-label="Camera geometry">
+          <h3>Camera · {selectedView.toUpperCase()}</h3>
+          <div class="camera-inspector__state" aria-live="polite" data-testid="live-paper-state">
+            <strong>{scopedLivePaper ? livePaperStateLabel(scopedLivePaper.state) : 'Connect phone camera'}</strong>
+            <p class="inline-hint">{scopedLivePaper?.detail ?? 'Use Camera in the Sketch toolbar to connect a phone or print its template.'}</p>
+          </div>
+          {#if scopedLivePaper}
+            <p class="inline-hint">{scopedLivePaper.accepted.length} accepted · {scopedLivePaper.pending.length} need review</p>
+            <label>Geometry
+              <select aria-label="Live paper primitive" value={liveSelectedId ?? ''} onchange={(event) => liveSelectedId = event.currentTarget.value || null} disabled={liveMutationPending}>
+                <option value="">Select geometry</option>
+                {#each scopedLivePaper.accepted as primitive (primitive.id)}<option value={primitive.id}>{primitive.kind} · {primitive.id}</option>{/each}
+                {#each scopedLivePaper.pending as primitive (primitive.id)}<option value={primitive.id}>Review · {primitive.kind} · {primitive.id}</option>{/each}
+              </select>
+            </label>
+            {#if livePrimitive}
+              <div class="vertex-fields">
+                {#each livePaperCoordinates(livePrimitive) as point, index (index)}
+                  <label>{livePrimitive.kind === 'circle' ? 'Center' : `Vertex ${index + 1}`} X (mm)
+                    <input aria-label={`Live ${livePrimitive.kind === 'circle' ? 'center' : `vertex ${index + 1}`} X (mm)`} type="number" step="0.1" value={point[0]} disabled={liveMutationPending} onchange={(event) => editLiveCoordinate(livePrimitive!, index, 0, event.currentTarget.value)} />
+                  </label>
+                  <label>Y (mm)
+                    <input aria-label={`Live ${livePrimitive.kind === 'circle' ? 'center' : `vertex ${index + 1}`} Y (mm)`} type="number" step="0.1" value={point[1]} disabled={liveMutationPending} onchange={(event) => editLiveCoordinate(livePrimitive!, index, 1, event.currentTarget.value)} />
+                  </label>
+                {/each}
+                {#if livePrimitive.kind === 'circle'}
+                  {@const circle = livePrimitive}
+                  <label>Radius (mm)<input aria-label="Live radius (mm)" type="number" min="0.001" step="0.1" value={circle.radiusMm} disabled={liveMutationPending} onchange={(event) => editLiveRadius(circle, event.currentTarget.value)} /></label>
+                {/if}
+              </div>
+              <div class="tool-row">
+                <button class="action-button action-button--secondary" type="button" disabled={!livePrimitiveNeedsConfirmation || liveMutationPending} onclick={() => mutateLiveGeometry(() => confirmLivePaper(scopedLivePaper!.sessionId, livePrimitive!.id))}>Confirm geometry</button>
+                <button class="text-button" type="button" disabled={liveMutationPending} onclick={() => mutateLiveGeometry(() => rejectLivePaper(scopedLivePaper!.sessionId, livePrimitive!.id))}>Remove geometry</button>
+              </div>
+            {/if}
+            <button class="action-button action-button--secondary" type="button" onclick={useLivePaperProfile} disabled={liveMutationPending || scopedLivePaper.accepted.length === 0 || currentPending !== null || Boolean(disabledReason)}>Use accepted profile</button>
+            <p class="inline-hint">Image-derived · check dimensions. Review uncertain joins before use.</p>
+            {#if scopedLivePaper.diagnostics.length}<ul class="inline-hint camera-diagnostics">{#each scopedLivePaper.diagnostics as diagnostic, index (index)}<li>{diagnostic}</li>{/each}</ul>{/if}
+          {/if}
+        </section>
+      {:else}
       <section class="control-section">
         <h3>Derive from geometry</h3>
         <label>
@@ -1652,12 +1772,7 @@
         {#if sourceWarning}<p class="inline-hint">{sourceWarning}</p>{/if}
       </section>
 
-      <LivePaperPanel
-        bind:snapshot={livePaper} bind:selectedId={liveSelectedId}
-        viewLabel={selectedView} scopeKey={liveScopeToken}
-        onStarted={bindLivePaperView} onUseProfile={useLivePaperProfile}
-        disabled={currentPending !== null || Boolean(disabledReason) || !liveScopeToken}
-      />
+
 
       <section class="control-section drawing-photo-controls" aria-label="Drawing photo">
         <h3>Drawing photo · {selectedView.toUpperCase()}</h3>
@@ -1924,15 +2039,28 @@
         {/if}
       </section>
 
+      {/if}
     </aside>
 
     <main class="editor-pane">
+      <div class="sketch-toolbar">
       <nav class="view-layout-switcher" aria-label="Sketch views">
         {#each PROFILE_VIEWS as view (view)}
-          <button type="button" aria-label={`Show ${view} view`} aria-pressed={viewLayout === 'single' && selectedView === view} onclick={() => showSingleView(view)}>{view.toUpperCase()}</button>
+          <button type="button" aria-label={`Show ${view} view`} aria-pressed={viewLayout === 'single' && selectedView === view} disabled={liveMutationPending} onclick={() => showSingleView(view)}>{view.toUpperCase()}</button>
         {/each}
-        <button type="button" aria-label="All three views" aria-pressed={viewLayout === 'allThree'} onclick={showAllViews}>ALL THREE</button>
+        <button type="button" aria-label="All three views" aria-pressed={viewLayout === 'allThree'} disabled={liveMutationPending} onclick={showAllViews}>ALL THREE</button>
       </nav>
+      <div class="source-tools">
+        <label class="source-selector">Source
+          <select aria-label="Sketch source" disabled={liveMutationPending} value={sourceMode} onchange={(event) => chooseSketchSource(event.currentTarget.value)}>
+            <option value="profile">Profile</option><option value="camera">Camera</option>
+          </select>
+        </label>
+        <LivePaperPanel bind:snapshot={livePaper} viewLabel={selectedView} scopeKey={liveScopeToken}
+          onStarted={bindLivePaperView} onOpen={() => chooseSketchSource('camera')}
+          disabled={currentPending !== null || Boolean(disabledReason) || !liveScopeToken} />
+      </div>
+      </div>
       <div class={['sketch-workspace__panes', viewLayout === 'single' && 'sketch-workspace__panes--single']} data-testid="profile-projection-views">
         {#each visibleViews as view (view)}
           {@const viewLoops = loopsForView(view)}
@@ -1941,37 +2069,39 @@
           {@const isViewExact = exactView(view)}
           {@const photo = photoForView(view)}
           {@const live = livePaperForView(view)}
+          {@const rawCamera = Boolean(live && live.previewKind === 'camera' && live.state !== 'stopped')}
           {@const projectionDrawing = projectionDrawingForView(view)}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
           <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
           <div
-            class={['sketch-pane', `sketch-pane--${view}`, selectedView === view && 'sketch-pane--selected', (drawing || photoDrawing) && selectedView === view && 'draw-mode']}
+            class={['sketch-pane', `sketch-pane--${view}`, selectedView === view && 'sketch-pane--selected', sourceMode === 'profile' && (drawing || photoDrawing) && selectedView === view && 'draw-mode']}
             aria-label={`${view[0]!.toUpperCase()}${view.slice(1)} projection`}
             data-testid={`profile-view-${view}`}
             bind:this={paneElements[view]}
             role="application"
             tabindex="0"
-            onpointerdown={(event) => handlePanePointerDown(event, view)}
+            onpointerdown={(event) => { if (!rawCamera && sourceMode === 'profile') handlePanePointerDown(event, view); }}
             onpointermove={(event) => {
-              handlePanePointerMove(event, view);
-              if (drag) moveVertex(event, view);
+              if (!rawCamera && sourceMode === 'profile') { handlePanePointerMove(event, view); if (drag) moveVertex(event, view); }
             }}
             onpointerup={(event) => handlePanePointerUp(event, view)}
             onpointercancel={(event) => handlePanePointerUp(event, view)}
             onclick={(event) => {
-              if (photoPickMode && selectedView === view) pickPhotoPoint(event, view);
+              if (sourceMode === 'camera') selectView(view);
+              else if (photoPickMode && selectedView === view) pickPhotoPoint(event, view);
               else if (photoForView(view)?.recognition && photoForView(view)?.drawing && selectedView === view) addPhotoDrawingPoint(event, view);
               else if (drawing && selectedView === view) addDrawingPoint(event, view);
               else selectView(view);
             }}
-            onwheel={(event) => handlePaneWheel(event, view)}
+            onwheel={(event) => { if (!rawCamera) handlePaneWheel(event, view); }}
           >
             <div class="sketch-pane__label">
-              <button class="view-select" type="button" aria-label={`Select ${view} projection`} aria-pressed={selectedView === view} onclick={(event) => { event.stopPropagation(); selectView(view); }}>{view.toUpperCase()}</button>
-              <span>{live ? livePaperStateLabel(live.state).toUpperCase() : photoForView(view)?.pending ? 'RECOGNIZING…' : photoForView(view)?.error ? 'ERROR' : viewPendingFor(view) ? (viewPendingKindFor(view) === 'profile' ? 'BUILDING PROFILE…' : 'PROJECTING…') : viewErrorFor(view) ? 'ERROR' : photoForView(view)?.accepted ? 'PROFILE ACCEPTED' : projectionDrawing && !photo ? `${projectionDrawing.visibility === 'allEdges' ? 'VISIBLE + HIDDEN' : 'VISIBLE EDGES'} · PROJECTED` : viewLoops.length ? `${viewLoops.length} LOOPS` : photoForView(view) ? 'DRAWING PHOTO' : 'NO PROFILE'}</span>
-              <button class="sketch-pane__label-action" type="button" onclick={(event) => { event.stopPropagation(); resetPaneCamera(view); }}>FIT VIEW</button>
+              <button class="view-select" type="button" aria-label={`Select ${view} projection`} aria-pressed={selectedView === view} disabled={liveMutationPending} onclick={(event) => { event.stopPropagation(); selectView(view); }}>{view.toUpperCase()}</button>
+              <span>{sourceMode === 'camera' ? (live ? livePaperStateLabel(live.state).toUpperCase() : 'CAMERA NOT CONNECTED') : photoForView(view)?.pending ? 'RECOGNIZING…' : photoForView(view)?.error ? 'ERROR' : viewPendingFor(view) ? (viewPendingKindFor(view) === 'profile' ? 'BUILDING PROFILE…' : 'PROJECTING…') : viewErrorFor(view) ? 'ERROR' : photoForView(view)?.accepted ? 'PROFILE ACCEPTED' : projectionDrawing && !photo ? `${projectionDrawing.visibility === 'allEdges' ? 'VISIBLE + HIDDEN' : 'VISIBLE EDGES'} · PROJECTED` : viewLoops.length ? `${viewLoops.length} LOOPS` : photoForView(view) ? 'DRAWING PHOTO' : 'NO PROFILE'}</span>
+              <button class="sketch-pane__label-action" type="button" disabled={rawCamera} onclick={(event) => { event.stopPropagation(); resetPaneCamera(view); }}>FIT VIEW</button>
             </div>
+            {#if sourceMode === 'profile'}
             {#if photoForView(view)?.pending}
               <span class="pane-message">Recognizing drawing lines…</span>
             {:else if photoForView(view)?.error}
@@ -1987,11 +2117,20 @@
             {:else if viewLoops.length === 0 && !projectionDrawing && !photoForView(view)?.recognition && !livePaperForView(view)}
               <span class="pane-message">Select a view, draw a profile, or add a drawing photo.</span>
             {/if}
-            <svg class="sketch-pane__drawing" viewBox={viewBox(view)} preserveAspectRatio="xMidYMid meet" aria-label={`${view} sketch canvas`}>
-              {#if live?.previewDataUrl}
+            {/if}
+            {#if rawCamera}
+              {#if live?.cameraPreviewDataUrl}
+                <img class="live-camera-image" data-testid="live-camera-image" src={live.cameraPreviewDataUrl} alt="Live phone camera" draggable="false" />
+                <span class="camera-guidance">{live.state === 'templateMismatch' ? `Align the ${view.toUpperCase()} template` : 'Align all four markers'}</span>
+              {:else}
+                <span class="pane-message">Waiting for phone camera…</span>
+              {/if}
+            {/if}
+            <svg class={['sketch-pane__drawing', rawCamera && 'sketch-pane__drawing--camera-hidden']} aria-hidden={rawCamera} viewBox={viewBox(view)} preserveAspectRatio="xMidYMid meet" aria-label={`${view} sketch canvas`}>
+              {#if live?.previewKind === 'paper' && live.previewDataUrl}
                 <image data-testid="live-paper-image" href={live.previewDataUrl} x="0" y={-live.heightMm} width={live.widthMm} height={live.heightMm} opacity="0.65" preserveAspectRatio="none" />
               {/if}
-              {#if !photo || photo.recognition}
+              {#if sourceMode === 'camera' || !photo || photo.recognition}
                 <defs>
                   <pattern id={`profile-grid-${view}`} width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="scale(1,-1)">
                     <path d="M 10 0 L 0 0 0 10" class="grid-line" />
@@ -2004,6 +2143,7 @@
               {#if live}
                 <LivePaperOverlay snapshot={live} selectedId={liveSelectedId} onSelect={(id) => liveSelectedId = id} />
               {/if}
+              {#if sourceMode === 'profile'}
               {#if photo?.recognition}
                 {@const imageWidthMm = photo.recognition.previewWidthPx * photo.recognition.millimetersPerPixel}
                 {@const imageHeightMm = photo.recognition.previewHeightPx * photo.recognition.millimetersPerPixel}
@@ -2102,13 +2242,17 @@
                   {/each}
                 {/if}
               {/each}
+              {/if}
             </svg>
-            <span class="pane-camera-hint">Wheel to zoom · Shift-drag to pan</span>
+            <span class="pane-camera-hint">{rawCamera ? 'Camera coordinates · geometry updates paused' : sourceMode === 'camera' ? 'Wheel to zoom · select geometry to edit' : 'Wheel to zoom · Shift-drag to pan'}</span>
           </div>
         {/each}
       </div>
       <div class="evidence-row">
-        {#if currentPhoto?.recognition}
+        {#if sourceMode === 'camera'}
+          <span class="evidence-tag">{scopedLivePaper?.previewKind === 'paper' ? 'IMAGE-DERIVED' : 'CAMERA'}</span>
+          <span>{selectedView.toUpperCase()} · {scopedLivePaper?.previewKind === 'paper' ? '160 × 220 mm paper · check dimensions' : 'align this view’s template before measuring'}</span>
+        {:else if currentPhoto?.recognition}
           <span class="evidence-tag">IMAGE-DERIVED</span>
           <span>{selectedView.toUpperCase()} · scale {calibratedPreviewMm?.toFixed(2) ?? 'unavailable'} mm · check dimensions · tolerance {currentPhoto.recognition.evidence.toleranceMm.toFixed(2)} mm</span>
         {:else if currentPhoto}
@@ -2132,12 +2276,12 @@
           <span>No derived geometry used.</span>
         {/if}
       </div>
-      {#if currentEvidence?.warnings.length}
+      {#if sourceMode === 'profile' && currentEvidence?.warnings.length}
         <ul class="warning-list">
           {#each currentEvidence.warnings as warning (warning)}<li>{warning}</li>{/each}
         </ul>
       {/if}
-      {#if currentProjectionDrawing?.warnings.length}
+      {#if sourceMode === 'profile' && currentProjectionDrawing?.warnings.length}
         <ul class="warning-list">
           {#each currentProjectionDrawing.warnings as warning (warning)}<li>{warning}</li>{/each}
         </ul>
@@ -2147,6 +2291,8 @@
       <div class="status-slot" data-testid="profile-status" aria-live="polite" aria-atomic="true">
         {#if currentErrorText}
           <p class="status-error">{currentErrorText}</p>
+        {:else if sourceMode === 'camera'}
+          <p>{scopedLivePaper?.previewKind === 'paper' ? 'Review captured geometry, then use its accepted profile to continue editing and Apply.' : 'Camera stays visible while you align the printed view markers. Accepted geometry is retained.'}</p>
         {:else if currentEvidence && !deriveSettingsMatch}
           <p>Derivation settings changed. Derive again before applying.</p>
         {:else if currentStatusText}
@@ -2239,20 +2385,32 @@
     flex: 0 0 auto;
     gap: 0.25rem;
   }
-  .view-layout-switcher button {
+  .view-layout-switcher button, .sketch-toolbar :global(.camera-controls .camera-control) {
     min-height: 1.7rem;
     padding: 0.25rem 0.5rem;
     border: 1px solid var(--profile-border);
+    border-radius: 0;
     background: transparent;
     color: var(--profile-muted);
     font-size: 0.6rem;
     font-weight: 700;
     letter-spacing: 0.06em;
   }
-  .view-layout-switcher button[aria-pressed="true"] {
+  .view-layout-switcher button[aria-pressed="true"], .sketch-toolbar :global(.camera-controls .camera-control) {
     border-color: var(--profile-secondary);
     color: var(--profile-secondary);
   }
+
+  .sketch-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.5rem; flex: 0 0 auto; }
+  .source-tools { display: flex; align-items: center; gap: 0.5rem; }
+  .source-selector { display: flex; flex-direction: row; align-items: center; gap: 0.35rem; margin: 0; font-size: 0.6rem; }
+  .source-selector select { width: 5rem; min-height: 1.7rem; padding: 0.15rem 0.25rem; font-size: 0.65rem; }
+  .camera-inspector__state { min-height: 5rem; color: var(--profile-secondary); font-size: 0.72rem; }
+  .camera-inspector > button { margin-top: 0.65rem; }
+  .camera-diagnostics { padding-left: 1rem; }
+  .live-camera-image { position: absolute; inset: 1.7rem 0 0; width: 100%; height: calc(100% - 1.7rem); object-fit: contain; user-select: none; pointer-events: none; }
+  .camera-guidance { position: absolute; z-index: 2; bottom: 0.65rem; left: 50%; transform: translateX(-50%); max-width: calc(100% - 2rem); padding: 0.35rem 0.55rem; background: var(--profile-panel); border: 1px solid var(--profile-secondary); color: var(--profile-secondary); font-size: 0.65rem; white-space: nowrap; pointer-events: none; }
+  .sketch-pane__drawing--camera-hidden { visibility: hidden; }
 
   .sketch-workspace__panes {
     display: grid;
@@ -2355,9 +2513,9 @@
     font: inherit;
   }
 
-  button { cursor: pointer; }
-  button:disabled { cursor: not-allowed; opacity: 0.48; }
-  .action-button, .text-button {
+  button, :global(.camera-controls button) { cursor: pointer; }
+  button:disabled, :global(.camera-controls button:disabled) { cursor: not-allowed; opacity: 0.48; }
+  .action-button, .text-button, :global(.camera-controls .action-button), :global(.camera-controls .text-button) {
     min-height: 2.1rem;
     padding: 0.42rem 0.62rem;
     border: 1px solid var(--profile-border);
@@ -2368,10 +2526,10 @@
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
-  .action-button { background: #24313c; }
-  .action-button--secondary { border-color: var(--profile-secondary); color: var(--profile-secondary); background: transparent; }
+  .action-button, :global(.camera-controls .action-button) { background: #24313c; }
+  .action-button--secondary, :global(.camera-controls .action-button--secondary) { border-color: var(--profile-secondary); color: var(--profile-secondary); background: transparent; }
   .action-button--primary { width: 100%; border-color: var(--profile-primary); color: #100e0a; background: var(--profile-primary); }
-  .text-button { border: 0; background: transparent; color: var(--profile-muted); }
+  .text-button, :global(.camera-controls .text-button) { border: 0; background: transparent; color: var(--profile-muted); }
   .tool-row { justify-content: flex-start; flex-wrap: wrap; }
   .inline-hint { min-height: 1.2rem; margin: 0.4rem 0 0; color: var(--profile-muted); font-size: 0.68rem; line-height: 1.45; }
   .vertex-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0.55rem; }

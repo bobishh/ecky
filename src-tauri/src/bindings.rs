@@ -175,6 +175,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::profile::apply_profile_feature,
         crate::commands::live_paper::start_live_paper,
         crate::commands::live_paper::get_live_paper,
+        crate::commands::live_paper::set_live_paper_view,
         crate::commands::live_paper::stop_live_paper,
         crate::commands::live_paper::edit_live_paper,
         crate::commands::live_paper::confirm_live_paper,

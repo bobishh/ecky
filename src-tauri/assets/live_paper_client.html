@@ -3,25 +3,60 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#11151b">
   <title>Ecky · live paper</title>
   <style>
-    :root { color-scheme: dark; font: 16px system-ui,sans-serif; background: #11151b; color: #e4dfd5; }
-    body { margin: auto; padding: max(20px,env(safe-area-inset-top)) 20px; max-width: 760px; }
-    h1 { color: #c49869; font-size: 1.35rem; }
-    video { display: block; width: 100%; max-height: 65vh; background: #080b10; object-fit: contain; border: 1px solid #63513c; aspect-ratio: 16/9; }
-    button { font: inherit; padding: 12px 18px; color: inherit; background: #20242b; border: 1px solid #ad8256; margin: 12px 8px 0 0; }
-    button:disabled { opacity: .5; }
-    #status { min-height: 4.5em; line-height: 1.5; }
-    .help { color: #b6ada0; line-height: 1.5; }
+    :root { color-scheme: dark; font: 14px system-ui,sans-serif; background: #080b10; color: #e4dfd5; --primary: #c49869; --secondary: #ad8256; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+    #viewfinder { position: fixed; inset: var(--viewport-top, 0px) auto auto var(--viewport-left, 0px); width: var(--viewport-width, 100vw); height: var(--viewport-height, 100dvh); background: #080b10; isolation: isolate; }
+    #camera { position: absolute; inset: 0; width: 100%; height: 100%; display: block; object-fit: cover; }
+    #camera.whole-frame { object-fit: contain; }
+    .top-overlay { position: absolute; inset: 0 0 auto; padding: max(10px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) 28px max(14px, env(safe-area-inset-left)); background: linear-gradient(#080b10df, #080b1099 70%, transparent); pointer-events: none; }
+    .top-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; }
+    h1 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase; color: var(--primary); }
+    #status { margin: 4px 0 0; max-width: 38ch; min-height: 2.8em; max-height: min(26dvh, 11em); overflow: auto; line-height: 1.4; text-shadow: 0 1px 3px #000; pointer-events: auto; }
+    button { min-height: 44px; border: 1px solid var(--secondary); border-radius: 0; font: inherit; font-weight: 600; background: #11151be8; color: #e4dfd5; cursor: pointer; touch-action: manipulation; }
+    button:focus-visible, input:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+    button:disabled { opacity: .48; cursor: default; }
+    .icon-button { width: 44px; padding: 0; font-size: 18px; pointer-events: auto; }
+    .camera-controls { position: absolute; inset: auto 0 0; display: flex; justify-content: center; gap: 10px; padding: 28px max(14px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)); background: linear-gradient(transparent, #080b10b3); pointer-events: none; }
+    .camera-controls button { min-width: 116px; padding: 10px 14px; pointer-events: auto; }
+    #start { background: #ad8256e8; color: #101318; }
+    dialog { width: min(360px, calc(100vw - 28px)); max-height: min(70dvh, 460px); padding: 14px; border: 1px solid var(--secondary); border-radius: 0; background: #11151bf5; color: inherit; line-height: 1.5; overflow: auto; }
+    dialog::backdrop { background: #080b1066; }
+    .help-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    h2 { margin: 0; color: var(--primary); font-size: 15px; }
+    dialog p { margin: 12px 0; }
+    .frame-choice { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+    input { width: 18px; height: 18px; accent-color: var(--primary); }
+    @media (max-height: 450px) { .top-overlay { padding-top: max(6px, env(safe-area-inset-top)); } #status { max-width: 55ch; } .camera-controls { padding-top: 12px; padding-bottom: max(8px, env(safe-area-inset-bottom)); } }
   </style>
 </head>
 <body>
-  <h1>Ecky · live paper</h1>
-  <video id="camera" autoplay muted playsinline aria-label="Live paper camera"></video>
-  <button id="start" type="button">Start camera</button>
-  <button id="stop" type="button" disabled>Stop camera</button>
-  <p id="status" role="status">Place the printed sheet flat. Keep all four markers visible.</p>
-  <p class="help">Black pen on white paper. Print at 100% and check the 50 mm scale segment. Keep this page visible while streaming. Camera video travels directly to Ecky over the local network.</p>
+  <main id="viewfinder" aria-label="Live paper viewfinder">
+    <video id="camera" autoplay muted playsinline aria-label="Live paper camera"></video>
+    <header class="top-overlay">
+      <div class="top-row">
+        <h1>Ecky · live paper</h1>
+        <button id="help-open" class="icon-button" type="button" aria-label="Help" aria-haspopup="dialog">?</button>
+      </div>
+      <p id="status" role="status">Show all four paper markers.</p>
+    </header>
+    <nav class="camera-controls" aria-label="Camera controls">
+      <button id="start" type="button">Start camera</button>
+      <button id="stop" type="button" disabled>Stop camera</button>
+    </nav>
+  </main>
+  <dialog id="help" aria-labelledby="help-title">
+    <div class="help-heading">
+      <h2 id="help-title">Frame the paper</h2>
+      <button id="help-close" class="icon-button" type="button" aria-label="Close help">×</button>
+    </div>
+    <p>Print at 100% and check the 50 mm scale segment. Keep the sheet flat, with all four markers visible.</p>
+    <p>Use black pen on white paper. Keep Safari visible while streaming. Phone and computer need the same local network.</p>
+    <label class="frame-choice"><input id="whole-frame" type="checkbox">Show whole camera frame</label>
+  </dialog>
   <script type="module" src="/capture-assets/live_paper_client.mjs"></script>
 </body>
 </html>

@@ -1,64 +1,57 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
-  import { formatBackendError, startLivePaper, stopLivePaper, editLivePaper, confirmLivePaper, rejectLivePaper } from './tauri/client';
-  import {
-    editLivePaperCoordinate, getLivePaper, livePaperCoordinates, livePaperStateLabel,
-    type LivePaperPrimitive, type LivePaperSnapshot,
-  } from './livePaper';
+  import { formatBackendError, startLivePaper, stopLivePaper } from './tauri/client';
+  import { getLivePaper, livePaperStateLabel, type LivePaperSnapshot } from './livePaper';
 
-  let {
-    snapshot = $bindable<LivePaperSnapshot | null>(null),
-    selectedId = $bindable<string | null>(null),
-    viewLabel,
-    scopeKey,
-    onStarted,
-    onUseProfile,
-    disabled = false,
-  }: {
+  let { snapshot = $bindable<LivePaperSnapshot | null>(null), viewLabel, scopeKey, onStarted, onOpen, disabled = false }: {
     snapshot?: LivePaperSnapshot | null;
-    selectedId?: string | null;
     viewLabel: 'front' | 'top' | 'side';
     scopeKey: string;
     onStarted: () => void;
-    onUseProfile: () => Promise<void>;
+    onOpen: () => void;
     disabled?: boolean;
   } = $props();
 
   let busy = $state(false);
   let error = $state('');
+  let dialogElement: HTMLDialogElement;
   let visible = true;
-  let current = $derived(snapshot
-    ? [...snapshot.accepted, ...snapshot.pending].find((item) => item.id === selectedId) ?? null
-    : null);
-  let needsConfirmation = $derived(Boolean(current && snapshot?.pending.some((item) => item.id === current.id)));
+  let waitingForFirstPreview = false;
   let matchesScope = $derived(snapshot?.scopeKey === scopeKey);
   let active = $derived(Boolean(snapshot && snapshot.state !== 'stopped'));
+  let templateView = $derived(snapshot?.view ?? viewLabel);
 
   onMount(() => {
     let unlisten: (() => void) | undefined;
     let receivedEvent = false;
     void listen<LivePaperSnapshot>('live-paper-state', (event) => {
       receivedEvent = true;
-      if (visible) {
-        const restoring = snapshot === null;
-        snapshot = event.payload;
-        if (restoring) onStarted();
+      if (!visible) return;
+      const restoring = snapshot === null;
+      snapshot = event.payload;
+      if (restoring) onStarted();
+      if (waitingForFirstPreview && snapshot.scopeKey === scopeKey && snapshot.cameraPreviewDataUrl) {
+        waitingForFirstPreview = false;
+        dialogElement.close();
       }
     }).then((cleanup) => {
       if (!visible) cleanup();
       else unlisten = cleanup;
       return getLivePaper();
     }).then((value) => {
-      if (visible && !receivedEvent) {
-        snapshot = value;
-        if (value) onStarted();
-      }
-    }).catch((cause) => {
-      if (visible) error = formatBackendError(cause);
-    });
+      if (!visible || receivedEvent) return;
+      snapshot = value;
+      if (value) onStarted();
+    }).catch((cause) => { if (visible) error = formatBackendError(cause); });
     return () => { visible = false; unlisten?.(); };
   });
+
+  function openCamera(): void {
+    waitingForFirstPreview = !snapshot?.cameraPreviewDataUrl;
+    onOpen();
+    dialogElement.showModal();
+  }
 
   async function action(operation: () => Promise<LivePaperSnapshot>, started = false): Promise<void> {
     if (busy) return;
@@ -68,119 +61,83 @@
       const next = await operation();
       if (!visible) return;
       snapshot = next;
-      if (started) {
-        selectedId = null;
-        onStarted();
-      }
-    } catch (cause) {
-      if (visible) error = formatBackendError(cause);
-    } finally {
-      if (visible) busy = false;
-    }
-  }
-
-  function editCoordinate(primitive: LivePaperPrimitive, index: number, axis: 0 | 1, value: string): void {
-    try {
-      if (value.trim() === '') throw new Error('Coordinate must be a finite number.');
-      const edited = editLivePaperCoordinate(primitive, index, axis, Number(value));
-      void action(() => editLivePaper(snapshot!.sessionId, edited));
-    } catch (cause) { error = formatBackendError(cause); }
-  }
-
-  function editRadius(primitive: Extract<LivePaperPrimitive, { kind: 'circle' }>, value: string): void {
-    const radiusMm = Number(value);
-    if (!Number.isFinite(radiusMm) || radiusMm <= 0) { error = 'Radius must be greater than zero.'; return; }
-    void action(() => editLivePaper(snapshot!.sessionId, { ...primitive, radiusMm }));
-  }
-
-  async function useProfile(): Promise<void> {
-    busy = true;
-    error = '';
-    try { await onUseProfile(); }
-    catch (cause) { if (visible) error = formatBackendError(cause); }
+      if (started) onStarted();
+    } catch (cause) { if (visible) error = formatBackendError(cause); }
     finally { if (visible) busy = false; }
   }
 </script>
 
-<section class="live-paper-controls" aria-label="Live paper">
-  <h3>Live paper · {(matchesScope ? snapshot!.view : viewLabel).toUpperCase()}</h3>
-  <p>Print at 100%, check the scale segment, then open the camera link on iPhone Safari.</p>
-  <div class="actions">
-    <button type="button" onclick={() => action(() => startLivePaper(scopeKey, viewLabel), true)} disabled={busy || active || disabled}>Start live paper</button>
-    <button type="button" onclick={() => action(() => stopLivePaper(snapshot!.sessionId))} disabled={busy || !active}>Stop live paper</button>
-  </div>
-  <div class="connection" aria-live="polite" data-testid="live-paper-state">
-    <strong>{snapshot ? livePaperStateLabel(snapshot.state) : 'Camera not connected'}</strong>
-    <span>{snapshot?.detail ?? 'Live paper appears beneath the sketch grid.'}</span>
-  </div>
-  {#if snapshot}
-    {#if scopeKey && !matchesScope}
-      <p class="scope-warning">{active ? 'Capture belongs to another model. Stop capture, then start live paper here.' : 'Saved paper belongs to another model. Start live paper here to capture.'}</p>
-    {/if}
-    <div class="pairing-slot">
-      {#if active}
-        <img class="pairing-qr" src={snapshot.phoneQrDataUrl} alt="Scan to open the phone camera" width="192" height="192" />
-        <div class="links">
-          {#if snapshot.trustUrl}<a href={snapshot.trustUrl} target="_blank" rel="noreferrer">Trust local camera certificate</a>{/if}
-          <a href={snapshot.phoneUrl} target="_blank" rel="noreferrer">Open phone camera</a>
-        </div>
-        <label class="phone-link">Phone camera link<input aria-label="Phone camera link" readonly value={snapshot.phoneUrl} onfocus={(event) => event.currentTarget.select()} /></label>
-      {:else}
-        <p>Capture stopped. Accepted geometry remains editable. Start live paper to connect a camera.</p>
+<div class="camera-controls">
+  <button class="action-button action-button--secondary camera-control" type="button" aria-label="Camera" title="Connect phone camera and print a view template" aria-haspopup="dialog" onclick={openCamera}>
+    <svg aria-hidden="true" viewBox="0 0 20 16" width="14" height="12"><path d="M1 4h4l2-3h6l2 3h4v11H1zM13.5 9a3.5 3.5 0 1 0-7 0 3.5 3.5 0 0 0 7 0Z" /></svg>
+    CAMERA
+    <span class={['camera-indicator', active && matchesScope && 'camera-indicator--active']} aria-hidden="true"></span>
+  </button>
+  <dialog bind:this={dialogElement} class="camera-dialog" aria-labelledby="camera-dialog-title" onclose={() => waitingForFirstPreview = false}>
+    <header class="camera-dialog__header">
+      <h3 id="camera-dialog-title">Phone camera</h3>
+      <button class="text-button" type="button" aria-label="Close phone camera settings" onclick={() => dialogElement.close()}>×</button>
+    </header>
+    <div class="camera-dialog__content">
+      <div class="camera-state" aria-live="polite">
+        <strong>{snapshot ? livePaperStateLabel(snapshot.state) : 'Connect a phone camera'}</strong>
+        <span>{snapshot?.detail ?? 'Start capture, then scan the QR code with iPhone Safari on the same network.'}</span>
+      </div>
+      {#if scopeKey && snapshot && !matchesScope}
+        <p class="scope-warning">{active ? 'Capture belongs to another model. Stop capture, then start live paper here.' : 'Saved paper belongs to another model. Start live paper here to capture.'}</p>
       {/if}
-    </div>
-    <a href={snapshot.templateDataUrl} download="ecky-live-paper-template.pdf">Print paper template</a>
-    <p>{snapshot.accepted.length} accepted · {snapshot.pending.length} need review</p>
-    <p>Image-derived · check dimensions. Confirm joins, crossings and broken strokes before use.</p>
-    <label>Geometry
-      <select aria-label="Live paper primitive" disabled={!matchesScope} value={selectedId ?? ''} onchange={(event) => selectedId = event.currentTarget.value || null}>
-        <option value="">Select geometry</option>
-        {#each snapshot.accepted as primitive (primitive.id)}<option value={primitive.id}>{primitive.kind} · {primitive.id}</option>{/each}
-        {#each snapshot.pending as primitive (primitive.id)}<option value={primitive.id}>Review · {primitive.kind} · {primitive.id}</option>{/each}
-      </select>
-    </label>
-    {#if current}
-      <div class="coordinates">
-        {#each livePaperCoordinates(current) as point, index (index)}
-          <label>{current.kind === 'circle' ? 'Center' : current.kind === 'point' ? 'Point' : `Vertex ${index + 1}`} X (mm)
-            <input aria-label={`Live ${current.kind === 'circle' ? 'center' : `vertex ${index + 1}`} X (mm)`} type="number" step="0.1" value={point[0]} disabled={busy || !matchesScope} onchange={(event) => editCoordinate(current!, index, 0, event.currentTarget.value)} />
-          </label>
-          <label>Y (mm)<input aria-label={`Live ${current.kind === 'circle' ? 'center' : `vertex ${index + 1}`} Y (mm)`} type="number" step="0.1" value={point[1]} disabled={busy || !matchesScope} onchange={(event) => editCoordinate(current!, index, 1, event.currentTarget.value)} /></label>
-        {/each}
-        {#if current.kind === 'circle'}
-          {@const circle = current}
-          <label>Radius (mm)<input aria-label="Live radius (mm)" type="number" min="0.001" step="0.1" value={circle.radiusMm} disabled={busy || !matchesScope} onchange={(event) => editRadius(circle, event.currentTarget.value)} /></label>
+      {#if snapshot && active}
+        <div class="pairing-details">
+          <img class="pairing-qr" src={snapshot.phoneQrDataUrl} alt="Scan to open the phone camera" width="192" height="192" />
+          <div class="pairing-instructions">
+            <p>Scan with iPhone Safari. Allow camera access and keep the printed markers visible.</p>
+            {#if snapshot.trustUrl}<a href={snapshot.trustUrl} target="_blank" rel="noreferrer">Trust local camera certificate</a>{/if}
+            <a href={snapshot.phoneUrl} target="_blank" rel="noreferrer">Open phone camera</a>
+            <label>Phone camera link<input aria-label="Phone camera link" readonly value={snapshot.phoneUrl} onfocus={(event) => event.currentTarget.select()} /></label>
+          </div>
+        </div>
+      {/if}
+      <section class="template-settings" aria-label="Paper template">
+        <strong>{templateView.toUpperCase()} template</strong>
+        <p>Choose FRONT, TOP, or SIDE in Sketch. Print its template at 100% and check the 50 mm segment. The camera stays connected when changing views.</p>
+        {#if snapshot}
+          <a class="action-button action-button--secondary" href={snapshot.templateDataUrl} download={`ecky-live-paper-${templateView}.pdf`}>Print {templateView.toUpperCase()} template</a>
         {/if}
-      </div>
-      <div class="actions">
-        <button type="button" disabled={!needsConfirmation || busy || !matchesScope} onclick={() => action(() => confirmLivePaper(snapshot!.sessionId, current!.id))}>Confirm geometry</button>
-        <button type="button" disabled={busy || !matchesScope} onclick={() => action(() => rejectLivePaper(snapshot!.sessionId, current!.id))}>Remove geometry</button>
-      </div>
-    {/if}
-    <button type="button" onclick={useProfile} disabled={busy || disabled || !matchesScope || snapshot.accepted.length === 0}>Use accepted profile</button>
-    {#if snapshot.diagnostics.length}<ul>{#each snapshot.diagnostics as diagnostic, index (index)}<li>{diagnostic}</li>{/each}</ul>{/if}
-  {/if}
-  <p class="error" role="status">{error || '\u00a0'}</p>
-</section>
+      </section>
+      <p class="camera-error" role="status">{error || '\u00a0'}</p>
+      <footer class="camera-dialog__actions">
+        <button class="action-button action-button--secondary" type="button" onclick={() => action(() => startLivePaper(scopeKey, viewLabel), true)} disabled={busy || active || disabled}>Start live paper</button>
+        <button class="action-button action-button--secondary" type="button" onclick={() => action(() => stopLivePaper(snapshot!.sessionId))} disabled={busy || !active}>Stop live paper</button>
+        <button class="action-button action-button--secondary" type="button" onclick={() => dialogElement.close()}>Done</button>
+      </footer>
+    </div>
+  </dialog>
+</div>
 
 <style>
-  .live-paper-controls { display: grid; gap: 0.55rem; border-bottom: 1px solid var(--border, #38312b); padding-bottom: 1rem; }
-  h3 { margin: 0; color: var(--secondary, #c7a382); font-size: 0.8rem; text-transform: uppercase; }
-  p, ul { margin: 0; font-size: 0.75rem; line-height: 1.45; color: var(--text-muted, #a49c94); }
-  ul { padding-left: 1.1rem; max-height: 8rem; overflow-y: auto; }
-  .actions, .links { display: flex; gap: 0.4rem; flex-wrap: wrap; }
-  button, input, select { box-sizing: border-box; min-width: 0; border: 1px solid var(--border, #514438); background: var(--bg-panel, #171716); color: var(--text, #e3d8cb); border-radius: 0; padding: 0.4rem; font: inherit; font-size: 0.75rem; }
-  button { cursor: pointer; border-color: var(--primary, #ad8158); }
-  button:disabled { opacity: 0.45; cursor: default; }
-  label { display: grid; gap: 0.25rem; font-size: 0.7rem; color: var(--text-muted, #a49c94); }
-  input, select { width: 100%; }
-  .coordinates { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem; max-height: 15rem; overflow-y: auto; }
-  .connection { display: grid; gap: 0.25rem; min-height: 4.5rem; align-content: start; font-size: 0.75rem; }
-  .connection strong { color: var(--secondary, #c7a382); }
-  .connection span { color: var(--text-muted, #a49c94); overflow-wrap: anywhere; }
-  a { color: var(--secondary, #c7a382); font-size: 0.75rem; }
-  .pairing-slot { display: grid; align-content: start; gap: 0.55rem; min-height: 20rem; }
-  .pairing-qr { display: block; width: 192px; height: 192px; max-width: 100%; background: #fff; }
-  .scope-warning { color: var(--secondary, #d1b391); }
-  .error { min-height: 2.2rem; color: #e6a087; overflow-wrap: anywhere; }
+  .camera-controls { display: contents; }
+  .camera-control { display: inline-flex; align-items: center; gap: 0.35rem; white-space: nowrap; }
+  .camera-control svg { fill: none; stroke: currentColor; stroke-width: 1.4; }
+  .camera-indicator { width: 0.3rem; height: 0.3rem; background: var(--profile-muted); opacity: 0.45; }
+  .camera-indicator--active { background: var(--profile-primary); opacity: 1; }
+  .camera-dialog { position: fixed; inset: 0; margin: auto; height: fit-content; width: min(38rem, calc(100vw - 2rem)); box-sizing: border-box; max-height: calc(100vh - 2rem); padding: 0; overflow: auto; border: 1px solid var(--profile-secondary); border-radius: 0; background: var(--profile-panel); color: var(--profile-text); }
+  .camera-dialog::backdrop { background: rgb(0 0 0 / 72%); }
+  .camera-dialog__header { display: flex; justify-content: space-between; align-items: center; padding: 0.65rem 0.85rem; border-bottom: 1px solid var(--profile-border); }
+  h3 { margin: 0; color: var(--profile-secondary); font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; }
+  .camera-dialog__content { display: grid; gap: 0.8rem; padding: 0.9rem; }
+  .camera-state { display: grid; gap: 0.3rem; min-height: 3.4rem; font-size: 0.75rem; }
+  .camera-state strong, .scope-warning { color: var(--profile-secondary); }
+  .camera-state span, p { margin: 0; color: var(--profile-muted); font-size: 0.72rem; line-height: 1.5; }
+  .pairing-details { display: grid; grid-template-columns: 192px minmax(0, 1fr); align-items: start; gap: 1rem; }
+  .pairing-qr { display: block; width: 192px; height: 192px; background: #fff; }
+  .pairing-instructions, .template-settings { display: grid; gap: 0.6rem; }
+  .template-settings { padding-top: 0.8rem; border-top: 1px solid var(--profile-border); }
+  .template-settings strong { color: var(--profile-secondary); font-size: 0.75rem; text-transform: uppercase; }
+  .template-settings a { justify-self: start; }
+  a { color: var(--profile-secondary); font-size: 0.72rem; }
+  label { display: grid; gap: 0.3rem; color: var(--profile-muted); font-size: 0.72rem; }
+  input { box-sizing: border-box; width: 100%; min-height: 2rem; padding: 0.35rem 0.45rem; border: 1px solid var(--profile-border); border-radius: 0; background: var(--profile-bg); color: var(--profile-text); font: inherit; }
+  .camera-error { min-height: 1.2rem; color: var(--red, #df9e86); overflow-wrap: anywhere; }
+  .camera-dialog__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.5rem; }
+  @media (max-width: 600px) { .pairing-details { grid-template-columns: 1fr; } }
 </style>

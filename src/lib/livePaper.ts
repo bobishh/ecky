@@ -25,7 +25,7 @@ export function editLivePaperCoordinate(
 export function livePaperStateLabel(state: LivePaperSnapshot['state']): string {
   const labels: Record<string, string> = {
     waiting: 'Waiting for phone', connecting: 'Connecting camera', streaming: 'Live paper',
-    markerLost: 'Markers lost · updates paused', stopped: 'Capture stopped', error: 'Camera needs attention',
+    markerLost: 'Align all four markers', templateMismatch: 'Different view template', stopped: 'Capture stopped', error: 'Camera needs attention',
   };
   return labels[state] ?? state;
 }
