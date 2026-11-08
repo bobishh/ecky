@@ -1,5 +1,78 @@
 import { expect, test } from '@playwright/test';
 import { drawRectangle, installProfileMocks, openSketch } from './profile-authoring-harness.js';
+
+test('Given an unfinished polyline When placing points Then anchors and cursor preview appear immediately and the first anchor closes it', async ({ page }) => {
+  await installProfileMocks(page);
+  const workspace = await openSketch(page, false);
+  const canvas = workspace.getByTestId('profile-view-front');
+  const bounds = await canvas.boundingBox();
+  if (!bounds) throw new Error('Profile canvas is not visible.');
+  const first = { x: bounds.width * 0.3, y: bounds.height * 0.35 };
+  await workspace.getByRole('button', { name: 'Draw profile' }).click();
+  await canvas.click({ position: first });
+  await expect(canvas.getByTestId('sketch-draft-point')).toHaveCount(1);
+  const anchor = await canvas.getByTestId('sketch-draft-point').boundingBox();
+  expect(anchor?.width).toBeGreaterThanOrEqual(8);
+  await page.mouse.move(bounds.x + bounds.width * 0.7, bounds.y + bounds.height * 0.35);
+  await expect(canvas.getByTestId('sketch-draft-preview')).toBeVisible();
+  await expect(canvas.locator('polygon.outer')).toHaveCount(0);
+  if (process.env.SKETCH_DRAWING_SCREENSHOT_PATH) {
+    await page.screenshot({ path: process.env.SKETCH_DRAWING_SCREENSHOT_PATH });
+  }
+  await canvas.click({ position: { x: bounds.width * 0.7, y: bounds.height * 0.35 } });
+  await canvas.click({ position: { x: bounds.width * 0.7, y: bounds.height * 0.7 } });
+  await expect(canvas.getByTestId('sketch-draft-point')).toHaveCount(3);
+  await canvas.click({ position: first });
+  await expect(canvas.getByTestId('sketch-draft-point')).toHaveCount(0);
+  await expect(canvas.locator('polygon.outer')).toBeVisible();
+  await expect(canvas.locator('circle.vertex-handle')).toHaveCount(3);
+});
+
+test('Given a draft When undoing a point or cancelling Then feedback follows the remaining points and completed loops survive', async ({ page }) => {
+  await installProfileMocks(page);
+  const workspace = await openSketch(page, false);
+  await drawRectangle(workspace);
+  await workspace.getByLabel('Drawing tool').selectOption('polyline');
+  await workspace.getByRole('button', { name: 'Draw profile' }).click();
+  const canvas = workspace.getByTestId('profile-view-front');
+  await canvas.click({ position: { x: 120, y: 150 } });
+  await canvas.click({ position: { x: 180, y: 210 } });
+  await canvas.press('Backspace');
+  await expect(canvas.getByTestId('sketch-draft-point')).toHaveCount(1);
+  await canvas.press('Escape');
+  await expect(canvas.getByTestId('sketch-draft-point')).toHaveCount(0);
+  await expect(canvas.getByTestId('sketch-draft-preview')).toHaveCount(0);
+  await expect(canvas.locator('polygon.outer')).toHaveCount(1);
+  await expect(workspace.getByRole('button', { name: 'Draw profile' })).toBeEnabled();
+  await workspace.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(canvas.locator('polygon.outer')).toHaveCount(0);
+  await workspace.getByRole('button', { name: 'Draw profile' }).click();
+  await workspace.getByRole('button', { name: 'Cancel drawing' }).click();
+  await expect(workspace.getByRole('button', { name: 'Draw profile' })).toBeEnabled();
+  await expect(canvas.locator('.open-draft')).toHaveCount(0);
+});
+
+for (const tool of ['rectangle', 'circle'] as const) {
+  test(`Given the ${tool} tool When its first point is placed Then its anchor and live shape preview appear before completion`, async ({ page }) => {
+    await installProfileMocks(page);
+    const workspace = await openSketch(page, false);
+    const canvas = workspace.getByTestId('profile-view-front');
+    const bounds = await canvas.boundingBox();
+    if (!bounds) throw new Error('Profile canvas is not visible.');
+    await workspace.getByLabel('Drawing tool').selectOption(tool);
+    await workspace.getByRole('button', { name: 'Draw profile' }).click();
+    await canvas.click({ position: { x: bounds.width * 0.3, y: bounds.height * 0.4 } });
+    await expect(canvas.getByTestId('sketch-draft-point')).toHaveCount(1);
+    await page.mouse.move(bounds.x + bounds.width * 0.65, bounds.y + bounds.height * 0.7);
+    await expect(canvas.getByTestId('sketch-draft-preview')).toBeVisible();
+    await expect(canvas.getByTestId('sketch-draft-preview')).toHaveJSProperty('tagName', tool === 'circle' ? 'circle' : 'rect');
+    await canvas.click({ position: { x: bounds.width * 0.65, y: bounds.height * 0.7 } });
+    await expect(canvas.getByTestId('sketch-draft-preview')).toHaveCount(0);
+    await expect(canvas.getByTestId('sketch-draft-point')).toHaveCount(0);
+    await expect(canvas.locator(tool === 'circle' ? 'circle.analytic-profile-circle' : 'polygon.outer')).toBeVisible();
+  });
+}
+
 test('manual rectangle applies as a normal model version without section reference', async ({ page }) => {
   await installProfileMocks(page);
   const workspace = await openSketch(page);
@@ -532,6 +605,9 @@ test('drawing photo import recognizes a calibrated plate and preserves analytic 
   const profileBox = await profilePane.boundingBox();
   if (!profileBox) throw new Error('Calibrated profile canvas has no visible bounds.');
   await page.mouse.click(profileBox.x + profileBox.width * 0.2, profileBox.y + profileBox.height * 0.2);
+  await expect(profilePane.getByTestId('sketch-draft-point')).toHaveCount(1);
+  await page.mouse.move(profileBox.x + profileBox.width * 0.3, profileBox.y + profileBox.height * 0.3);
+  await expect(profilePane.getByTestId('sketch-draft-preview')).toBeVisible();
   await page.mouse.click(profileBox.x + profileBox.width * 0.3, profileBox.y + profileBox.height * 0.3);
   await workspace.getByRole('button', { name: 'Review corrections' }).click();
   await workspace.getByRole('button', { name: 'Accept selected profile' }).click();

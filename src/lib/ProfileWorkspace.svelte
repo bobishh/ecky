@@ -166,6 +166,7 @@
   let requestSequence = 0;
   let activeRequestId = $state<number | null>(null);
   let drag = $state<{ loopIndex: number; pointIndex: number; pointerId: number; view: ProfileView } | null>(null);
+  let drawingCursor = $state<{ scopeKey: string; view: ProfileView; point: ProfilePoint } | null>(null);
   let photoVertexDrag = $state<{ primitiveId: string; pointIndex: number; pointerId: number; view: ProfileView } | null>(null);
   let photoStates = $state<Record<ProfileView, PhotoViewState | null>>({ front: null, top: null, side: null });
   let photoPickMode = $state<'region' | 'rectification' | 'calibration' | null>(null);
@@ -943,6 +944,10 @@
   }
 
   function undoLastEdit(): void {
+    if (drawing) {
+      removeDraftPoint();
+      return;
+    }
     const editor = profileEditorFor(selectedView);
     if (editor.undoItems.length === 0 || currentPending) return;
     const items = [...editor.undoItems];
@@ -1152,6 +1157,7 @@
   }
 
   function beginDrawing(): void {
+    drawingCursor = null;
     if (currentPhoto?.recognition) {
       if (currentPhoto.drawing) return;
       updatePhoto(selectedView, { drawing: true, draftPointsMm: [], accepted: false });
@@ -1197,6 +1203,7 @@
   }
 
   function addDrawingPoint(event: MouseEvent, view: ProfileView): void {
+    if (event.button !== 0 || event.shiftKey) return;
     if (!drawing || currentPending) {
       selectView(view);
       return;
@@ -1213,6 +1220,11 @@
     const tool = currentEdit.drawingTool;
     const draft = draftIndex === null ? null : loops[draftIndex];
     if (!draft || draftIndex === null) return;
+    if (tool === 'polyline' && draft.points.length >= 3
+      && Math.hypot(point[0] - draft.points[0]![0], point[1] - draft.points[0]![1]) * paneCameras[view].zoom <= 10) {
+      closeLoop();
+      return;
+    }
     if (tool === 'polyline' || draft.points.length === 0) {
       loops[draftIndex] = { ...draft, points: [...draft.points, point] };
     } else if (tool === 'rectangle') {
@@ -1234,12 +1246,51 @@
       };
       patchProfileEditor(selectedView, { drawing: false, draftLoopIndex: null });
     }
-    replaceLoops(loops);
+    patchProfileEditor(view, { loops: normalizeProfileLoops(loops) });
+    drawingCursor = { scopeKey, view, point };
     patchProfileEditor(selectedView, { selectedLoopIndex: currentEdit.draftLoopIndex ?? loops.length - 1 });
     selectView(view);
   }
 
+  function removeDraftPoint(): void {
+    if (!drawing || currentPending || currentEdit.draftLoopIndex === null) return;
+    const index = currentEdit.draftLoopIndex;
+    const loops = startEdit().map((loop, loopIndex) => loopIndex === index ? { ...loop, points: loop.points.slice(0, -1) } : loop);
+    patchProfileEditor(selectedView, { loops });
+    setError('');
+  }
+
+  function cancelDrawing(): void {
+    if (!drawing || currentPending) return;
+    patchProfileEditor(selectedView, {
+      loops: startEdit().filter((_, index) => index !== currentEdit.draftLoopIndex),
+      undoItems: currentEdit.undoItems.slice(0, -1),
+      drawing: false, draftLoopIndex: null, selectedPointIndex: null,
+      selectedLoopIndex: Math.max(0, startEdit().length - 2),
+    });
+    drawingCursor = null;
+    setError('');
+    setStatus('Unfinished profile cancelled.');
+  }
+
+  function handleDrawingKey(event: KeyboardEvent, view: ProfileView): void {
+    if (event.target !== event.currentTarget || sourceMode !== 'profile' || view !== selectedView || currentPending) return;
+    if (!drawing && !photoDrawing) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (photoDrawing) cancelPhotoDrawing(); else cancelDrawing();
+    } else if (event.key === 'Backspace' || event.key === 'Delete') {
+      event.preventDefault();
+      if (photoDrawing && currentPhoto) updatePhoto(view, { draftPointsMm: currentPhoto.draftPointsMm.slice(0, -1) });
+      else removeDraftPoint();
+    } else if (event.key === 'Enter' && (photoDrawing ? currentPhoto?.correctionTool === 'polyline' : currentEdit.drawingTool === 'polyline')) {
+      event.preventDefault();
+      closeLoop();
+    }
+  }
+
   function addPhotoDrawingPoint(event: MouseEvent, view: ProfileView): void {
+    if (event.button !== 0 || event.shiftKey) return;
     const photo = photoForView(view);
     const pane = paneElements[view];
     if (!photo?.recognition || !photo.drawing || !pane || currentPending) return;
@@ -1290,6 +1341,7 @@
       return;
     }
     patchProfileEditor(selectedView, { drawing: false, draftLoopIndex: null });
+    drawingCursor = null;
     setError('');
     setStatus('Profile loop closed. Drag vertices or edit their coordinates.');
   }
@@ -1313,6 +1365,7 @@
     if (view === selectedView) return;
     if (photoPickMode) cancelPhotoPicking();
     selectedView = view;
+    drawingCursor = null;
     activePan = null;
     drag = null;
   }
@@ -1407,6 +1460,12 @@
   }
 
   function handlePanePointerMove(event: PointerEvent, view: ProfileView): void {
+    if (view === selectedView && (drawing || photoDrawing) && !activePan && !currentPending) {
+      drawingCursor = { scopeKey, view, point: snapPoint(profilePointFromPointer(
+        event.clientX, event.clientY, (event.currentTarget as HTMLElement).getBoundingClientRect(),
+        cameraBounds(view, boundsForView(view)),
+      )) };
+    }
     if (photoRegionStart && photoPickMode === 'region') {
       movePhotoRegion(event, view);
       return;
@@ -1940,12 +1999,14 @@
           <p class="inline-hint">Set scale and recognize the photo before adding geometry. Clear the photo to draw a separate manual profile.</p>
         {:else}
           <div class="tool-row">
-            <button class="action-button" type="button" onclick={beginDrawing} disabled={currentPending !== null || drawing}>
-              Draw profile
+            <button class="action-button" type="button" onclick={() => drawing ? cancelDrawing() : beginDrawing()} disabled={currentPending !== null}>
+              {drawing ? 'Cancel drawing' : 'Draw profile'}
             </button>
             <button class="action-button action-button--secondary" type="button" onclick={undoLastEdit} disabled={!canUndo}>Undo</button>
             {#if drawing}
-              <button class="action-button action-button--secondary" type="button" onclick={closeLoop}>Close loop</button>
+              {#if currentEdit.drawingTool === 'polyline'}
+                <button class="action-button action-button--secondary" type="button" onclick={closeLoop}>Close loop</button>
+              {/if}
             {/if}
           </div>
           <label>
@@ -2016,7 +2077,7 @@
               </label>
             </div>
           {/if}
-          <p class="inline-hint">Click to place vertices. Close the loop, then drag handles or edit coordinates.</p>
+          <p class="inline-hint">Click to place points. Click the first point or Enter to close a polyline. Backspace removes a point; Esc cancels. Drag handles after closing.</p>
         {/if}
       </section>
 
@@ -2071,6 +2132,7 @@
           {@const live = livePaperForView(view)}
           {@const rawCamera = Boolean(live && live.previewKind === 'camera' && live.state !== 'stopped')}
           {@const projectionDrawing = projectionDrawingForView(view)}
+          {@const cursor = drawingCursor?.scopeKey === scopeKey && drawingCursor.view === view ? drawingCursor.point : null}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
           <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -2087,6 +2149,8 @@
             }}
             onpointerup={(event) => handlePanePointerUp(event, view)}
             onpointercancel={(event) => handlePanePointerUp(event, view)}
+            onpointerleave={() => { if (drawingCursor?.view === view) drawingCursor = null; }}
+            onkeydown={(event) => handleDrawingKey(event, view)}
             onclick={(event) => {
               if (sourceMode === 'camera') selectView(view);
               else if (photoPickMode && selectedView === view) pickPhotoPoint(event, view);
@@ -2189,12 +2253,13 @@
                 {/each}
                 {#if photo.drawing && photo.draftPointsMm.length}
                   {@const draftPoints = photo.draftPointsMm.map(([x, y]) => `${x},${-y}`).join(' ')}
-                  {#if photo.correctionTool === 'line' && photo.draftPointsMm.length === 1}
-                    <circle class="drawing-primitive drawing-primitive--draft" cx={photo.draftPointsMm[0]![0]} cy={-photo.draftPointsMm[0]![1]} r={Math.max(0.2, 5 / paneCameras[view].zoom)} />
-                  {:else if photo.correctionTool === 'line'}
-                    <line class="drawing-primitive drawing-primitive--draft" x1={photo.draftPointsMm[0]![0]} y1={-photo.draftPointsMm[0]![1]} x2={photo.draftPointsMm[1]![0]} y2={-photo.draftPointsMm[1]![1]} />
-                  {:else}
-                    <polyline class="drawing-primitive drawing-primitive--draft" points={draftPoints} />
+                  <polyline class="drawing-primitive drawing-primitive--draft" points={draftPoints} />
+                  {#each photo.draftPointsMm as point, index (`photo-draft-${index}`)}
+                    <circle class="sketch-draft-point" data-testid="sketch-draft-point" cx={point[0]} cy={-point[1]} r={5 / paneCameras[view].zoom} />
+                  {/each}
+                  {#if cursor && selectedView === view}
+                    {@const last = photo.draftPointsMm[photo.draftPointsMm.length - 1]!}
+                    <line class="sketch-draft-preview" data-testid="sketch-draft-preview" x1={last[0]} y1={-last[1]} x2={cursor[0]} y2={-cursor[1]} />
                   {/if}
                 {/if}
               {:else if photo}
@@ -2220,17 +2285,36 @@
               {/if}
               {#each viewLoops as loop, loopIndex (`${view}-${loopIndex}-${loop.points.length}-${loop.role}`)}
                 {@const pathPoints = loop.points.map(([x, y]) => `${x},${-y}`).join(' ')}
+                {@const isDraft = profileEditorFor(view).drawing && loopIndex === profileEditorFor(view).draftLoopIndex}
                 {#if loop.analyticCircle}
                   <circle class={['analytic-profile-circle', loop.role === 'hole' && 'hole', profileEditorFor(view).selectedLoopIndex === loopIndex && 'selected-loop']} data-testid="analytic-profile-circle" cx={loop.analyticCircle.centerMm[0]} cy={-loop.analyticCircle.centerMm[1]} r={loop.analyticCircle.radiusMm} />
+                {:else if isDraft}
+                  <polyline points={pathPoints} class="open-draft selected-loop" />
+                  {#if cursor && loop.points.length && selectedView === view}
+                    {@const first = loop.points[0]!}
+                    {@const last = loop.points[loop.points.length - 1]!}
+                    {#if profileEditorFor(view).drawingTool === 'circle'}
+                      <circle class="sketch-draft-preview" data-testid="sketch-draft-preview" cx={first[0]} cy={-first[1]} r={Math.hypot(cursor[0] - first[0], cursor[1] - first[1])} />
+                    {:else if profileEditorFor(view).drawingTool === 'rectangle'}
+                      <rect class="sketch-draft-preview" data-testid="sketch-draft-preview" x={Math.min(first[0], cursor[0])} y={-Math.max(first[1], cursor[1])} width={Math.abs(cursor[0] - first[0])} height={Math.abs(cursor[1] - first[1])} />
+                    {:else}
+                      {@const closeToStart = loop.points.length >= 3 && Math.hypot(cursor[0] - first[0], cursor[1] - first[1]) * paneCameras[view].zoom <= 10}
+                      <line class="sketch-draft-preview" data-testid="sketch-draft-preview" x1={last[0]} y1={-last[1]} x2={closeToStart ? first[0] : cursor[0]} y2={closeToStart ? -first[1] : -cursor[1]} />
+                      {#if closeToStart}<circle class="sketch-close-target" cx={first[0]} cy={-first[1]} r={10 / paneCameras[view].zoom} />{/if}
+                    {/if}
+                  {/if}
+                  {#each loop.points as point, index (`draft-${index}`)}
+                    <circle class="sketch-draft-point" data-testid="sketch-draft-point" cx={point[0]} cy={-point[1]} r={5 / paneCameras[view].zoom} />
+                  {/each}
                 {:else}
-                  <polygon points={pathPoints} class={[loop.role, loop.role === 'hole' && 'hole', profileEditorFor(view).selectedLoopIndex === loopIndex && 'selected-loop', profileEditorFor(view).drawing && loopIndex === profileEditorFor(view).draftLoopIndex && 'open-draft']} fill-rule="evenodd" />
+                  <polygon points={pathPoints} class={[loop.role, loop.role === 'hole' && 'hole', profileEditorFor(view).selectedLoopIndex === loopIndex && 'selected-loop']} fill-rule="evenodd" />
                 {/if}
                 {#if selectedView === view && !isViewExact && !drawing && !loop.analyticCircle}
                   {#each loop.points as point, pointIndex (`${view}-${loopIndex}-${pointIndex}`)}
                     <circle
                       cx={point[0]}
                       cy={-point[1]}
-                      r={Math.max(viewBounds.width, viewBounds.height) * 0.009}
+                      r={5 / paneCameras[view].zoom}
                       class={['vertex-handle', profileEditorFor(view).selectedLoopIndex === loopIndex && profileEditorFor(view).selectedPointIndex === pointIndex && 'selected-point']}
                       role="button"
                       tabindex="0"
@@ -2550,7 +2634,9 @@
     stroke-dasharray: 5 4;
     stroke-linecap: butt;
   }
-  .sketch-pane polygon.open-draft { fill: none; stroke-dasharray: 4 3; }
+  .open-draft, .sketch-draft-preview, .sketch-close-target { fill: none; stroke: var(--profile-secondary); stroke-width: 1.5; vector-effect: non-scaling-stroke; pointer-events: none; }
+  .sketch-draft-preview { stroke-dasharray: 5 4; }
+  .sketch-draft-point { fill: var(--profile-secondary); stroke: var(--profile-panel); stroke-width: 1.5; vector-effect: non-scaling-stroke; pointer-events: none; }
   .drawing-region { fill: color-mix(in srgb, var(--profile-secondary) 16%, transparent); stroke: var(--profile-secondary); stroke-width: 1.2; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; pointer-events: none; }
   .drawing-pick-point { fill: #f1c879; stroke: #17120a; stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
   .drawing-vertex-handle { fill: #f1c879; stroke: #241b0f; stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: all; cursor: move; }

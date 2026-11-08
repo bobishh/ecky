@@ -552,7 +552,7 @@ export async function drawRectangle(workspace: Locator, view: 'front' | 'top' | 
   const canvas = workspace.getByTestId(`profile-view-${view}`);
   const bounds = await canvas.boundingBox();
   if (!bounds) throw new Error('Profile canvas is not visible.');
-  const draftPolygon = canvas.locator('polygon.selected-loop');
+  const draftPolygon = canvas.locator('.selected-loop');
   const points = [
     { x: bounds.width * 0.28, y: bounds.height * 0.3 },
     { x: bounds.width * 0.72, y: bounds.height * 0.7 },
