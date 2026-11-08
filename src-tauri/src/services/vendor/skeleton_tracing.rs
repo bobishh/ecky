@@ -393,10 +393,8 @@ pub fn trace_skeleton(
             }
         }
     }
-    let (mut l0, mut l1, mut l2, mut l3): (usize, usize, usize, usize) =
-        (usize::max_value(), 0, 0, 0);
-    let (mut r0, mut r1, mut r2, mut r3): (usize, usize, usize, usize) =
-        (usize::max_value(), 0, 0, 0);
+    let (mut l0, mut l1, mut l2, mut l3): (usize, usize, usize, usize) = (usize::MAX, 0, 0, 0);
+    let (mut r0, mut r1, mut r2, mut r3): (usize, usize, usize, usize) = (usize::MAX, 0, 0, 0);
     let mut dr: u8 = 0;
     let mut sx: usize = 0;
 
@@ -424,7 +422,7 @@ pub fn trace_skeleton(
         sx = mj as usize;
     }
     let mut frags: Vec<Vec<[usize; 2]>> = vec![];
-    if l0 != usize::max_value() && not_empty(im, ww, hh, l0, l1, l2, l3) {
+    if l0 != usize::MAX && not_empty(im, ww, hh, l0, l1, l2, l3) {
         // if there are no white pixels, don't waste time
         merge_frags(
             &mut frags,
@@ -433,7 +431,7 @@ pub fn trace_skeleton(
             dr,
         );
     }
-    if r0 != usize::max_value() && not_empty(im, ww, hh, r0, r1, r2, r3) {
+    if r0 != usize::MAX && not_empty(im, ww, hh, r0, r1, r2, r3) {
         // if there are no white pixels, don't waste time
         merge_frags(
             &mut frags,
