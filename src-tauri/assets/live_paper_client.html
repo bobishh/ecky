@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Ecky · live paper</title>
+  <style>
+    :root { color-scheme: dark; font: 16px system-ui,sans-serif; background: #11151b; color: #e4dfd5; }
+    body { margin: auto; padding: max(20px,env(safe-area-inset-top)) 20px; max-width: 760px; }
+    h1 { color: #c49869; font-size: 1.35rem; }
+    video { display: block; width: 100%; max-height: 65vh; background: #080b10; object-fit: contain; border: 1px solid #63513c; aspect-ratio: 16/9; }
+    button { font: inherit; padding: 12px 18px; color: inherit; background: #20242b; border: 1px solid #ad8256; margin: 12px 8px 0 0; }
+    button:disabled { opacity: .5; }
+    #status { min-height: 4.5em; line-height: 1.5; }
+    .help { color: #b6ada0; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <h1>Ecky · live paper</h1>
+  <video id="camera" autoplay muted playsinline aria-label="Live paper camera"></video>
+  <button id="start" type="button">Start camera</button>
+  <button id="stop" type="button" disabled>Stop camera</button>
+  <p id="status" role="status">Place the printed sheet flat. Keep all four markers visible.</p>
+  <p class="help">Black pen on white paper. Print at 100% and check the 50 mm scale segment. Keep this page visible while streaming. Camera video travels directly to Ecky over the local network.</p>
+  <script type="module" src="/capture-assets/live_paper_client.mjs"></script>
+</body>
+</html>

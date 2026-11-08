@@ -991,7 +991,7 @@ fn zhang_suen_thin(mut foreground: Vec<bool>, width: u32, height: u32) -> Vec<bo
     foreground
 }
 
-fn fit_primitives(
+pub(crate) fn fit_primitives(
     skeleton: &[bool],
     width: u32,
     height: u32,

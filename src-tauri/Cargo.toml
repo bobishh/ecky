@@ -51,6 +51,8 @@ regex = "1.12.3"
 rustpython-parser = "0.4.0"
 rustpython-ast = { version = "0.4.0", features = ["visitor"] }
 steel_core = { package = "steel-core", version = "0.8.2" }
+locus-core = { version = "=0.10.0", default-features = false }
+imageproc = { version = "=0.27.0", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 mdns-sd = "0.13"
 usvg = "0.40"
@@ -67,6 +69,9 @@ geo = "0.29.3"
 fs2 = "0.4"
 im-rc = "15.1.0"
 meshopt = "0.6.2"
+webrtc = "=0.14.0"
+openh264 = "=0.9.9"
+rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.25"

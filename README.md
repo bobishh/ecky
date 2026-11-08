@@ -39,6 +39,37 @@ are left untouched and reported in app logs.
 
 For a concrete example, the repository contains a [bicycle bottle holder](sites/landing/src/models/bicycle-bottle-holder.ecky) and a separate [frame mount rail](sites/landing/src/models/bottle-holder-frame-mount-rail.ecky). Their source includes dimensions for the bottle, frame, walls, and dovetail connection. These are modeling examples; the files alone do not establish physical fit.
 
+## Live paper sketch
+
+In the expanded **SKETCH** workspace, start **Live paper**. Open the local camera
+certificate trust page on the iPhone, print the linked A4 template at actual size,
+and check its 50 mm scale segment. Scan the camera QR code in Safari, allow camera
+access, and keep all four markers visible. Phone and computer use the same local
+network. The desktop capture server supplies HTTPS and WebRTC signaling.
+
+The corrected 160 × 220 mm paper appears beneath the sketch grid. Stable pen
+points, lines, circles, and polylines enter after three agreeing observations.
+Select geometry to edit coordinates, confirm uncertain junctions or broken strokes,
+or remove unwanted observations. Missing markers pause updates; accepted geometry
+survives occlusion and reconnects. **Use accepted profile** transfers closed geometry
+to the current view's normal editing and Apply flow, preserving analytic circles.
+Open strokes stay available for correction in the live capture. Stop and start a
+new capture to bind another model or view. Accepted draft geometry is saved locally and restored with its IDs after restart.
+Video previews remain transient; frames create no model versions.
+
+Video stays local: Rust receives H.264 over WebRTC, decodes with bundled-source
+OpenH264, detects ArUco markers with `locus-core`, rectifies and thresholds with
+`imageproc`, and uses the MIT Skeleton Tracing implementation with Ecky's existing
+primitive fitter. No system OpenCV SDK is required. The prototype's automated
+camera fixtures use known synthetic dimensions. Check physical dimensions on the
+actual printed sheet; iPhone camera performance, permission, TLS trust, and screen
+behavior need device validation.
+
+The [live paper contract](openspec/changes/live-paper-sketch/spec.md) defines the
+acceptance criteria. `scripts/generate_live_paper_template.py` regenerates the
+bundled PDF and deterministic fixtures; its development dependencies are listed
+in that script. Production uses the bundled template.
+
 ## The model source
 
 Save this as `model.ecky`:

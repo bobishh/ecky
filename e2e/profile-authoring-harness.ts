@@ -11,9 +11,15 @@ type ProfileMockOptions = {
   missingArtifact?: boolean;
   applyMode?: 'success' | 'render-error' | 'validation-error';
   drawingMode?: 'success' | 'recognition-error' | 'review-error';
+  livePaper?: boolean;
+  restoreForeignLivePaper?: boolean;
 };
 
 export async function installProfileMocks(page: Page, options: ProfileMockOptions = {}) {
+  await page.route('https://127.0.0.1:4444/**', (route) => route.fulfill({
+    status: 200, contentType: 'image/svg+xml',
+    body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="white"/><path d="M10 10h25v25H10zM65 10h25v25H65zM10 65h25v25H10z" fill="black"/></svg>',
+  }));
   const [sourceImage, transformedPreview] = await Promise.all([
     readFile(new URL('./fixtures/plate-drawing-source.png', import.meta.url)),
     readFile(new URL('./fixtures/plate-drawing-preview.png', import.meta.url)),
@@ -156,7 +162,10 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
       preparedDrawingPath: null as string | null,
       recognitionCalls: [] as Array<Record<string, any>>,
       reviewCalls: [] as Array<Record<string, any>>,
+      livePaperStarts: [] as Array<Record<string, unknown>>,
     };
+    const makeLivePaper = (scopeKey: string, view: string) => ({ sessionId: 'live-test', scopeKey, view, trustUrl: null, phoneUrl: 'https://127.0.0.1:4444/live-paper?session=live-test&token=test', phoneQrDataUrl: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"%3E%3Crect width="100" height="100" fill="white"/%3E%3C/svg%3E', templateDataUrl: 'data:application/pdf;base64,JVBERi0xLjQK', templateUrl: 'https://127.0.0.1:4444/api/live-paper/live-test/template.pdf?token=test', state: 'waiting', detail: 'Open the camera link on your phone.', sequence: 0, widthMm: 160, heightMm: 220, previewDataUrl: null, accepted: [], pending: [], diagnostics: [] });
+    let livePaper: any = mockOptions.restoreForeignLivePaper ? { ...makeLivePaper('other-project', 'top'), accepted: [{kind: 'line', id: 'foreign-line', startMm: [0, 0], endMm: [20, 0], residualMm: 0.1}] } : null;
     const pendingDerivationRejectors: Array<(error: Error) => void> = [];
     mock.rejectPendingDerivation = () => {
       for (const reject of pendingDerivationRejectors.splice(0)) reject(new Error('Mock profile derivation failed.'));
@@ -165,11 +174,23 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
     (window as any).__TAURI_INTERNALS__ = (window as any).__TAURI_INTERNALS__ || {};
     (window as any).__TAURI_INTERNALS__.convertFileSrc = (path: string) => path;
     const eventHandlers = new Map<string, number[]>();
+    (window as any).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+      unregisterListener: (event: string, id: number) => {
+        eventHandlers.set(event, (eventHandlers.get(event) ?? []).filter((handler) => handler !== id));
+      },
+    };
     let nextCallbackId = 1;
     (window as any).__TAURI_INTERNALS__.transformCallback = (callback: unknown) => {
       const callbackId = nextCallbackId++;
       (window as any)[`_${callbackId}`] = callback;
       return callbackId;
+    };
+
+    (mock as any).emitLivePaper = (patch: Record<string, unknown>) => {
+      livePaper = { ...livePaper, ...patch };
+      for (const id of eventHandlers.get('live-paper-state') ?? []) {
+        (window as any)[`_${id}`]?.({ event: 'live-paper-state', id, payload: livePaper });
+      }
     };
 
     const workspaceProjection = (preferredMessageId?: string | null) => {
@@ -191,6 +212,41 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
     };
 
     (window as any).__TAURI_INTERNALS__.invoke = async (command: string, args?: Record<string, any>) => {
+      if (command === 'get_live_paper') return livePaper;
+      if (command === 'start_live_paper') {
+        mock.livePaperStarts.push(args ?? {});
+        livePaper = makeLivePaper(String(args?.scopeKey ?? ''), String(args?.view ?? 'front'));
+        return livePaper;
+      }
+      if (command === 'stop_live_paper') return livePaper = { ...livePaper, state: 'stopped', detail: 'Capture stopped. Accepted geometry retained.' };
+      if (command === 'confirm_live_paper') {
+        const primitive = livePaper.pending.find((item: any) => item.id === args?.primitiveId);
+        livePaper = { ...livePaper, accepted: [...livePaper.accepted, primitive], pending: livePaper.pending.filter((item: any) => item.id !== args?.primitiveId) };
+        return livePaper;
+      }
+      if (command === 'reject_live_paper') {
+        livePaper = { ...livePaper, accepted: livePaper.accepted.filter((item: any) => item.id !== args?.primitiveId), pending: livePaper.pending.filter((item: any) => item.id !== args?.primitiveId) };
+        return livePaper;
+      }
+      if (command === 'edit_live_paper') {
+        const edited = args?.primitive;
+        livePaper = { ...livePaper, accepted: livePaper.accepted.map((item: any) => item.id === edited?.id ? edited : item), pending: livePaper.pending.map((item: any) => item.id === edited?.id ? edited : item) };
+        return livePaper;
+      }
+      if (command === 'prepare_live_paper_profile') {
+        const circle = livePaper.accepted.find((item: any) => item.kind === 'circle');
+        const outline = [[10, 10], [90, 10], [90, 60], [10, 60]];
+        return {
+          loops: [
+            { role: 'outer', parentIndex: null, points: outline },
+            { role: 'hole', parentIndex: 0, points: [] },
+          ],
+          sketchLoops: [
+            { role: 'outer', parentIndex: null, geometry: { kind: 'polygon', pointsMm: outline } },
+            { role: 'hole', parentIndex: 0, geometry: { kind: 'circle', centerMm: circle.centerMm, radiusMm: circle.radiusMm } },
+          ], diagnostics: [],
+        };
+      }
       if (command === 'plugin:event|listen') {
         const event = String(args?.event ?? '');
         eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), Number(args?.handler)]);

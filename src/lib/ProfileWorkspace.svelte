@@ -1,4 +1,7 @@
 <script lang="ts">
+  import LivePaperPanel from './LivePaperPanel.svelte';
+  import LivePaperOverlay from './LivePaperOverlay.svelte';
+  import { prepareLivePaperProfile, livePaperStateLabel, livePaperScopeToken, type LivePaperSnapshot } from './livePaper';
   import {
     normalizeProfileLoops,
     profileBounds,
@@ -175,6 +178,62 @@
   let photoRequestSequence = 0;
   let photoImportRequestId = 0;
   let photoPrimitiveSequence = 0;
+  let livePaper = $state.raw<LivePaperSnapshot | null>(null);
+  let liveSelectedId = $state<string | null>(null);
+  let liveScopeBinding = $state.raw<{ sourceScope: string; token: string } | null>(null);
+  let liveScopeToken = $derived(liveScopeBinding?.sourceScope === scopeKey ? liveScopeBinding.token : '');
+
+  // WebCrypto is asynchronous; retain the source scope to discard obsolete digests.
+  $effect(() => {
+    const sourceScope = scopeKey;
+    let current = true;
+    void livePaperScopeToken(sourceScope).then((token) => {
+      if (!current) return;
+      liveScopeBinding = { sourceScope, token };
+      if (livePaper?.scopeKey === token) bindLivePaperView();
+    }).catch((cause) => {
+      if (current) setError(`Could not bind live paper to this model: ${formatBackendError(cause)}`);
+    });
+    return () => { current = false; };
+  });
+
+  function livePaperForView(view: ProfileView): LivePaperSnapshot | null {
+    return liveScopeToken && livePaper?.view === view && livePaper.scopeKey === liveScopeToken ? livePaper : null;
+  }
+
+  function livePaperProfileView(): ProfileView | null {
+    const view = livePaper?.view;
+    return view === 'front' || view === 'top' || view === 'side' ? view : null;
+  }
+
+  function bindLivePaperView(): void {
+    const view = livePaperProfileView();
+    if (!view || !liveScopeToken || livePaper?.scopeKey !== liveScopeToken) return;
+    selectedView = view;
+    resetPaneCamera(view);
+  }
+
+  async function useLivePaperProfile(): Promise<void> {
+    if (!livePaper || !liveScopeToken || livePaper.scopeKey !== liveScopeToken) throw new Error('Stop capture, then start live paper for the current model before using its profile.');
+    const requestScope = scopeKey;
+    const view = livePaperProfileView();
+    if (!view) throw new Error('Choose FRONT, TOP, or SIDE for live paper.');
+    const profile = await prepareLivePaperProfile(livePaper.sessionId, liveScopeToken);
+    if (requestScope !== scopeKey) return;
+    selectedView = view;
+    const loops = profile.loops.map((loop, index) => {
+      const geometry = profile.sketchLoops?.[index]?.geometry;
+      return geometry?.kind === 'circle'
+        ? { ...loop, points: profileCirclePoints(geometry.centerMm, geometry.radiusMm), analyticCircle: geometry }
+        : loop;
+    });
+    geometryEvidence = { ...geometryEvidence, [view]: null };
+    photoStates = { ...photoStates, [view]: null };
+    replaceLoops(loops);
+    patchProfileEditor(view, { placementPlane: VIEW_PLANE[view], placementOffset: '0', convertedExact: true });
+    setError('');
+    setStatus(`Live paper profile ready for normal Apply. Image-derived · check dimensions.${profile.diagnostics?.length ? ` ${profile.diagnostics.join(' ')}` : ''}`);
+  }
 
   $effect(() => {
     const entries = PROFILE_VIEWS.flatMap((view) => paneElements[view] ? [[view, paneElements[view]!] as const] : []);
@@ -1190,6 +1249,11 @@
   }
 
   function boundsForView(view: ProfileView) {
+    const live = livePaperForView(view);
+    if (live) {
+      const padding = Math.max(live.widthMm, live.heightMm) * 0.08;
+      return { minX: -padding, minY: -padding, width: live.widthMm + padding * 2, height: live.heightMm + padding * 2 };
+    }
     const photo = photoForView(view);
     if (photo?.recognition) {
       const width = photo.recognition.previewWidthPx * photo.recognition.millimetersPerPixel;
@@ -1588,6 +1652,13 @@
         {#if sourceWarning}<p class="inline-hint">{sourceWarning}</p>{/if}
       </section>
 
+      <LivePaperPanel
+        bind:snapshot={livePaper} bind:selectedId={liveSelectedId}
+        viewLabel={selectedView} scopeKey={liveScopeToken}
+        onStarted={bindLivePaperView} onUseProfile={useLivePaperProfile}
+        disabled={currentPending !== null || Boolean(disabledReason) || !liveScopeToken}
+      />
+
       <section class="control-section drawing-photo-controls" aria-label="Drawing photo">
         <h3>Drawing photo · {selectedView.toUpperCase()}</h3>
         <p class="inline-hint">Crop and perspective correction are optional. Full image works as-is; scale calibration is required.</p>
@@ -1869,6 +1940,7 @@
           {@const visibleBounds = cameraBounds(view, viewBounds)}
           {@const isViewExact = exactView(view)}
           {@const photo = photoForView(view)}
+          {@const live = livePaperForView(view)}
           {@const projectionDrawing = projectionDrawingForView(view)}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -1897,7 +1969,7 @@
           >
             <div class="sketch-pane__label">
               <button class="view-select" type="button" aria-label={`Select ${view} projection`} aria-pressed={selectedView === view} onclick={(event) => { event.stopPropagation(); selectView(view); }}>{view.toUpperCase()}</button>
-              <span>{photoForView(view)?.pending ? 'RECOGNIZING…' : photoForView(view)?.error ? 'ERROR' : viewPendingFor(view) ? (viewPendingKindFor(view) === 'profile' ? 'BUILDING PROFILE…' : 'PROJECTING…') : viewErrorFor(view) ? 'ERROR' : photoForView(view)?.accepted ? 'PROFILE ACCEPTED' : projectionDrawing && !photo ? `${projectionDrawing.visibility === 'allEdges' ? 'VISIBLE + HIDDEN' : 'VISIBLE EDGES'} · PROJECTED` : viewLoops.length ? `${viewLoops.length} LOOPS` : photoForView(view) ? 'DRAWING PHOTO' : 'NO PROFILE'}</span>
+              <span>{live ? livePaperStateLabel(live.state).toUpperCase() : photoForView(view)?.pending ? 'RECOGNIZING…' : photoForView(view)?.error ? 'ERROR' : viewPendingFor(view) ? (viewPendingKindFor(view) === 'profile' ? 'BUILDING PROFILE…' : 'PROJECTING…') : viewErrorFor(view) ? 'ERROR' : photoForView(view)?.accepted ? 'PROFILE ACCEPTED' : projectionDrawing && !photo ? `${projectionDrawing.visibility === 'allEdges' ? 'VISIBLE + HIDDEN' : 'VISIBLE EDGES'} · PROJECTED` : viewLoops.length ? `${viewLoops.length} LOOPS` : photoForView(view) ? 'DRAWING PHOTO' : 'NO PROFILE'}</span>
               <button class="sketch-pane__label-action" type="button" onclick={(event) => { event.stopPropagation(); resetPaneCamera(view); }}>FIT VIEW</button>
             </div>
             {#if photoForView(view)?.pending}
@@ -1912,10 +1984,13 @@
               <span class="pane-message">{photoPickMode === 'region' ? 'Drag a rectangle to crop the drawing.' : photoPickMode === 'calibration' ? `Click scale point ${photoForView(view)?.calibrationPoints.length === 0 ? '1' : '2'} of 2.` : `Click rectangle corner ${(photoForView(view)?.rectificationPoints.length ?? 0) + 1} of 4.`}</span>
             {:else if photoForView(view)?.drawing}
               <span class="pane-message">{photoForView(view)?.correctionTool === 'line' ? `Click endpoint ${photoForView(view)?.draftPointsMm.length === 0 ? '1' : '2'} of 2.` : `${photoForView(view)?.draftPointsMm.length ?? 0} contour points · click Close contour when ready.`}</span>
-            {:else if viewLoops.length === 0 && !projectionDrawing && !photoForView(view)?.recognition}
+            {:else if viewLoops.length === 0 && !projectionDrawing && !photoForView(view)?.recognition && !livePaperForView(view)}
               <span class="pane-message">Select a view, draw a profile, or add a drawing photo.</span>
             {/if}
             <svg class="sketch-pane__drawing" viewBox={viewBox(view)} preserveAspectRatio="xMidYMid meet" aria-label={`${view} sketch canvas`}>
+              {#if live?.previewDataUrl}
+                <image data-testid="live-paper-image" href={live.previewDataUrl} x="0" y={-live.heightMm} width={live.widthMm} height={live.heightMm} opacity="0.65" preserveAspectRatio="none" />
+              {/if}
               {#if !photo || photo.recognition}
                 <defs>
                   <pattern id={`profile-grid-${view}`} width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="scale(1,-1)">
@@ -1925,6 +2000,9 @@
                 <rect x={visibleBounds.minX} y={-visibleBounds.minY - visibleBounds.height} width={visibleBounds.width} height={visibleBounds.height} fill={`url(#profile-grid-${view})`} />
                 <line x1={0} y1={-visibleBounds.minY - visibleBounds.height} x2={0} y2={-visibleBounds.minY} class="axis-line" />
                 <line x1={visibleBounds.minX} y1={0} x2={visibleBounds.minX + visibleBounds.width} y2={0} class="axis-line" />
+              {/if}
+              {#if live}
+                <LivePaperOverlay snapshot={live} selectedId={liveSelectedId} onSelect={(id) => liveSelectedId = id} />
               {/if}
               {#if photo?.recognition}
                 {@const imageWidthMm = photo.recognition.previewWidthPx * photo.recognition.millimetersPerPixel}

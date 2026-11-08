@@ -66,6 +66,7 @@ pub mod gmsh_mesher;
 mod image_sampling;
 pub mod jev_classifier;
 pub mod lithophane;
+pub mod live_paper_rtc;
 pub mod llm;
 pub mod llm_context;
 pub mod llm_eval;
@@ -638,6 +639,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(move |app| {
+            crate::commands::live_paper::forward_events(app.handle().clone());
             let config_dir = app.handle().app_config_dir();
             let app_data_dir = app.handle().app_data_dir();
             if !config_dir.exists() {
@@ -646,6 +648,9 @@ pub fn run() {
             if !app_data_dir.exists() {
                 fs::create_dir_all(&app_data_dir)?;
             }
+            let paper_restore_warning = crate::services::live_paper::hub()
+                .configure_storage(app_data_dir.join("live-paper-draft.json"))
+                .err();
 
             let (config, config_persistence_status) =
                 load_startup_config_or_default(app.handle(), &config_dir, default_config);
@@ -660,6 +665,9 @@ pub fn run() {
                     err
                 )))
             })?;
+            if let Some(warning) = paper_restore_warning {
+                startup_warnings.push(warning);
+            }
             if let Ok(interrupted) = db::mark_interrupted_pending_messages(&conn) {
                 if interrupted > 0 {
                     eprintln!(

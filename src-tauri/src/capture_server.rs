@@ -749,9 +749,11 @@ pub fn router(state: AppState, root: PathBuf) -> Router {
             root,
             tool_cache_dir,
         })
+        .merge(crate::live_paper_rtc::router())
 }
 
 pub async fn serve(state: AppState, app: Arc<dyn PathResolver + Send + Sync>) -> io::Result<()> {
+    crate::live_paper_rtc::initialize_crypto_provider();
     let ip = local_lan_ip();
     let certificate_root = app.app_data_dir().join("capture-certificates");
     let ca = capture_ca(&certificate_root)?;

@@ -1353,6 +1353,57 @@ async applyProfileFeature(request: ProfileFeatureApplyRequest) : Promise<Result<
     else return { status: "error", error: e  as any };
 }
 },
+async startLivePaper(scopeKey: string, view: SketchView) : Promise<Result<LivePaperSnapshot, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_live_paper", { scopeKey, view }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getLivePaper() : Promise<LivePaperSnapshot | null> {
+    return await TAURI_INVOKE("get_live_paper");
+},
+async stopLivePaper(sessionId: string) : Promise<Result<LivePaperSnapshot, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("stop_live_paper", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async editLivePaper(sessionId: string, primitive: LivePaperPrimitive) : Promise<Result<LivePaperSnapshot, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("edit_live_paper", { sessionId, primitive }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async confirmLivePaper(sessionId: string, primitiveId: string) : Promise<Result<LivePaperSnapshot, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("confirm_live_paper", { sessionId, primitiveId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async rejectLivePaper(sessionId: string, primitiveId: string) : Promise<Result<LivePaperSnapshot, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reject_live_paper", { sessionId, primitiveId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async prepareLivePaperProfile(sessionId: string, scopeKey: string) : Promise<Result<LivePaperProfile, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("prepare_live_paper_profile", { sessionId, scopeKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async prepareDrawingImage(request: PrepareDrawingImageRequest) : Promise<Result<PreparedDrawingImage, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("prepare_drawing_image", { request }) };
@@ -2238,6 +2289,9 @@ export type LithophanePlacement = { mode?: LithophanePlacementMode; side?: Litho
 export type LithophanePlacementMode = "partSidePatch"
 export type LithophaneRelief = { depthMm?: number; invert?: boolean }
 export type LithophaneSide = "front" | "back" | "left" | "right" | "top" | "bottom"
+export type LivePaperPrimitive = { kind: "point"; id: string; positionMm: [number, number]; residualMm: number } | { kind: "line"; id: string; startMm: [number, number]; endMm: [number, number]; residualMm: number } | { kind: "circle"; id: string; centerMm: [number, number]; radiusMm: number; residualMm: number } | { kind: "polyline"; id: string; pointsMm: ([number, number])[]; closed: boolean; residualMm: number }
+export type LivePaperProfile = { loops: ProfileLoop[]; sketchLoops: ProfileSketchLoop[]; diagnostics: string[] }
+export type LivePaperSnapshot = { sessionId: string; scopeKey: string; view: SketchView; phoneUrl: string; phoneQrDataUrl: string; templateUrl: string; templateDataUrl: string; trustUrl: string | null; state: string; detail: string | null; sequence: number; widthMm: number; heightMm: number; previewDataUrl: string | null; accepted: LivePaperPrimitive[]; pending: LivePaperPrimitive[]; diagnostics: string[] }
 export type MacroAstSourceNode = { id: string; kind: string; label: string;
 /**
  * Byte offsets into the exact source string that was passed in.
