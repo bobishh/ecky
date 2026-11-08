@@ -13,6 +13,40 @@ async function connectCamera(workspace: Locator) {
 const cameraImage = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="640" height="480"%3E%3Crect width="640" height="480" fill="%23646b6a"/%3E%3Cpath d="M100 90h400v300H100z" fill="white"/%3E%3C/svg%3E';
 const paperImage = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="160" height="220"%3E%3Crect width="160" height="220" fill="white"/%3E%3C/svg%3E';
 
+test('camera starts without a CAD project while profile application remains disabled', async ({ page }) => {
+  await installProfileMocks(page, { livePaper: true, missingProject: true });
+  const workspace = await openSketch(page, false);
+  await workspace.getByRole('button', { name: 'Camera', exact: true }).click();
+  const dialog = workspace.getByRole('dialog', { name: 'Phone camera' });
+  const start = dialog.getByRole('button', { name: 'Start live paper' });
+  const stop = dialog.getByRole('button', { name: 'Stop live paper' });
+  await expect(start).toBeEnabled();
+  await expect(stop).toBeDisabled();
+  await start.click();
+  await expect(dialog.getByAltText('Scan to open the phone camera')).toBeVisible();
+  await expect(start).toBeDisabled();
+  await expect(stop).toBeEnabled();
+  await stop.click();
+  await expect(start).toBeEnabled();
+  await expect(stop).toBeDisabled();
+  await expect(dialog.getByAltText('Scan to open the phone camera')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(workspace.getByRole('button', { name: 'Apply profile' })).toBeDisabled();
+});
+
+test('camera binding failure explains why Start is disabled inside the camera dialog', async ({ page }) => {
+  await installProfileMocks(page, { livePaper: true });
+  await page.addInitScript(() => {
+    Object.defineProperty(window.crypto.subtle, 'digest', { value: () => Promise.reject(new Error('Camera scope digest unavailable')) });
+  });
+  const workspace = await openSketch(page, false);
+  await workspace.getByRole('button', { name: 'Camera', exact: true }).click();
+  const dialog = workspace.getByRole('dialog', { name: 'Phone camera' });
+  await expect(dialog.getByRole('button', { name: 'Start live paper' })).toBeDisabled();
+  await expect(dialog.getByRole('status')).toContainText('Camera scope digest unavailable');
+  await expect(dialog.getByRole('button', { name: 'Stop live paper' })).toBeDisabled();
+});
+
 // Given a paired stream, when Rust publishes corrected paper and accepted primitives,
 // then Sketch shows metric geometry, supports correction and uses normal profile Apply.
 test('live paper projects backend geometry and transfers an analytic profile to normal Apply', async ({ page }, testInfo) => {

@@ -9,6 +9,7 @@ type ProfileMockOptions = {
   nativeProjectionDirectory?: string;
   analyticProjectionCurves?: boolean;
   missingArtifact?: boolean;
+  missingProject?: boolean;
   applyMode?: 'success' | 'render-error' | 'validation-error';
   drawingMode?: 'success' | 'recognition-error' | 'review-error';
   livePaper?: boolean;
@@ -278,8 +279,8 @@ export async function installProfileMocks(page: Page, options: ProfileMockOption
       if (command === 'get_boot_projection') {
         return {
           config,
-          history: [{ ...thread, versionCount: messages.length }],
-          workspace: workspaceProjection('profile-version-1'),
+          history: mockOptions.missingProject ? [] : [{ ...thread, versionCount: messages.length }],
+          workspace: mockOptions.missingProject ? null : workspaceProjection('profile-version-1'),
           selectedPartId: null,
         };
       }

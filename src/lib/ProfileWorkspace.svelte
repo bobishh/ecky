@@ -2119,7 +2119,9 @@
         </label>
         <LivePaperPanel bind:snapshot={livePaper} viewLabel={selectedView} scopeKey={liveScopeToken}
           onStarted={bindLivePaperView} onOpen={() => chooseSketchSource('camera')}
-          disabled={currentPending !== null || Boolean(disabledReason) || !liveScopeToken} />
+          startDisabledReason={currentPending !== null
+            ? 'Wait for the current profile operation to finish.'
+            : !liveScopeToken ? currentErrorText || 'Preparing camera session…' : null} />
       </div>
       </div>
       <div class={['sketch-workspace__panes', viewLayout === 'single' && 'sketch-workspace__panes--single']} data-testid="profile-projection-views">

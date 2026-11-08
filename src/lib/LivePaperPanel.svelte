@@ -4,13 +4,13 @@
   import { formatBackendError, startLivePaper, stopLivePaper } from './tauri/client';
   import { getLivePaper, livePaperStateLabel, type LivePaperSnapshot } from './livePaper';
 
-  let { snapshot = $bindable<LivePaperSnapshot | null>(null), viewLabel, scopeKey, onStarted, onOpen, disabled = false }: {
+  let { snapshot = $bindable<LivePaperSnapshot | null>(null), viewLabel, scopeKey, onStarted, onOpen, startDisabledReason = null }: {
     snapshot?: LivePaperSnapshot | null;
     viewLabel: 'front' | 'top' | 'side';
     scopeKey: string;
     onStarted: () => void;
     onOpen: () => void;
-    disabled?: boolean;
+    startDisabledReason?: string | null;
   } = $props();
 
   let busy = $state(false);
@@ -104,9 +104,9 @@
           <a class="action-button action-button--secondary" href={snapshot.templateDataUrl} download={`ecky-live-paper-${templateView}.pdf`}>Print {templateView.toUpperCase()} template</a>
         {/if}
       </section>
-      <p class="camera-error" role="status">{error || '\u00a0'}</p>
+      <p id="camera-action-status" class={['camera-action-status', error && 'camera-action-status--error']} role="status">{error || startDisabledReason || (busy ? 'Updating camera session…' : '\u00a0')}</p>
       <footer class="camera-dialog__actions">
-        <button class="action-button action-button--secondary" type="button" onclick={() => action(() => startLivePaper(scopeKey, viewLabel), true)} disabled={busy || active || disabled}>Start live paper</button>
+        <button class="action-button action-button--secondary" type="button" aria-describedby="camera-action-status" onclick={() => action(() => startLivePaper(scopeKey, viewLabel), true)} disabled={busy || active || Boolean(startDisabledReason)}>Start live paper</button>
         <button class="action-button action-button--secondary" type="button" onclick={() => action(() => stopLivePaper(snapshot!.sessionId))} disabled={busy || !active}>Stop live paper</button>
         <button class="action-button action-button--secondary" type="button" onclick={() => dialogElement.close()}>Done</button>
       </footer>
@@ -137,7 +137,8 @@
   a { color: var(--profile-secondary); font-size: 0.72rem; }
   label { display: grid; gap: 0.3rem; color: var(--profile-muted); font-size: 0.72rem; }
   input { box-sizing: border-box; width: 100%; min-height: 2rem; padding: 0.35rem 0.45rem; border: 1px solid var(--profile-border); border-radius: 0; background: var(--profile-bg); color: var(--profile-text); font: inherit; }
-  .camera-error { min-height: 1.2rem; color: var(--red, #df9e86); overflow-wrap: anywhere; }
+  .camera-action-status { min-height: 1.2rem; overflow-wrap: anywhere; }
+  .camera-action-status--error { color: var(--red, #df9e86); }
   .camera-dialog__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.5rem; }
   @media (max-width: 600px) { .pairing-details { grid-template-columns: 1fr; } }
 </style>
