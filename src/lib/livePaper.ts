@@ -1,16 +1,9 @@
-import { invoke } from '@tauri-apps/api/core';
-import type { LivePaperPrimitive, LivePaperProfile, LivePaperSnapshot } from './tauri/contracts';
+import type { LivePaperPrimitive, LivePaperSnapshot } from './tauri/contracts';
 export type { LivePaperPrimitive, LivePaperProfile, LivePaperSnapshot } from './tauri/contracts';
 
 export type LivePaperPoint = Extract<LivePaperPrimitive, { kind: 'point' }>['positionMm'];
 
-export function getLivePaper(): Promise<LivePaperSnapshot | null> {
-  return invoke('get_live_paper');
-}
-
-export function prepareLivePaperProfile(sessionId: string, scopeKey: string): Promise<LivePaperProfile> {
-  return invoke('prepare_live_paper_profile', { sessionId, scopeKey });
-}
+export { getLivePaper, prepareLivePaperProfile } from './tauri/client';
 
 export function livePaperCoordinates(primitive: LivePaperPrimitive): LivePaperPoint[] {
   if (primitive.kind === 'point') return [primitive.positionMm];

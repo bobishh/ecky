@@ -1,8 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { formatBackendError } from './tauri/client';
+  import { formatBackendError, startLivePaper, stopLivePaper, editLivePaper, confirmLivePaper, rejectLivePaper } from './tauri/client';
   import {
     editLivePaperCoordinate, getLivePaper, livePaperCoordinates, livePaperStateLabel,
     type LivePaperPrimitive, type LivePaperSnapshot,
@@ -61,21 +60,17 @@
     return () => { visible = false; unlisten?.(); };
   });
 
-  async function action(command: string, args?: Record<string, unknown>): Promise<void> {
+  async function action(operation: () => Promise<LivePaperSnapshot>, started = false): Promise<void> {
     if (busy) return;
     busy = true;
     error = '';
     try {
-      if (command === 'start_live_paper') {
-        const next = await invoke<LivePaperSnapshot>(command, { scopeKey, view: viewLabel });
-        if (!visible) return;
-        snapshot = next;
+      const next = await operation();
+      if (!visible) return;
+      snapshot = next;
+      if (started) {
         selectedId = null;
         onStarted();
-      } else {
-        await invoke(command, { sessionId: snapshot?.sessionId, ...args });
-        const next = await getLivePaper();
-        if (visible) snapshot = next;
       }
     } catch (cause) {
       if (visible) error = formatBackendError(cause);
@@ -87,14 +82,15 @@
   function editCoordinate(primitive: LivePaperPrimitive, index: number, axis: 0 | 1, value: string): void {
     try {
       if (value.trim() === '') throw new Error('Coordinate must be a finite number.');
-      void action('edit_live_paper', { primitive: editLivePaperCoordinate(primitive, index, axis, Number(value)) });
+      const edited = editLivePaperCoordinate(primitive, index, axis, Number(value));
+      void action(() => editLivePaper(snapshot!.sessionId, edited));
     } catch (cause) { error = formatBackendError(cause); }
   }
 
   function editRadius(primitive: Extract<LivePaperPrimitive, { kind: 'circle' }>, value: string): void {
     const radiusMm = Number(value);
     if (!Number.isFinite(radiusMm) || radiusMm <= 0) { error = 'Radius must be greater than zero.'; return; }
-    void action('edit_live_paper', { primitive: { ...primitive, radiusMm } });
+    void action(() => editLivePaper(snapshot!.sessionId, { ...primitive, radiusMm }));
   }
 
   async function useProfile(): Promise<void> {
@@ -110,8 +106,8 @@
   <h3>Live paper · {(matchesScope ? snapshot!.view : viewLabel).toUpperCase()}</h3>
   <p>Print at 100%, check the scale segment, then open the camera link on iPhone Safari.</p>
   <div class="actions">
-    <button type="button" onclick={() => action('start_live_paper')} disabled={busy || active || disabled}>Start live paper</button>
-    <button type="button" onclick={() => action('stop_live_paper')} disabled={busy || !active}>Stop live paper</button>
+    <button type="button" onclick={() => action(() => startLivePaper(scopeKey, viewLabel), true)} disabled={busy || active || disabled}>Start live paper</button>
+    <button type="button" onclick={() => action(() => stopLivePaper(snapshot!.sessionId))} disabled={busy || !active}>Stop live paper</button>
   </div>
   <div class="connection" aria-live="polite" data-testid="live-paper-state">
     <strong>{snapshot ? livePaperStateLabel(snapshot.state) : 'Camera not connected'}</strong>
@@ -157,8 +153,8 @@
         {/if}
       </div>
       <div class="actions">
-        <button type="button" disabled={!needsConfirmation || busy || !matchesScope} onclick={() => action('confirm_live_paper', { primitiveId: current?.id })}>Confirm geometry</button>
-        <button type="button" disabled={busy || !matchesScope} onclick={() => action('reject_live_paper', { primitiveId: current?.id })}>Remove geometry</button>
+        <button type="button" disabled={!needsConfirmation || busy || !matchesScope} onclick={() => action(() => confirmLivePaper(snapshot!.sessionId, current!.id))}>Confirm geometry</button>
+        <button type="button" disabled={busy || !matchesScope} onclick={() => action(() => rejectLivePaper(snapshot!.sessionId, current!.id))}>Remove geometry</button>
       </div>
     {/if}
     <button type="button" onclick={useProfile} disabled={busy || disabled || !matchesScope || snapshot.accepted.length === 0}>Use accepted profile</button>

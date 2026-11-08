@@ -23,6 +23,10 @@ import {
   type ProfileFeatureApplyRequest,
   type PrepareDrawingImageRequest,
   type PreparedDrawingImage,
+  type LivePaperSnapshot,
+  type LivePaperPrimitive,
+  type LivePaperProfile,
+  type SketchView,
   type RecognizeDrawingProfileRequest,
   type DrawingRecognitionResponse,
   type DrawingProfileReviewResponse,
@@ -1544,6 +1548,34 @@ export async function deriveProfileGeometry(request: ProfileGeometryRequest) {
 
 export async function projectProfileDrawing(request: ProjectProfileDrawingRequest): Promise<ProfileDrawingProjectionResponse> {
   return invokeCommand(commands.projectProfileDrawing(request));
+}
+
+export async function startLivePaper(scopeKey: string, view: SketchView): Promise<LivePaperSnapshot> {
+  return invokeCommand(commands.startLivePaper(scopeKey, view));
+}
+
+export async function getLivePaper(): Promise<LivePaperSnapshot | null> {
+  return commands.getLivePaper();
+}
+
+export async function stopLivePaper(sessionId: string): Promise<LivePaperSnapshot> {
+  return invokeCommand(commands.stopLivePaper(sessionId));
+}
+
+export async function editLivePaper(sessionId: string, primitive: LivePaperPrimitive): Promise<LivePaperSnapshot> {
+  return invokeCommand(commands.editLivePaper(sessionId, primitive));
+}
+
+export async function confirmLivePaper(sessionId: string, primitiveId: string): Promise<LivePaperSnapshot> {
+  return invokeCommand(commands.confirmLivePaper(sessionId, primitiveId));
+}
+
+export async function rejectLivePaper(sessionId: string, primitiveId: string): Promise<LivePaperSnapshot> {
+  return invokeCommand(commands.rejectLivePaper(sessionId, primitiveId));
+}
+
+export async function prepareLivePaperProfile(sessionId: string, scopeKey: string): Promise<LivePaperProfile> {
+  return invokeCommand(commands.prepareLivePaperProfile(sessionId, scopeKey));
 }
 
 export async function prepareDrawingImage(request: PrepareDrawingImageRequest): Promise<PreparedDrawingImage> {
