@@ -50,10 +50,10 @@ network. The desktop capture server supplies HTTPS and WebRTC signaling.
 
 The live camera fills the Sketch pane immediately, before markers are found.
 The phone uses a full viewport viewfinder with overlaid controls and shows the
-whole camera frame by default. Rotating the phone updates capture constraints;
-Rust applies the frame's negotiated video orientation before preview and recognition.
-Once its four markers
-match the selected view, corrected 160 × 220 mm paper appears beneath the grid.
+whole camera frame by default. Rotation keeps the browser's camera track intact.
+The stream requests detail priority so thin pen strokes remain clear. Rust applies
+the frame's negotiated video orientation before preview and recognition. Once its
+four markers match the selected view, corrected 160 × 220 mm paper appears beneath the grid.
 Switch views while the camera stays connected; each view retains its own draft.
 A different view’s sheet stays visible but cannot add geometry to the wrong view.
 Stable pen points, lines, circles, and polylines enter after three agreeing observations.

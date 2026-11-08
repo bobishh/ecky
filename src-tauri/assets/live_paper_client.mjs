@@ -7,12 +7,10 @@ const stopButton = document.querySelector('#stop');
 const status = document.querySelector('#status');
 const help = document.querySelector('#help');
 const wholeFrame = document.querySelector('#whole-frame');
-const portraitLayout = window.matchMedia('(orientation: portrait)');
 let peer = null;
 let stream = null;
 let wakeLock = null;
 let generation = 0;
-let constraintUpdate = Promise.resolve();
 
 function report(message) { status.textContent = message; }
 
@@ -26,36 +24,19 @@ function updateViewport() {
 }
 
 function cameraConstraints() {
-  const portrait = portraitLayout.matches;
+  const portrait = window.matchMedia('(orientation: portrait)').matches;
   return {
     facingMode: { ideal: 'environment' },
     width: { ideal: portrait ? 720 : 1280, max: portrait ? 1080 : 1920 },
     height: { ideal: portrait ? 1280 : 720, max: portrait ? 1920 : 1080 },
-    aspectRatio: { ideal: portrait ? 9 / 16 : 16 / 9 },
     frameRate: { ideal: 15, max: 20 },
   };
-}
-
-function refreshCameraOrientation() {
-  const attempt = generation;
-  const currentStream = stream;
-  constraintUpdate = constraintUpdate.then(async () => {
-    if (!currentStream || stream !== currentStream || attempt !== generation) return;
-    const track = currentStream.getVideoTracks()[0];
-    if (!track) return;
-    try { await track.applyConstraints(cameraConstraints()); }
-    catch {
-      if (stream === currentStream && attempt === generation) report('Camera kept its current resolution. The whole frame remains visible.');
-    }
-  });
-  return constraintUpdate;
 }
 
 updateViewport();
 window.addEventListener('resize', updateViewport);
 window.visualViewport?.addEventListener('resize', updateViewport);
 window.visualViewport?.addEventListener('scroll', updateViewport);
-portraitLayout.addEventListener('change', () => { updateViewport(); void refreshCameraOrientation(); });
 
 document.querySelector('#help-open').addEventListener('click', () => help.showModal());
 document.querySelector('#help-close').addEventListener('click', () => help.close());
@@ -113,19 +94,19 @@ export async function startCamera() {
   stopButton.disabled = false;
   report('Requesting camera permission…');
   try {
-    const initialPortrait = portraitLayout.matches;
     const media = await navigator.mediaDevices.getUserMedia({ audio: false, video: cameraConstraints() });
     if (attempt !== generation) { for (const track of media.getTracks()) track.stop(); return; }
     stream = media;
+    const cameraTrack = stream.getVideoTracks()[0];
+    if (!cameraTrack) throw new Error('No video track was provided. Start the phone camera again.');
+    if ('contentHint' in cameraTrack) cameraTrack.contentHint = 'detail';
     video.srcObject = stream;
     await video.play();
-    if (attempt !== generation) return;
-    if (initialPortrait !== portraitLayout.matches) await refreshCameraOrientation();
     if (attempt !== generation) return;
     report('Connecting encrypted live video…');
     const active = new RTCPeerConnection({ iceServers: [] });
     peer = active;
-    const transceiver = active.addTransceiver(stream.getVideoTracks()[0], { direction: 'sendonly', streams: [stream] });
+    const transceiver = active.addTransceiver(cameraTrack, { direction: 'sendonly', streams: [stream] });
     const codecs = RTCRtpSender.getCapabilities?.('video')?.codecs?.filter(codec =>
       codec.mimeType.toLowerCase() === 'video/h264' && /packetization-mode=1/.test(codec.sdpFmtpLine ?? '') && /profile-level-id=42/i.test(codec.sdpFmtpLine ?? ''));
     if (codecs?.length && transceiver.setCodecPreferences) transceiver.setCodecPreferences(codecs);
@@ -135,7 +116,7 @@ export async function startCamera() {
       else if (active.connectionState === 'failed') stopCamera('Video connection failed. Check that phone and computer share a local network, then start again.');
       else if (active.connectionState === 'disconnected') report('Video connection interrupted. Accepted geometry stays in Ecky.');
     });
-    stream.getVideoTracks()[0].addEventListener('ended', () => { if (peer === active) stopCamera('Camera ended. Start again to resume live paper.'); });
+    cameraTrack.addEventListener('ended', () => { if (peer === active) stopCamera('Camera ended. Start again to resume live paper.'); });
     await active.setLocalDescription(await active.createOffer());
     await waitForIceGathering(active);
     if (attempt !== generation) return;
