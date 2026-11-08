@@ -31,7 +31,7 @@
     "test:component": "vitest run",
     "test:rust:clean": "bash scripts/test_rust_and_clean.sh",
     "clean:rust-artifacts": "cargo clean --manifest-path src-tauri/Cargo.toml -p ecky_cad -p ecky-fem",
-    "test:e2e:ci": "playwright test e2e/app.spec.ts e2e/config.spec.ts e2e/layout.spec.ts e2e/genie.spec.ts e2e/params.spec.ts e2e/component-packages.spec.ts e2e/live-paper.spec.ts",
+    "test:e2e:ci": "playwright test e2e/app.spec.ts e2e/config.spec.ts e2e/layout.spec.ts e2e/genie.spec.ts e2e/params.spec.ts e2e/component-packages.spec.ts e2e/live-paper.spec.ts e2e/live-paper-phone.spec.ts",
     "test:e2e": "playwright test",
     "test:editors": "node scripts/test_editor_support.mjs && emacs -Q --batch -L editors/emacs -l editors/emacs/test-ecky-mode.el",
     "start": "tsx server/index.ts",

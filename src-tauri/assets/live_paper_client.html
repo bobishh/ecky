@@ -35,7 +35,7 @@
 </head>
 <body>
   <main id="viewfinder" aria-label="Live paper viewfinder">
-    <video id="camera" autoplay muted playsinline aria-label="Live paper camera"></video>
+    <video id="camera" class="whole-frame" autoplay muted playsinline aria-label="Live paper camera"></video>
     <header class="top-overlay">
       <div class="top-row">
         <h1>Ecky · live paper</h1>
@@ -55,7 +55,7 @@
     </div>
     <p>Print at 100% and check the 50 mm scale segment. Keep the sheet flat, with all four markers visible.</p>
     <p>Use black pen on white paper. Keep Safari visible while streaming. Phone and computer need the same local network.</p>
-    <label class="frame-choice"><input id="whole-frame" type="checkbox">Show whole camera frame</label>
+    <label class="frame-choice"><input id="whole-frame" type="checkbox" checked>Show whole camera frame</label>
   </dialog>
   <script type="module" src="/capture-assets/live_paper_client.mjs"></script>
 </body>

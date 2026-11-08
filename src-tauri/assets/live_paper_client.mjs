@@ -7,10 +7,12 @@ const stopButton = document.querySelector('#stop');
 const status = document.querySelector('#status');
 const help = document.querySelector('#help');
 const wholeFrame = document.querySelector('#whole-frame');
+const portraitLayout = window.matchMedia('(orientation: portrait)');
 let peer = null;
 let stream = null;
 let wakeLock = null;
 let generation = 0;
+let constraintUpdate = Promise.resolve();
 
 function report(message) { status.textContent = message; }
 
@@ -24,19 +26,36 @@ function updateViewport() {
 }
 
 function cameraConstraints() {
-  const portrait = window.matchMedia('(orientation: portrait)').matches;
+  const portrait = portraitLayout.matches;
   return {
     facingMode: { ideal: 'environment' },
     width: { ideal: portrait ? 720 : 1280, max: portrait ? 1080 : 1920 },
     height: { ideal: portrait ? 1280 : 720, max: portrait ? 1920 : 1080 },
+    aspectRatio: { ideal: portrait ? 9 / 16 : 16 / 9 },
     frameRate: { ideal: 15, max: 20 },
   };
+}
+
+function refreshCameraOrientation() {
+  const attempt = generation;
+  const currentStream = stream;
+  constraintUpdate = constraintUpdate.then(async () => {
+    if (!currentStream || stream !== currentStream || attempt !== generation) return;
+    const track = currentStream.getVideoTracks()[0];
+    if (!track) return;
+    try { await track.applyConstraints(cameraConstraints()); }
+    catch {
+      if (stream === currentStream && attempt === generation) report('Camera kept its current resolution. The whole frame remains visible.');
+    }
+  });
+  return constraintUpdate;
 }
 
 updateViewport();
 window.addEventListener('resize', updateViewport);
 window.visualViewport?.addEventListener('resize', updateViewport);
 window.visualViewport?.addEventListener('scroll', updateViewport);
+portraitLayout.addEventListener('change', () => { updateViewport(); void refreshCameraOrientation(); });
 
 document.querySelector('#help-open').addEventListener('click', () => help.showModal());
 document.querySelector('#help-close').addEventListener('click', () => help.close());
@@ -94,11 +113,14 @@ export async function startCamera() {
   stopButton.disabled = false;
   report('Requesting camera permission…');
   try {
+    const initialPortrait = portraitLayout.matches;
     const media = await navigator.mediaDevices.getUserMedia({ audio: false, video: cameraConstraints() });
     if (attempt !== generation) { for (const track of media.getTracks()) track.stop(); return; }
     stream = media;
     video.srcObject = stream;
     await video.play();
+    if (attempt !== generation) return;
+    if (initialPortrait !== portraitLayout.matches) await refreshCameraOrientation();
     if (attempt !== generation) return;
     report('Connecting encrypted live video…');
     const active = new RTCPeerConnection({ iceServers: [] });

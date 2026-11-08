@@ -1,5 +1,6 @@
 //! Continuous H.264 WebRTC capture for the live paper controller.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -27,16 +28,21 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtp::codecs::h264::H264Packet;
+use webrtc::rtp::extension::video_orientation_extension::{
+    VideoOrientationExtension, VideoRotation,
+};
 use webrtc::rtp_transceiver::rtp_codec::{
-    RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
+    RTCRtpCodecCapability, RTCRtpCodecParameters, RTCRtpHeaderExtensionCapability, RTPCodecType,
 };
 use webrtc::track::track_remote::TrackRemote;
+use webrtc::util::marshal::Unmarshal;
 
 use crate::services::live_paper::hub;
 
 const MAX_SDP_BYTES: usize = 128 * 1024;
 const MAX_SAMPLE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_FRAME_PIXELS: usize = 1920 * 1080;
+const VIDEO_ORIENTATION_URI: &str = "urn:3gpp:video-orientation";
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static NEGOTIATION: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static ACTIVE: LazyLock<Mutex<Option<ActivePeer>>> = LazyLock::new(|| Mutex::new(None));
@@ -285,6 +291,15 @@ async fn offer(Path(session_id): Path<String>, Json(request): Json<Offer>) -> Re
 
 fn h264_media_engine() -> Result<MediaEngine, String> {
     let mut engine = MediaEngine::default();
+    engine
+        .register_header_extension(
+            RTCRtpHeaderExtensionCapability {
+                uri: VIDEO_ORIENTATION_URI.into(),
+            },
+            RTPCodecType::Video,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
     for (payload_type, profile) in [(102, "42001f"), (104, "42e01f")] {
         engine.register_codec(RTCRtpCodecParameters {
             capability: RTCRtpCodecCapability {
@@ -369,6 +384,70 @@ fn contains_idr(sample: &[u8]) -> bool {
         .any(|bytes| bytes[0..3] == [0, 0, 1] && bytes[3] & 0x1f == 5)
 }
 
+struct EncodedFrame {
+    data: Vec<u8>,
+    orientation: VideoOrientationExtension,
+}
+
+#[derive(Default)]
+struct FrameOrientations {
+    pending: VecDeque<(u32, VideoOrientationExtension)>,
+    current: VideoOrientationExtension,
+}
+
+impl FrameOrientations {
+    fn observe(&mut self, timestamp: u32, mut payload: &[u8]) {
+        if payload.len() != 1 {
+            return;
+        }
+        let Ok(orientation) = VideoOrientationExtension::unmarshal(&mut payload) else {
+            return;
+        };
+        if let Some((_, saved)) = self
+            .pending
+            .iter_mut()
+            .find(|(frame, _)| *frame == timestamp)
+        {
+            *saved = orientation;
+        } else {
+            // The jitter buffer retains at most 64 packets; bound metadata independently.
+            if self.pending.len() == 64 {
+                self.pending.pop_front();
+            }
+            self.pending.push_back((timestamp, orientation));
+        }
+    }
+
+    fn take(&mut self, timestamp: u32) -> VideoOrientationExtension {
+        if let Some(index) = self
+            .pending
+            .iter()
+            .position(|(frame, _)| *frame == timestamp)
+        {
+            if let Some((_, orientation)) = self.pending.remove(index) {
+                self.current = orientation;
+            }
+        }
+        self.current
+    }
+}
+
+fn orient_frame(frame: RgbImage, orientation: VideoOrientationExtension) -> DynamicImage {
+    let frame = DynamicImage::ImageRgb8(frame);
+    let frame = if orientation.flip {
+        frame.fliph()
+    } else {
+        frame
+    };
+    // CVO specifies the clockwise correction, independently of the camera direction.
+    match orientation.rotation {
+        VideoRotation::Degree0 => frame,
+        VideoRotation::Degree90 => frame.rotate90(),
+        VideoRotation::Degree180 => frame.rotate180(),
+        VideoRotation::Degree270 => frame.rotate270(),
+    }
+}
+
 async fn receive_h264(
     track: Arc<TrackRemote>,
     peer: Weak<RTCPeerConnection>,
@@ -378,7 +457,7 @@ async fn receive_h264(
 ) {
     // Encoded interframes depend on prior frames. Overflow drops until the next IDR,
     // then resumes with a fresh decoder instead of feeding a corrupted history.
-    let (encoded_tx, mut encoded_rx) = mpsc::channel::<Vec<u8>>(8);
+    let (encoded_tx, mut encoded_rx) = mpsc::channel::<EncodedFrame>(8);
     let resync = Arc::new(AtomicBool::new(false));
     let decode_resync = resync.clone();
     let decode_cancelled = cancelled.clone();
@@ -409,14 +488,14 @@ async fn receive_h264(
                 waiting_for_idr = true;
             }
             if waiting_for_idr {
-                if !contains_idr(&sample) {
+                if !contains_idr(&sample.data) {
                     continue;
                 }
                 let Ok(fresh) = Decoder::new() else { break };
                 decoder = fresh;
                 waiting_for_idr = false;
             }
-            match decoder.decode(&sample) {
+            match decoder.decode(&sample.data) {
                 Ok(Some(decoded)) => {
                     let (width, height) = decoded.dimensions();
                     if width == 0
@@ -435,7 +514,7 @@ async fn receive_h264(
                         if decode_stalled.swap(false, Ordering::AcqRel) {
                             runtime.block_on(decode_status("streaming", None));
                         }
-                        runtime.block_on(sink(DynamicImage::ImageRgb8(frame)));
+                        runtime.block_on(sink(orient_frame(frame, sample.orientation)));
                     }
                 }
                 Ok(None) => (),
@@ -448,6 +527,13 @@ async fn receive_h264(
     });
     let mut samples = SampleBuilder::new(64, H264Packet::default(), 90_000)
         .with_max_time_delay(Duration::from_millis(250));
+    let orientation_extension_id = track
+        .params()
+        .header_extensions
+        .iter()
+        .find(|extension| extension.uri == VIDEO_ORIENTATION_URI)
+        .and_then(|extension| u8::try_from(extension.id).ok());
+    let mut orientations = FrameOrientations::default();
     let mut keyframes = tokio::time::interval(Duration::from_secs(2));
     loop {
         if cancelled.load(Ordering::Acquire) {
@@ -465,11 +551,15 @@ async fn receive_h264(
             packet = track.read_rtp() => {
                 let Ok((packet, _)) = packet else { break };
                 if packet.payload.len() > 64 * 1024 { continue; }
+                if let Some(payload) = orientation_extension_id.and_then(|id| packet.header.get_extension(id)) {
+                    orientations.observe(packet.header.timestamp, &payload);
+                }
                 samples.push(packet);
                 while let Some(sample) = samples.pop() {
+                    let orientation = orientations.take(sample.packet_timestamp);
                     if sample.prev_dropped_packets > 0 { resync.store(true, Ordering::Release); }
                     if sample.data.len() > MAX_SAMPLE_BYTES { resync.store(true, Ordering::Release); continue; }
-                    if encoded_tx.try_send(sample.data.to_vec()).is_err() { resync.store(true, Ordering::Release); }
+                    if encoded_tx.try_send(EncodedFrame { data: sample.data.to_vec(), orientation }).is_err() { resync.store(true, Ordering::Release); }
                 }
             }
         }
@@ -517,9 +607,17 @@ mod tests {
     ) {
         use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
         use webrtc::track::track_local::TrackLocal;
-        let api = APIBuilder::new()
-            .with_media_engine(h264_media_engine().unwrap())
-            .build();
+        let mut media = h264_media_engine().unwrap();
+        media
+            .register_header_extension(
+                webrtc::rtp_transceiver::rtp_codec::RTCRtpHeaderExtensionCapability {
+                    uri: "urn:3gpp:video-orientation".into(),
+                },
+                RTPCodecType::Video,
+                None,
+            )
+            .unwrap();
+        let api = APIBuilder::new().with_media_engine(media).build();
         let sender = Arc::new(
             api.new_peer_connection(RTCConfiguration::default())
                 .await
@@ -637,6 +735,128 @@ mod tests {
             gray.get_pixel(48, 16)[0] > 200,
             "paper must stay light after media encoding and decoding"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn given_mobile_rtc_orientation_when_phone_rotates_then_pixels_stay_upright_per_frame() {
+        use openh264::encoder::Encoder;
+        use openh264::formats::{RgbSliceU8, YUVBuffer};
+        use webrtc::media::Sample;
+        use webrtc::rtp::extension::video_orientation_extension::{
+            VideoOrientationExtension, VideoRotation,
+        };
+        let (frames_tx, mut frames_rx) = mpsc::unbounded_channel();
+        let sink: FrameSink = Arc::new(move |frame| {
+            let frames_tx = frames_tx.clone();
+            Box::pin(async move {
+                let _ = frames_tx.send(frame);
+            })
+        });
+        let receiver = new_video_peer(
+            sink,
+            Arc::new(|_, _| Box::pin(async {})),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        let (sender, track) = test_sender(&receiver).await;
+        assert!(
+            receiver
+                .local_description()
+                .await
+                .unwrap()
+                .sdp
+                .contains("urn:3gpp:video-orientation"),
+            "Receiver must negotiate mobile rotation metadata"
+        );
+        let encoded = tokio::task::spawn_blocking(|| {
+            let mut image = RgbImage::from_pixel(96, 64, image::Rgb([255; 3]));
+            for y in 8..24 {
+                for x in 16..40 {
+                    image.put_pixel(x, y, image::Rgb([0; 3]));
+                }
+            }
+            let yuv = YUVBuffer::from_rgb_source(RgbSliceU8::new(image.as_raw(), (96, 64)));
+            Encoder::new().unwrap().encode(&yuv).unwrap().to_vec()
+        })
+        .await
+        .unwrap();
+        let (orientation_tx, orientation_rx) =
+            tokio::sync::watch::channel(VideoOrientationExtension::default());
+        let send_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(60));
+            loop {
+                interval.tick().await;
+                let orientation = *orientation_rx.borrow();
+                if track
+                    .sample_writer()
+                    .with_video_orientation(orientation)
+                    .write_sample(&Sample {
+                        data: encoded.clone().into(),
+                        duration: Duration::from_millis(60),
+                        ..Default::default()
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let result = tokio::time::timeout(Duration::from_secs(12), async {
+            for (rotation, flip, dimensions, dark) in [
+                (VideoRotation::Degree0, false, (96, 64), (28, 16)),
+                (VideoRotation::Degree90, false, (64, 96), (47, 28)),
+                (VideoRotation::Degree180, false, (96, 64), (67, 47)),
+                (VideoRotation::Degree270, false, (64, 96), (16, 67)),
+                (VideoRotation::Degree90, true, (64, 96), (47, 67)),
+                (VideoRotation::Degree0, false, (96, 64), (28, 16)),
+            ] {
+                orientation_tx
+                    .send(VideoOrientationExtension {
+                        rotation,
+                        flip,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                loop {
+                    let frame = frames_rx.recv().await.unwrap().to_luma8();
+                    if frame.dimensions() == dimensions && frame.get_pixel(dark.0, dark.1)[0] < 60 {
+                        assert!(
+                            frame.get_pixel(dimensions.0 - 1 - dark.0, dimensions.1 - 1 - dark.1)
+                                [0]
+                                > 200
+                        );
+                        break;
+                    }
+                }
+            }
+        })
+        .await;
+        send_task.abort();
+        sender.close().await.unwrap();
+        receiver.close().await.unwrap();
+        result.expect(
+            "Quarter-turns and flip must transform their own decoded frame without reconnecting",
+        );
+    }
+
+    #[test]
+    fn given_reordered_orientation_metadata_when_frames_pop_then_keep_each_frames_rotation() {
+        let mut orientations = FrameOrientations::default();
+        orientations.observe(101, &[2]);
+        orientations.observe(100, &[1]);
+        assert_eq!(orientations.take(100).rotation, VideoRotation::Degree90);
+        assert_eq!(orientations.take(101).rotation, VideoRotation::Degree180);
+        orientations.observe(102, &[]);
+        orientations.observe(102, &[1, 2]);
+        assert_eq!(orientations.take(102).rotation, VideoRotation::Degree180);
+        orientations.observe(103, &[0]);
+        assert_eq!(orientations.take(103).rotation, VideoRotation::Degree0);
+        for timestamp in 104..400 {
+            orientations.observe(timestamp, &[1]);
+        }
+        assert_eq!(orientations.pending.len(), 64);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
