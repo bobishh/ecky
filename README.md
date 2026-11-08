@@ -43,8 +43,8 @@ For a concrete example, the repository contains a [bicycle bottle holder](sites/
 
 In the expanded **SKETCH** workspace, choose **Camera** and assign FRONT, TOP,
 or SIDE. Open the camera connection dialog, trust the local camera certificate
-on the iPhone, and print that view’s labelled A4 template at actual size,
-and check its 50 mm scale segment. Scan the camera QR code in Safari, allow camera
+on the iPhone, and print that view’s labelled A4 template at actual size.
+Check its 50 mm scale segment. Scan the camera QR code in Safari, allow camera
 access, and keep all four markers visible. Phone and computer use the same local
 network. The desktop capture server supplies HTTPS and WebRTC signaling.
 
@@ -52,14 +52,15 @@ The live camera fills the Sketch pane immediately, before markers are found.
 The phone shows full viewport video with overlaid controls. Once its four markers
 match the selected view, corrected 160 × 220 mm paper appears beneath the grid.
 Switch views while the camera stays connected; each view retains its own draft.
-A different view’s sheet stays visible but cannot add geometry to the wrong view. Stable pen
-points, lines, circles, and polylines enter after three agreeing observations.
+A different view’s sheet stays visible but cannot add geometry to the wrong view.
+Stable pen points, lines, circles, and polylines enter after three agreeing observations.
 Select geometry to edit coordinates, confirm uncertain junctions or broken strokes,
 or remove unwanted observations. Missing markers pause updates; accepted geometry
 survives occlusion and reconnects. **Use accepted profile** transfers closed geometry
 to the current view's normal editing and Apply flow, preserving analytic circles.
-Open strokes stay available for correction in the live capture. Stop and start a
-new capture to bind another model or view. Accepted draft geometry is saved locally and restored with its IDs after restart.
+Open strokes stay available for correction in the live capture. Start a new
+capture to bind another model. Accepted geometry in the same model survives
+reconnection; each view’s draft is saved locally and restored with its IDs after restart.
 Video previews remain transient; frames create no model versions.
 
 Video stays local: Rust receives H.264 over WebRTC, decodes with bundled-source
