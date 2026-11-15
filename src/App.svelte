@@ -6597,8 +6597,15 @@ import {
     border-color: var(--primary);
     color: var(--primary);
   }
-  .genie-layer { position: absolute; left: 10px; top: 10px; z-index: 120; pointer-events: auto; max-width: min(56vw, 380px); }
-  .genie-layer.choice-active { z-index: 7000; }
+  .genie-layer {
+    position: absolute;
+    left: 10px;
+    top: 10px;
+    max-width: min(56vw, 380px);
+    --genie-mascot-z: 120;
+    --genie-notifications-z: 121;
+  }
+  .genie-layer.choice-active { --genie-notifications-z: 7000; }
 
   /* STL Cafeteria — multi-microwave strip */
   .cafeteria-strip { position: absolute; bottom: 48px; left: 12px; right: 12px; z-index: 100; display: flex; gap: 8px; flex-wrap: wrap; pointer-events: auto; }
@@ -6769,8 +6776,9 @@ import {
     pointer-events: none;
     background: var(--bg-100);
   }
-  :global(.genie-layer.onboarding-active) {
-    z-index: 5000 !important;
+  .genie-layer.onboarding-active {
+    --genie-mascot-z: 1100;
+    --genie-notifications-z: 5000;
   }
 
   /* Agent confirmation stack */

@@ -628,6 +628,7 @@
 <style>
   .genie-shell {
     position: relative;
+    z-index: var(--genie-mascot-z, auto);
     width: 150px;
     height: 150px;
     pointer-events: none;

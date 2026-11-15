@@ -361,7 +361,7 @@
     position: absolute;
     left: 126px;
     top: 6px;
-    z-index: 1;
+    z-index: var(--genie-notifications-z, 1);
     width: min(380px, max(248px, calc(100vw - 558px)));
     max-height: min(70vh, 620px);
     overflow: hidden;

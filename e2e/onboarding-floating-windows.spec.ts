@@ -37,24 +37,31 @@ test.describe('First-run onboarding with floating windows', () => {
         },
       };
 
+      const capabilities = {
+        freecad: { available: true, detail: 'Ready', path: '/mock/freecadcmd' },
+        build123d: { available: true, detail: 'Ready', path: '/mock/python3' },
+        mesh: { available: true, detail: 'bundled', path: null },
+        recommendedAuthoringContext: {
+          engineKind: 'freecad',
+          sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad',
+        },
+      };
+
+      window.__TAURI_INTERNALS__.transformCallback = () => 1;
+
       window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+        if (cmd === 'plugin:event|listen') return args?.handler;
+        if (cmd === 'get_boot_projection') {
+          return { config, history: [], workspace: null, selectedPartId: null };
+        }
+        if (cmd === 'get_boot_runtime_projection') return { config, capabilities };
         if (cmd === 'get_config') return structuredClone(config);
-        if (cmd === 'save_config') {
-          (window as any).__SAVE_CONFIG_CALLS__.push(structuredClone(args?.config ?? null));
-          return null;
+        if (cmd === 'save_config_projection') {
+          (window as any).__SAVE_CONFIG_CALLS__.push(structuredClone(args.config));
+          return { config: args.config, capabilities };
         }
-        if (cmd === 'get_runtime_capabilities') {
-          return {
-            freecad: { available: true, detail: 'Ready', path: '/mock/freecadcmd' },
-            build123d: { available: true, detail: 'Ready', path: '/mock/python3' },
-            mesh: { available: true, detail: 'bundled', path: null },
-            recommendedAuthoringContext: {
-              engineKind: 'freecad',
-              sourceLanguage: 'legacyPython',
-              geometryBackend: 'freecad',
-            },
-          };
-        }
+        if (cmd === 'get_runtime_capabilities') return capabilities;
         if (cmd === 'get_history') return [];
         if (cmd === 'get_last_design') return null;
         if (cmd === 'get_active_agent_sessions') return [];
@@ -72,7 +79,7 @@ test.describe('First-run onboarding with floating windows', () => {
     await page.waitForSelector('.workbench');
   });
 
-  test('opens and spotlights guided floating windows on first run', async ({ page }) => {
+  test('Given first-run guidance When it opens floating windows Then they stay above Ecky and the guide remains usable', async ({ page }) => {
     await expect(page.locator('.onboarding-backdrop')).toBeVisible();
     await expect(page.getByRole('button', { name: 'NEXT' })).toBeVisible();
 
@@ -98,10 +105,19 @@ test.describe('First-run onboarding with floating windows', () => {
     await expect(page.locator('[data-window-id="dialogue"]')).toBeVisible();
     await expect(page.locator('[data-window-id="params"]')).toBeVisible();
 
+    const mascot = page.getByRole('button', { name: 'Poke Ecky' });
+    await expect(mascot).toBeVisible();
+    const windowOverMascot = await mascot.evaluate((button) => {
+      const { x, y, width, height } = button.getBoundingClientRect();
+      return document.elementFromPoint(x + width / 2, y + height / 2)
+        ?.closest('[data-window-id]')?.getAttribute('data-window-id');
+    });
+    expect(windowOverMascot).toBe('projects');
+
     await page.getByRole('button', { name: 'SKIP' }).click();
     await expect(page.locator('.onboarding-backdrop')).toHaveCount(0);
 
-    const saveCalls = await page.evaluate(() => (window as any).__SAVE_CONFIG_CALLS__);
-    expect(saveCalls.at(-1)?.hasSeenOnboarding).toBe(true);
+    await expect.poll(() => page.evaluate(() => (window as any).__SAVE_CONFIG_CALLS__.at(-1)?.hasSeenOnboarding))
+      .toBe(true);
   });
 });
