@@ -137,11 +137,17 @@ const ALL_WINDOW_IDS: WindowId[] = [
 ];
 
 const HIDDEN_WINDOW_IDS = new Set<WindowId>();
-const TRANSIENT_WINDOW_IDS = new Set<WindowId>(['docs']);
+const RESTORE_VISIBILITY = new Set<WindowId>(['analysis', 'capture', 'code', 'dialogue', 'params', 'sketch']);
 let windowSafeInsets: ViewportInsets = {};
 
 function isWindowAvailable(id: WindowId): boolean {
   return !HIDDEN_WINDOW_IDS.has(id);
+}
+
+function rememberedWindow(id: WindowId, state: WindowState): WindowState {
+  return RESTORE_VISIBILITY.has(id)
+    ? state
+    : { ...state, visible: false, minimized: false, active: false };
 }
 
 function buildDefaults(): WindowStoreState {
@@ -191,13 +197,13 @@ function mergeDbLayout(dbLayout: ThreadWindowLayout | null): WindowStoreState {
       { x: saved.x, y: saved.y, width: saved.width, height: saved.height },
       reg.minSize,
     );
-    defaults[id] = {
-      visible: TRANSIENT_WINDOW_IDS.has(id) ? false : saved.visible,
-      minimized: TRANSIENT_WINDOW_IDS.has(id) ? false : saved.minimized ?? false,
+    defaults[id] = rememberedWindow(id, {
+      visible: saved.visible,
+      minimized: saved.minimized ?? false,
       active: false,
       ...clamped,
       z: saved.z,
-    };
+    });
   }
   return focusTopVisible(defaults);
 }
@@ -277,8 +283,12 @@ function cacheThreadState(
 ) {
   const existing = ensureThreadCache(threadId);
   const revision = bumpRevision ? existing.revision + 1 : existing.revision;
+  const snapshot = cloneState(state);
+  for (const id of ALL_WINDOW_IDS) {
+    snapshot[id] = rememberedWindow(id, snapshot[id]);
+  }
   layoutCacheByThreadId.set(threadId, {
-    state: cloneState(state),
+    state: focusTopVisible(snapshot),
     revision,
     dirtyRevision: bumpRevision ? revision : existing.dirtyRevision,
     rememberLayout: rememberLayout ?? existing.rememberLayout,
@@ -306,7 +316,7 @@ function windowLayoutRememberedValue(): boolean {
 function toDbLayout(state: WindowStoreState): ThreadWindowLayout {
   const windows: Partial<Record<string, ThreadWindowState>> = {};
   for (const id of ALL_WINDOW_IDS) {
-    const s = state[id];
+    const s = rememberedWindow(id, state[id]);
     windows[id] = {
       visible: s.visible,
       minimized: s.minimized,
@@ -422,7 +432,7 @@ export async function loadAppWindowLayout() {
   try {
     layout = await campaignRunClient.getAppWindowLayout();
   } catch {
-    return;
+    // Use the destination's defaults when its saved layout is unavailable.
   }
   if (token !== layoutLoadToken || !usingAppWindowLayout) return;
   const rememberLayout = layout?.rememberLayout ?? true;

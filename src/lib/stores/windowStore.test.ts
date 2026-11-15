@@ -7,8 +7,10 @@ import {
   ALL_WINDOW_IDS,
   _mergeDbLayout,
   _resetWindowStoreForTest,
+  _setWindowStoreTransportForTest,
   bringToFront,
   fitVisibleWindowsToViewport,
+  loadLayoutForThread,
   showWindow,
   windowRegistry,
   windowStore,
@@ -120,6 +122,50 @@ test('saved docs geometry restores without reopening the transient docs window',
   );
 
   _resetWindowStoreForTest();
+});
+
+test('Given Projects was open in a workspace When I return Then it stays closed and project panels are restored', async (t) => {
+  _resetWindowStoreForTest();
+  t.after(_resetWindowStoreForTest);
+  const savedProjects = { visible: true, minimized: false, x: 120, y: 110, width: 470, height: 510, z: 10 };
+  const savedParams = { visible: true, minimized: false, x: 520, y: 80, width: 360, height: 480, z: 4 };
+  let lastSavedProjectsVisible: boolean | undefined;
+  let afterCacheLoad: (() => void) | undefined;
+  let finishRead: (() => void) | undefined;
+  _setWindowStoreTransportForTest({
+    readThreadWindowLayout: async (id) => {
+      if (id !== 'alpha') return null;
+      if (afterCacheLoad) {
+        await new Promise<void>((resolve) => {
+          finishRead = resolve;
+          afterCacheLoad?.();
+        });
+      }
+      return { schemaVersion: 1, rememberLayout: true, windows: { projects: savedProjects, params: savedParams } };
+    },
+    writeThreadWindowLayout: async (id, layout) => {
+      if (id === 'alpha') lastSavedProjectsVisible = layout.windows.projects?.visible;
+    },
+  });
+
+  await loadLayoutForThread('alpha');
+  assert.deepEqual(get(windowStore).projects, { ...savedProjects, visible: false, active: false });
+  assert.equal(get(windowStore).params.active, true);
+  showWindow('projects');
+  await loadLayoutForThread('beta');
+  assert.equal(lastSavedProjectsVisible, false);
+  assert.equal(get(windowStore).projects.visible, false);
+
+  const cacheLoaded = new Promise<void>((resolve) => { afterCacheLoad = resolve; });
+  const returning = loadLayoutForThread('alpha');
+  await cacheLoaded;
+  try {
+    assert.equal(get(windowStore).projects.visible, false);
+    assert.equal(get(windowStore).params.active, true);
+  } finally {
+    finishRead?.();
+    await returning;
+  }
 });
 
 test('library window is registered independently from projects', () => {
