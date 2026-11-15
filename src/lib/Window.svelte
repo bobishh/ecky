@@ -18,8 +18,7 @@
     hidden = false,
     focused = false,
     highlighted = false,
-    fillWorkarea = false,
-    workareaBottomInset = 0,
+    maximizedByDefault = false,
     onclose,
     children
   }: {
@@ -35,14 +34,16 @@
     hidden?: boolean;
     focused?: boolean;
     highlighted?: boolean;
-    fillWorkarea?: boolean;
-    workareaBottomInset?: number;
+    maximizedByDefault?: boolean;
     onclose: () => void;
     children: Snippet;
   } = $props();
 
   let dragging = $state(false);
   let resizing = $state(false);
+  let maximizedOverride = $state<boolean | null>(null);
+  const maximized = $derived(maximizedOverride ?? maximizedByDefault);
+  const maximizeLabel = $derived(maximized ? 'Restore window' : 'Maximize window');
   let pendingDrag = $state<{
     pointerX: number;
     pointerY: number;
@@ -92,7 +93,7 @@
     if (windowId) {
       bringToFront(windowId);
     }
-    if (fillWorkarea) return;
+    if (maximized) return;
     if (event.button !== 0 || !(event.target instanceof Element)) return;
     if (isInteractiveGestureTarget(event.target)) return;
     event.stopPropagation();
@@ -107,7 +108,7 @@
   }
 
   function handleResizeStart(event: MouseEvent) {
-    if (fillWorkarea) return;
+    if (maximized) return;
     event.preventDefault();
     event.stopPropagation();
 
@@ -168,7 +169,7 @@
   }
 
   function handleWindowDoubleClick(event: MouseEvent) {
-    if (fillWorkarea) return;
+    if (maximized) return;
     if (!(event.target instanceof Element)) return;
     if (isInteractiveGestureTarget(event.target)) return;
     fitToViewport();
@@ -184,6 +185,11 @@
     onclose();
   }
 
+  function toggleMaximized() {
+    if (windowId && !focused) bringToFront(windowId);
+    maximizedOverride = !maximized;
+  }
+
   onDestroy(() => {
     if (typeof window !== 'undefined') {
       window.removeEventListener('mousemove', onGlobalMove);
@@ -197,11 +203,11 @@
   class="window"
   class:window--hidden={hidden}
   class:window--interacting={dragging || resizing}
-  class:window--fill-workarea={fillWorkarea}
+  class:window--fill-workarea={maximized}
   class:window--focused={focused}
   class:window--highlighted={highlighted}
   data-window-id={windowId ?? undefined}
-  style="left: {x}px; top: {y}px; width: {width}px; height: {height}px; z-index: {2000 + z}; --window-workarea-bottom: {workareaBottomInset}px;"
+  style="left: {x}px; top: {y}px; width: {width}px; height: {height}px; z-index: {2000 + z};"
   role="dialog"
   aria-hidden={hidden}
   onmousedown={handleWindowMouseDown}
@@ -212,7 +218,19 @@
   {/if}
   <div class="window-header" role="none">
     <span class="window-title">{title}</span>
-    <button class="window-close" onclick={handleClose}>&times;</button>
+    <div class="window-controls">
+      <button type="button" class="window-maximize" aria-label={maximizeLabel} title={maximizeLabel} onclick={toggleMaximized}>
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" aria-hidden="true">
+          {#if maximized}
+            <path d="M5.5 4.5v-3h7v7h-3" />
+            <rect x="1.5" y="4.5" width="8" height="8" />
+          {:else}
+            <rect x="2.5" y="2.5" width="9" height="9" />
+          {/if}
+        </svg>
+      </button>
+      <button class="window-close" onclick={handleClose}>&times;</button>
+    </div>
   </div>
   <div class="window-content">
     {@render children()}
@@ -239,7 +257,7 @@
   }
 
   .window--fill-workarea {
-    inset: 0 0 var(--window-workarea-bottom, 0px) 0 !important;
+    inset: 0 0 var(--workbench-bottom-inset, 0px) 0 !important;
     width: auto !important;
     height: auto !important;
   }
@@ -294,6 +312,14 @@
     text-overflow: ellipsis;
   }
 
+  .window-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+  }
+
+  .window-maximize,
   .window-close {
     background: none;
     border: none;
@@ -305,6 +331,14 @@
     flex: 0 0 auto;
   }
 
+  .window-maximize {
+    display: inline-grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+  }
+
+  .window-maximize:hover,
   .window-close:hover {
     color: var(--text);
   }

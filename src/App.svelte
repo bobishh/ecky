@@ -5779,7 +5779,7 @@ import {
 
 <svelte:window onbeforeunload={hardFlushWindowLayout} onresize={handleViewportResize} />
 
-<div class="app-page" role="application">
+<div class="app-page" role="application" style:--workbench-bottom-inset={`${workbenchBottomInset}px`}>
   {#if $onboarding.isActive}
     <div class="onboarding-backdrop"></div>
   {/if}
@@ -6065,7 +6065,6 @@ import {
       sketch: $windowStore.sketch,
     }}
     {mountedWindows}
-    {workbenchBottomInset}
     highlightTarget={$onboarding.highlightTarget}
     {drawMode}
     canDraw={selectedModelCapabilities.supportsVision}
