@@ -247,17 +247,17 @@ test("normalizeArtifactBundle preserves topology target alias ids", () => {
   assert.deepEqual(bundle.faceTargets[0].aliasIds, ["body:face:5:0-0-10:100"]);
 });
 
-test("normalizeArtifactBundle enforces canonical model.stl filename", () => {
+test("normalizeArtifactBundle preserves the backend's capture preview path", () => {
   const bundle = normalizeArtifactBundle({
     modelId: "persisted-model",
     sourceKind: "generated",
     contentHash: "persisted",
     fcstdPath: "",
     manifestPath: "/runtime/manifest.json",
-    modelStlPath: "/runtime/noncanonical-name.stl",
+    modelStlPath: "/runtime/generated-capture/scan/source.stl",
   } as any);
 
-  assert.equal(bundle.modelStlPath, "/runtime/model.stl");
+  assert.equal(bundle.modelStlPath, "/runtime/generated-capture/scan/source.stl");
 });
 
 test("normalizeMessage preserves durable topology target ids on manifest", () => {

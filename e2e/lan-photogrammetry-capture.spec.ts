@@ -421,7 +421,7 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
   }, { config });
 }
 
-async function routeRestoredCaptureStl(page: Page, urlPattern = '**/*model.stl*') {
+async function routeRestoredCaptureStl(page: Page, urlPattern = '**/tmp/capture-model.stl*') {
   const previewStl = Buffer.alloc(84 + 50);
   previewStl.writeUInt32LE(1, 80);
   [[0, 0, 0], [40, 0, 0], [0, 30, 10]].forEach((vertex, vertexIndex) => {
@@ -626,7 +626,7 @@ test('Given reconstruction completes When desktop polls Then preview exposes ins
       ));
     });
   });
-  await page.route('**/*model.stl*', async (route) => {
+  await page.route('**/tmp/capture-{model,box-crop}.stl*', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'model/stl',

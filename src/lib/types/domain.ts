@@ -1450,10 +1450,8 @@ export function normalizeParsedParamsResult(
 export function normalizeArtifactBundle(
   bundle: Contract.ArtifactBundle | ArtifactBundle,
 ): ArtifactBundle {
-  const canonicalModelPath = bundle.modelStlPath.replace(/[^\\/]+$/, "model.stl");
   return {
     ...bundle,
-    modelStlPath: canonicalModelPath,
     engineKind: normalizeEngineKindValue(bundle.engineKind) ?? "freecad",
     sourceLanguage:
       normalizeSourceLanguageValue(bundle.sourceLanguage, bundle.engineKind) ?? "legacyPython",

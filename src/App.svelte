@@ -2711,7 +2711,11 @@ import {
         return true;
       } catch (error) {
         capturePreviewPrepareError = formatBackendError(error);
-        patchCaptureWorkspace({ cameraStatus: capturePreviewPrepareError, error: capturePreviewPrepareError, phase: 'failed' });
+        if (capturePreviewBundle) {
+          patchCaptureWorkspace({ cameraStatus: capturePreviewPrepareError });
+        } else {
+          patchCaptureWorkspace({ cameraStatus: capturePreviewPrepareError, error: capturePreviewPrepareError, phase: 'failed' });
+        }
         return false;
       } finally {
         capturePreviewPreparePromise = null;
@@ -3079,12 +3083,9 @@ import {
 
   async function previewCaptureCrop() {
     if (!captureCropBounds) return;
-    const previousBundle = capturePreviewBundle;
-    const previousManifest = capturePreviewManifest;
     const previousPreparedCropKey = capturePreparedCropKey;
     const previousPreviewCropBounds = capturePreviewCropBounds;
     capturePreviewCropBounds = cloneCaptureCropBounds(captureCropBounds);
-    patchCaptureWorkspace({ preview: null });
     capturePreparedCropKey = null;
     capturePreviewApplied = false;
     captureSolidifySource = '';
@@ -3095,7 +3096,6 @@ import {
       captureGuideError = captureGuideState.reason;
     }
     if (!await ensureCapturePreviewPrepared()) {
-      patchCaptureWorkspace({ preview: previousBundle && previousManifest ? { bundle: previousBundle, manifest: previousManifest, applied: false, cropBounds: null } : null });
       capturePreparedCropKey = previousPreparedCropKey;
       capturePreviewCropBounds = previousPreviewCropBounds;
       captureCropDirty = true;
@@ -3106,8 +3106,6 @@ import {
   }
 
   async function resetCaptureCrop() {
-    const previousBundle = capturePreviewBundle;
-    const previousManifest = capturePreviewManifest;
     const previousPreparedCropKey = capturePreparedCropKey;
     const previousPreviewCropBounds = capturePreviewCropBounds;
     captureCropEnabled = false;
@@ -3122,11 +3120,9 @@ import {
       captureGuideError = captureGuideState.reason;
     }
     if (capturePreparedCropKey === 'raw') return;
-    patchCaptureWorkspace({ preview: null });
     capturePreparedCropKey = null;
     patchCaptureWorkspace({ guidance: 'PREPARING PREVIEW' });
     if (!await ensureCapturePreviewPrepared()) {
-      patchCaptureWorkspace({ preview: previousBundle && previousManifest ? { bundle: previousBundle, manifest: previousManifest, applied: false, cropBounds: null } : null });
       capturePreparedCropKey = previousPreparedCropKey;
       capturePreviewCropBounds = previousPreviewCropBounds;
       captureCropEnabled = previousPreviewCropBounds !== null;
