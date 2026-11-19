@@ -316,7 +316,7 @@ fn chunk_to_frags(
  * @param h       height of chunk
  * @param iter    current iteration
  * @return        an array of polylines
-*/
+ */
 pub fn trace_skeleton(
     im: &mut [u8],
     ww: usize,
