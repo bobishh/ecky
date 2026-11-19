@@ -25,6 +25,9 @@ COPY src/lib/eckyLexer.ts ./src/lib/eckyLexer.ts
 COPY model-runtime/examples/dovetail-box.ecky ./model-runtime/examples/dovetail-box.ecky
 COPY docs/books/ecky-ir/examples/frame-array-bracket.ecky ./docs/books/ecky-ir/examples/frame-array-bracket.ecky
 
+ARG ANALYTICS_CLIENT_URL=""
+ARG ANALYTICS_PROJECT=""
+ARG ANALYTICS_BROWSER_TOKEN=""
 RUN cd sites/landing && npm run build
 
 # ────────────────────────────────────────────────────────────
@@ -69,7 +72,10 @@ COPY --from=docs-builder /repo/public/docs/ecky-ir.md /usr/share/nginx/html/docs
 # EPUB for offline reading
 COPY --from=docs-builder /repo/target/book/dist/books/ecky-ir-field-guide.epub /usr/share/nginx/html/docs/ecky-ir-field-guide.epub
 
-COPY nginx.conf /etc/nginx/nginx.conf
+ENV ANALYTICS_ORIGIN="" \
+    NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx \
+    NGINX_ENVSUBST_FILTER="^ANALYTICS_ORIGIN$"
+COPY nginx.conf /etc/nginx/templates/nginx.conf.template
 
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]

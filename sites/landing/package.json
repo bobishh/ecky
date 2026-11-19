@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:e2e": "playwright test",
-    "test:unit": "node --test src/showcase/*.test.mjs && python3 -m unittest discover -s scripts -p 'test_*.py'",
+    "test:unit": "node --test src/showcase/*.test.mjs scripts/*.test.mjs && python3 -m unittest discover -s scripts -p 'test_*.py'",
     "models:package": "python3 scripts/package_models.py"
   },
   "devDependencies": {
