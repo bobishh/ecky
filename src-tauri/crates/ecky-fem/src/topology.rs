@@ -2298,9 +2298,9 @@ mod tests {
                         element.dofs[local_node * 3 + axis] = (index + local_node) * 3 + axis;
                     }
                 }
-                for row in 0..12 {
-                    for col in 0..12 {
-                        element.stiffness[row][col] = if row == col { 4.0 } else { -0.01 };
+                for (row, values) in element.stiffness.iter_mut().enumerate() {
+                    for (col, value) in values.iter_mut().enumerate() {
+                        *value = if row == col { 4.0 } else { -0.01 };
                     }
                 }
                 element
