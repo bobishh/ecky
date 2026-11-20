@@ -76,6 +76,7 @@ pub mod models;
 pub mod netgen_mesher;
 pub mod project_mirror;
 pub mod provider_turn;
+pub mod puppet;
 pub mod raster_trace;
 pub mod runtime_capabilities;
 pub mod services;

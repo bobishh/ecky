@@ -1,0 +1,23 @@
+/* Shared control and layout rules for scan preparation and rigid puppet authoring. */
+.external-workspace {
+  container-type: inline-size;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.external-workspace *, .external-workspace *::before, .external-workspace *::after { box-sizing: border-box; }
+.external-workspace button, .external-workspace input, .external-workspace select, .external-workspace textarea {
+  font: inherit;
+  border-radius: 0;
+}
+.external-workspace button { cursor: pointer; min-height: 32px; }
+.external-workspace button:disabled { cursor: default; opacity: .45; }
+.external-workspace :is(button, input, select, textarea, summary, a):focus-visible { outline: 2px solid var(--secondary); outline-offset: 2px; }
+.external-workspace h2 { margin: 0; color: var(--text); font-size: clamp(22px, 3cqi, 30px); font-weight: 600; line-height: 1.25; letter-spacing: -.025em; }
+.external-workspace h3 { margin: 0; color: var(--text); font-size: 13px; font-weight: 650; }
+.external-workspace p { line-height: 1.6; }
+.external-workspace details > summary { cursor: pointer; color: var(--text-dim); padding: 9px 0; font-size: 12px; }
+.external-workspace details[open] > summary { color: var(--text); }
+.external-workspace .shape-primary { background: var(--secondary); color: var(--bg-100); border-color: var(--secondary); font-weight: 650; padding: 8px 16px; }
+.external-workspace .shape-primary:hover:not(:disabled) { filter: brightness(1.12); }

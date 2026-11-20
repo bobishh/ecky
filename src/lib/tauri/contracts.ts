@@ -723,6 +723,46 @@ async startCaptureSession(target: ExistingCaptureTarget | null) : Promise<Result
     else return { status: "error", error: e  as any };
 }
 },
+async puppetImportPart(sourcePath: string | null, captureRunId: string | null, metres: boolean, zUp: boolean) : Promise<Result<PuppetPart, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("puppet_import_part", { sourcePath, captureRunId, metres, zUp }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async puppetPreview(document: PuppetDocument) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("puppet_preview", { document }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async puppetExport(document: PuppetDocument, path: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("puppet_export", { document, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async puppetSave(document: PuppetDocument, path: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("puppet_save", { document, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async puppetOpen(path: string) : Promise<Result<PuppetDocument, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("puppet_open", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async applyCapturePreview(input: ApplyCapturePreviewInput) : Promise<Result<ApplyCapturePreviewResult, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("apply_capture_preview", { input }) };
@@ -2453,6 +2493,20 @@ export type ProviderEventKind = "assistant" | "activity"
 export type ProviderModels = { codex?: string; agy?: string; grok?: string }
 export type ProviderTurnTrace = { turnId: string; status: string; messages: CodexDialogueMessage[]; completedAt: number }
 export type ProviderWriterActivationInput = { eckyThreadId: string; provider: string }
+export type PuppetDocument = { schemaVersion: number; name: string; durationSecs: number; stepped: boolean; parts: PuppetPart[] }
+export type PuppetPart = { id: string; name: string; assetId: string; parentId: string | null;
+/**
+ * Joint position in its parent's joint frame; millimetres, Y up.
+ */
+positionMm: [number, number, number];
+/**
+ * Joint point in the original imported mesh; millimetres, Y up.
+ */
+pivotMm: [number, number, number]; rotationDeg: [number, number, number]; scale: number;
+/**
+ * Maximum mesh displacement in millimetres at the current part scale.
+ */
+smoothingMm?: number | null; axis: string; amplitudeDeg: number; phaseDeg: number; triangleCount: number; textured: boolean }
 export type QueueAgentPromptInput = { threadId?: string | null; promptText: string; attachments?: Attachment[] }
 export type QueuedAgentPrompt = { threadId: string; messageId: string }
 export type QueuedCaptureGuidedReconstruction = { requestId: string; threadId: string; messageId: string }

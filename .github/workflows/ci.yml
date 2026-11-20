@@ -102,6 +102,9 @@ jobs:
       - name: Run Live Paper RTC and Recognition Tests
         run: cd src-tauri && cargo test -p ecky_cad --lib live_paper --all-features -- --test-threads=1
 
+      - name: Run Puppet Import and Export Tests
+        run: cd src-tauri && cargo test -p ecky_cad --lib puppet::tests --all-features
+
       - name: Run Clippy
         run: cd src-tauri && cargo clippy --workspace --all-targets --all-features -- -D warnings
 

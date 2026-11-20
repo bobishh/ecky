@@ -2121,7 +2121,6 @@ import {
   const captureStats = $derived([
     { label: 'State', value: captureSessionState.toUpperCase() },
     { label: 'Frames', value: String(captureAcceptedFrameCount) },
-    { label: 'Mode', value: 'BATCH PREVIEW' },
   ]);
   let mountedWindows = $state<Record<WindowId, boolean>>({
     code: false,
@@ -6122,7 +6121,12 @@ import {
 
     {#snippet captureContent()}
       <CapturePanel
+        visible={captureWindowState.visible}
+        captureRunId={captureMeshPreview ? captureRunId : ''}
+        currentModelPath={activeArtifactBundle?.modelStlPath ?? ''}
         sessionState={captureSessionState}
+        sessionActive={Boolean(captureSessionToken)}
+        reconstructionProgress={'progress' in captureWorkspaceState ? captureWorkspaceState.progress : 0}
         pairingUrl={capturePairingUrl}
         trustUrl={captureTrustUrl}
         cameraStatus={captureCameraStatus}

@@ -1,5 +1,6 @@
 import {
   commands,
+  type PuppetDocument,
   type ActiveProjectNavigation,
   type AgentDraftProjection,
   type AppError,
@@ -2063,4 +2064,20 @@ export async function startCodexVoice(input: CodexVoiceStartInput): Promise<Code
 
 export async function stopCodexVoice(input: CodexVoiceStopInput): Promise<void> {
   await invokeCommand(commands.stopCodexVoice(input));
+}
+
+export async function importPuppetPart(sourcePath: string | null, captureRunId: string | null, metres: boolean, zUp: boolean) {
+  return invokeCommand(commands.puppetImportPart(sourcePath, captureRunId, metres, zUp));
+}
+export async function previewPuppet(document: PuppetDocument) {
+  return invokeCommand(commands.puppetPreview(document));
+}
+export async function savePuppet(document: PuppetDocument, path: string) {
+  return invokeCommand(commands.puppetSave(document, path));
+}
+export async function openPuppet(path: string) {
+  return invokeCommand(commands.puppetOpen(path));
+}
+export async function exportPuppet(document: PuppetDocument, path: string) {
+  return invokeCommand(commands.puppetExport(document, path));
 }

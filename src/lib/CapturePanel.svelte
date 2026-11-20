@@ -1,6 +1,8 @@
 <script lang="ts">
   import Viewer from './Viewer.svelte';
+  import './externalShapes.css';
   import AsyncActionButton from './components/AsyncActionButton.svelte';
+  import PuppetBuilder from './puppet/PuppetBuilder.svelte';
   import { formatBackendError } from './tauri/client';
   import type {
     CaptureCropBounds,
@@ -51,11 +53,13 @@
     label: string;
     value: string;
   };
-  type ExternalShapeStep = 'import' | 'capture' | 'crop';
+  type ExternalShapeStep = 'import' | 'capture' | 'crop' | 'puppet';
   type CaptureStep = 'scan' | 'guides';
 
   let {
     sessionState = 'pairing',
+    sessionActive = false,
+    reconstructionProgress = 0,
     pairingUrl = 'No pairing session yet',
     trustUrl = '',
     cameraStatus = 'Camera permission pending',
@@ -66,6 +70,9 @@
       { label: 'Coverage', value: '0%' },
     ],
     onStartCapture = () => {},
+    visible = true,
+    captureRunId = '',
+    currentModelPath = '',
     onOpenLastCapture = () => {},
     onCancelCapture = () => {},
     onApplyPreview = () => {},
@@ -155,7 +162,12 @@
     cameraStatus?: string;
     guidance?: string;
     stats?: CaptureFrameStat[];
-    onStartCapture?: () => void;
+    sessionActive?: boolean;
+    reconstructionProgress?: number;
+    onStartCapture?: () => void | Promise<void>;
+    visible?: boolean;
+    captureRunId?: string;
+    currentModelPath?: string;
     onOpenLastCapture?: () => void;
     onCancelCapture?: () => void;
     onApplyPreview?: () => void;
@@ -322,6 +334,7 @@
     { id: 'import', label: 'IMPORT' },
     { id: 'capture', label: 'CAPTURE' },
     { id: 'crop', label: 'CROP' },
+    { id: 'puppet', label: 'PUPPET' },
   ];
   const captureSteps: Array<{ id: CaptureStep; label: string }> = [
     { id: 'scan', label: 'SCAN' },
@@ -329,6 +342,15 @@
   ];
   const captureScanActive = $derived(workflowStep === 'capture' && captureStep === 'scan');
   const captureGuidesActive = $derived(workflowStep === 'capture' && captureStep === 'guides');
+  let actionError = $state('');
+  const idleCapture = $derived(!sessionActive && (sessionState === 'pairing' || sessionState === 'cancelled'));
+  const frameCount = $derived(stats.find(stat => stat.label === 'Frames')?.value ?? '0');
+  const captureHeading = $derived(sessionState === 'failed' ? 'Capture needs attention'
+    : idleCapture ? 'Scan a real object'
+    : sessionState === 'reconstructing' ? 'Building your scan'
+    : !sessionActive ? 'Starting capture…'
+    : frameCount !== '0' ? 'Capture your object' : 'Connect your phone');
+
   const selectedExternalShape = $derived(
     externalShapeSources.find(source => source.nodeId === selectedExternalShapeNodeId) ?? null,
   );
@@ -342,6 +364,7 @@
       ? previewUrl
       : ((planePickerActive || surfaceTrimActive ? externalShapeRawPreviewUrl : externalShapePreviewUrl) ?? previewUrl),
   );
+  const scanSetup = $derived(captureScanActive && !activePreviewUrl);
   const activePreviewModelKey = $derived(
     workflowStep !== 'capture' && selectedExternalShape
       ? `external-shape:${selectedExternalShape.nodeId}:${selectedExternalShape.sourceDigest}:${selectedPlaneCrops.length}:${selectedSurfaceTrims.length}`
@@ -807,7 +830,7 @@
 
 </script>
 
-<div class="capture-panel" data-testid="capture-panel" data-session-state={sessionState}>
+<div class="capture-panel external-workspace" data-testid="capture-panel" data-session-state={sessionState}>
   <div class="capture-panel__navigation">
     <div class="capture-panel__workflow" role="tablist" aria-label="External shapes workflow">
       {#each workflowSteps as step (step.id)}
@@ -821,21 +844,10 @@
         >{step.label}</button>
       {/each}
     </div>
-    {#if workflowStep === 'capture'}
-      <div class="capture-panel__capture-workflow" role="tablist" aria-label="Capture workflow">
-        {#each captureSteps as step (step.id)}
-          <button
-            type="button"
-            role="tab"
-            aria-selected={captureStep === step.id}
-            class:active={captureStep === step.id}
-            title={`Open capture ${step.label.toLowerCase()} step.`}
-            onclick={() => captureStep = step.id}
-          >{step.label}</button>
-        {/each}
-      </div>
-    {/if}
   </div>
+  <PuppetBuilder active={visible && workflowStep === 'puppet'} {captureRunId} {currentModelPath} />
+  {#if workflowStep !== 'puppet'}
+  <div class="capture-panel__body" class:scan-setup={scanSetup}>
   <section class="capture-panel__viewport" aria-label="Capture view">
     {#if activePreviewUrl}
       <div
@@ -886,38 +898,88 @@
       </div>
     {:else if captureScanActive}
       <div class="capture-panel__viewfinder">
-      <div class="capture-panel__label">{guidance}</div>
-      <div class="capture-panel__camera-status">{cameraStatus}</div>
-      {#if pairingQrUrl}
-        <div class="capture-panel__qr-row">
-          <figure><img class="capture-panel__qr" src={pairingQrUrl} alt="Capture pairing QR code" /><figcaption>3. CAPTURE</figcaption></figure>
+        <div class="capture-panel__setup-content">
+          <span class="capture-panel__eyebrow">{idleCapture ? 'Phone photogrammetry' : 'Phone capture'}</span>
+          <h2>{captureHeading}</h2>
+          {#if idleCapture}
+            <p class="capture-panel__intro">Turn photos of a real object into a 3D model. Start here, then connect your phone on the same Wi-Fi.</p>
+            <div class="capture-panel__setup-actions">
+              <AsyncActionButton className="shape-primary" label="Start capture" pendingLabel="Starting…" action={onStartCapture} onerror={(error) => actionError = formatBackendError(error)} />
+              <AsyncActionButton label="Open last capture" pendingLabel="Opening…" action={onOpenLastCapture} onerror={(error) => actionError = formatBackendError(error)} />
+            </div>
+            {#if sessionState === 'cancelled'}<p class="capture-panel__camera-status">Session cancelled</p>{/if}
+            <ol class="capture-panel__preparation">
+              <li><strong>Prepare the object</strong><span>Use soft light and a plain background. Keep the object still.</span></li>
+              <li><strong>Photograph every side</strong><span>Move around it slowly, with overlapping views from several heights.</span></li>
+              <li><strong>Inspect the result</strong><span>Check the mesh, adjust its size, then use it in CAD or a puppet.</span></li>
+            </ol>
+          {:else if sessionState === 'failed'}
+            <p class="capture-panel__source-error" role="alert">{cameraStatus}</p>
+            <div class="capture-panel__setup-actions">
+              {#if sessionActive}
+                <AsyncActionButton className="shape-primary" label="Retry reconstruction" pendingLabel="Retrying…" action={onRetryReconstruction} onerror={(error) => actionError = formatBackendError(error)} />
+                <button type="button" onclick={onCancelCapture}>Cancel capture</button>
+              {:else}
+                <AsyncActionButton className="shape-primary" label="Start capture" pendingLabel="Starting…" action={onStartCapture} onerror={(error) => actionError = formatBackendError(error)} />
+                <AsyncActionButton label="Open last capture" pendingLabel="Opening…" action={onOpenLastCapture} />
+              {/if}
+            </div>
+          {:else if sessionState === 'reconstructing'}
+            <p class="capture-panel__intro">Processing {frameCount} accepted photos. The model will appear here when it is ready.</p>
+            <progress aria-label="Scan reconstruction" max="1" value={reconstructionProgress}></progress>
+            <p class="capture-panel__camera-status">{cameraStatus}</p>
+            <button type="button" onclick={onCancelCapture}>Cancel capture</button>
+          {:else if !sessionActive}
+            <p role="status" class="capture-panel__intro">Preparing the phone connection. Your QR code will appear here.</p>
+          {:else}
+            <p class="capture-panel__intro">Open the camera link on your phone and allow camera access. Keep both devices on the same Wi-Fi.</p>
+            <div class="capture-panel__connection">
+              {#if pairingQrUrl}<img class="capture-panel__qr" src={pairingQrUrl} alt="Capture pairing QR code" />{/if}
+              <div class="capture-panel__connection-info">
+                <strong>Scan with your phone camera</strong>
+                <a class="capture-panel__pairing-url" href={pairingUrl} target="_blank" rel="noreferrer">{pairingUrl}</a>
+                <p class="capture-panel__camera-status" role="status">{cameraStatus}</p>
+                <span>{frameCount} photos accepted</span>
+              </div>
+            </div>
+            {#if trustUrl}
+              <details class="capture-panel__trust-disclosure">
+                <summary>First connection on iPhone</summary>
+                <div class="capture-panel__trust-steps">
+                  <p>If Safari cannot open the camera, install and trust Ecky's local certificate, then open the camera link again.</p>
+                  {#if trustQrUrl}<img class="capture-panel__qr" src={trustQrUrl} alt="Phone certificate QR code" />{/if}
+                  <a class="capture-panel__trust-url" href={trustUrl} target="_blank" rel="noreferrer">Install phone certificate</a>
+                  <strong>Enable full trust on the phone</strong>
+                  <code>Settings &gt; General &gt; About &gt; Certificate Trust Settings</code>
+                </div>
+              </details>
+            {/if}
+            <div class="capture-panel__setup-actions"><button type="button" onclick={onCancelCapture}>Cancel capture</button></div>
+          {/if}
+          {#if actionError}<p class="capture-panel__source-error" role="alert">{actionError}</p>{/if}
         </div>
-      {/if}
-      <div class="capture-panel__pairing-url">{pairingUrl}</div>
-      {#if trustUrl}
-        <details class="capture-panel__trust-disclosure">
-          <summary>PHONE TRUST SETUP</summary>
-          <div class="capture-panel__trust-steps">
-            {#if trustQrUrl}<figure><img class="capture-panel__qr" src={trustQrUrl} alt="Phone certificate QR code" /><figcaption>1. INSTALL</figcaption></figure>{/if}
-            <div><span>1.</span> <a class="capture-panel__trust-url" href={trustUrl} target="_blank" rel="noreferrer">INSTALL PHONE CERTIFICATE</a></div>
-            <strong>2. ENABLE FULL TRUST</strong>
-            <code>Settings &gt; General &gt; About &gt; Certificate Trust Settings</code>
-          </div>
-        </details>
-      {/if}
       </div>
     {:else}
       <div class="capture-panel__empty-step">
-        <strong>SELECT OR CAPTURE A SOURCE SHAPE</strong>
-        <span>{captureGuidesActive ? 'Capture or open a scan first.' : `${workflowStep.toUpperCase()} needs an immutable external mesh.`}</span>
+        <h2>{workflowStep === 'import' ? 'Source shapes' : captureGuidesActive ? 'Start with a scan' : 'Select a shape to crop'}</h2>
+        <p>{workflowStep === 'import' ? 'Shapes referenced by this project appear here. You can also scan an object with your phone.' : 'Choose a source shape or finish a phone scan before editing its geometry.'}</p>
+        <button type="button" onclick={() => { selectWorkflowStep('capture'); captureStep = 'scan'; }}>Go to capture</button>
       </div>
     {/if}
   </section>
 
+  {#if !scanSetup}
+
   <aside class="capture-panel__side">
     <header class="capture-panel__header">
-      <strong>EXTERNAL SHAPES</strong>
-      <span>{workflowStep === 'capture' ? `CAPTURE / ${captureStep === 'scan' ? 'SCAN' : 'GUIDED BREP'}` : workflowStep.toUpperCase()}</span>
+      <strong>{workflowStep === 'capture' ? 'Scan tools' : workflowStep === 'import' ? 'Project sources' : 'Crop tools'}</strong>
+      {#if workflowStep === 'capture' && meshPreview}
+        <div class="capture-panel__capture-workflow" role="tablist" aria-label="Capture workflow">
+          {#each captureSteps as step (step.id)}
+            <button type="button" role="tab" aria-selected={captureStep === step.id} class:active={captureStep === step.id} onclick={() => captureStep = step.id}>{step.label}</button>
+          {/each}
+        </div>
+      {/if}
     </header>
 
     {#if workflowStep === 'import'}
@@ -925,7 +987,7 @@
         {#if externalShapeError}
           <div class="capture-panel__source-error" role="alert">{externalShapeError}</div>
         {:else if externalShapeSources.length === 0}
-          <div class="capture-panel__source-empty">NO IMPORTED STL IN BOUND SOURCE</div>
+          <div class="capture-panel__source-empty">This project has no imported STL shapes yet.</div>
         {:else}
           {#each externalShapeSources as source (source.nodeId)}
             <button
@@ -1108,14 +1170,14 @@
       </section>
     {/if}
 
-    {#if captureScanActive}<div class="capture-panel__stats">
+    {#if captureScanActive && sessionActive}<details class="capture-panel__diagnostics"><summary>Capture details</summary><div class="capture-panel__stats">
       {#each stats as stat (stat.label)}
         <div class="capture-panel__stat">
           <span>{stat.label}</span>
           <strong>{stat.value}</strong>
         </div>
       {/each}
-    </div>{/if}
+    </div></details>{/if}
 
     {#if meshPreview}
       <div class="capture-panel__preview" data-testid="capture-mesh-preview">
@@ -1560,7 +1622,7 @@
     {/if}
 
     {#if captureScanActive}<div class="capture-panel__actions">
-      {#if sessionState === 'pairing' || sessionState === 'cancelled'}
+      {#if !sessionActive && (sessionState === 'pairing' || sessionState === 'cancelled')}
         <button
           type="button"
           class="capture-panel__primary"
@@ -1574,12 +1636,12 @@
           onclick={onOpenLastCapture}
         >OPEN LAST CAPTURE</button>
       {/if}
-      <button
+      {#if sessionActive}<button
         type="button"
         class="capture-panel__secondary"
         title="Cancel the active capture session."
         onclick={onCancelCapture}
-      >CANCEL</button>
+      >CANCEL</button>{/if}
       {#if meshPreview}
         <button type="button" class="capture-panel__secondary" title="Return to phone capture and add more source photos." onclick={onAddPhotos}>ADD PHOTOS</button>
         <button type="button" class="capture-panel__primary" title="Apply the prepared scan preview to the capture draft." onclick={onApplyPreview} disabled={applyPending}>{applyPending ? 'APPLYING' : 'APPLY'}</button>
@@ -1590,120 +1652,40 @@
       {/if}
     </div>{/if}
   </aside>
+  {/if}
+  </div>
+  {/if}
 </div>
 
 <style>
-  .capture-panel {
-    display: grid;
-    grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.8fr);
-    grid-template-rows: auto minmax(0, 1fr);
-    gap: 12px;
-    width: 100%;
-    height: 100%;
-    min-height: 0;
-    overflow: hidden;
-    background: color-mix(in srgb, var(--bg-100) 92%, #000);
-  }
-
-  .capture-panel__navigation {
-    grid-column: 1 / -1;
-    display: grid;
-    gap: 4px;
-    min-width: 0;
-    overflow: hidden;
-  }
-
-  .capture-panel__workflow,
-  .capture-panel__capture-workflow {
-    display: grid;
-    gap: 1px;
-    overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--primary) 36%, transparent);
-  }
-
-  .capture-panel__workflow {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .capture-panel__capture-workflow {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    width: min(520px, 100%);
-    justify-self: center;
-    border-color: color-mix(in srgb, var(--secondary) 30%, transparent);
-  }
-
-  .capture-panel__workflow button,
-  .capture-panel__capture-workflow button {
-    min-width: 0;
-    padding: 8px 6px;
-    overflow: hidden;
-    border: 0;
-    border-radius: 0;
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--bg-200) 92%, black);
-    text-overflow: ellipsis;
-  }
-
-  .capture-panel__workflow button.active,
-  .capture-panel__capture-workflow button.active {
-    color: var(--primary);
-    background: color-mix(in srgb, var(--primary) 12%, var(--bg-200));
-  }
-
-  .capture-panel__empty-step {
-    width: 100%;
-    height: 100%;
-    min-height: 420px;
-    display: grid;
-    place-content: center;
-    gap: 8px;
-    overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--primary) 36%, var(--bg-300));
-    color: var(--text-dim);
-    text-align: center;
-  }
-
-  .capture-panel__empty-step strong { color: var(--primary); }
-
-  .capture-panel__viewport,
-  .capture-panel__side {
-    overflow: hidden;
-    border: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg-200) 84%, transparent);
-  }
-
-  .capture-panel__viewport {
-    padding: 12px;
-    min-height: 0;
-  }
-
-  .capture-panel__viewfinder {
-    width: 100%;
-    height: 100%;
-    min-height: 420px;
-    border: 1px solid color-mix(in srgb, var(--primary) 36%, var(--bg-300));
-    background:
-      linear-gradient(180deg, rgba(13, 18, 28, 0.95), rgba(9, 12, 18, 0.98)),
-      repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.02) 0 1px, transparent 1px 24px),
-      repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.02) 0 1px, transparent 1px 24px);
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    gap: 10px;
-    text-align: center;
-    overflow: hidden;
-  }
-
-  .capture-panel__mesh-viewport {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    min-height: 420px;
-    overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--primary) 36%, var(--bg-300));
-    background: #090c12;
-  }
+  .capture-panel { display: flex; flex-direction: column; gap: 0; width: 100%; height: 100%; min-height: 0; min-width: 0; overflow: hidden; background: var(--bg-100); }
+  .capture-panel__navigation { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 10px 14px; flex: none; border-bottom: 1px solid var(--bg-300); }
+  .capture-panel__workflow, .capture-panel__capture-workflow { display: flex; gap: 4px; min-width: 0; }
+  .capture-panel__workflow button, .capture-panel__capture-workflow button { padding: 5px 12px; border: 0; border-bottom: 2px solid transparent; color: var(--text-dim); background: transparent; font-size: 11px; letter-spacing: .04em; }
+  .capture-panel__workflow button.active, .capture-panel__capture-workflow button.active { border-bottom-color: var(--secondary); color: var(--text); background: color-mix(in srgb, var(--secondary) 8%, transparent); }
+  .capture-panel__body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+  .capture-panel__body.scan-setup { grid-template-columns: minmax(0, 1fr); }
+  .capture-panel__viewport { min-height: 0; min-width: 0; overflow: auto; }
+  .capture-panel__empty-step { display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 12px; min-height: 100%; max-width: 620px; padding: 32px; margin: auto; color: var(--text-dim); }
+  .capture-panel__empty-step p { margin: 0; }
+  .capture-panel__empty-step button { padding: 6px 12px; background: var(--bg-200); color: var(--text); border: 1px solid var(--bg-300); }
+  .capture-panel__viewfinder { min-height: 100%; display: grid; align-content: center; padding: clamp(20px, 5cqi, 56px); }
+  .capture-panel__setup-content { width: 100%; max-width: 660px; margin: auto; display: flex; flex-direction: column; align-items: flex-start; gap: 16px; }
+  .capture-panel__eyebrow { color: var(--secondary); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+  .capture-panel__intro { margin: 0; max-width: 550px; color: var(--text-dim); font-size: 14px; }
+  .capture-panel__setup-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+  .capture-panel__setup-content :global(button) { padding: 8px 14px; border: 1px solid var(--bg-300); color: var(--text); background: var(--bg-200); font-size: 13px; letter-spacing: 0; }
+  .capture-panel__setup-content :global(button.shape-primary) { color: var(--bg-100); background: var(--secondary); border-color: var(--secondary); }
+  .capture-panel__preparation { list-style: none; counter-reset: scan-step; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; padding: 24px 0; margin: 8px 0 0; border-top: 1px solid var(--bg-300); }
+  .capture-panel__preparation li { display: flex; flex-direction: column; gap: 6px; counter-increment: scan-step; }
+  .capture-panel__preparation li::before { content: '0' counter(scan-step); font-family: var(--font-mono); font-size: 11px; color: var(--secondary); }
+  .capture-panel__preparation strong { font-size: 13px; font-weight: 600; }
+  .capture-panel__preparation span { font-size: 12px; color: var(--text-dim); }
+  .capture-panel__connection { display: flex; gap: 24px; align-items: center; width: 100%; }
+  .capture-panel__connection-info { display: flex; flex-direction: column; gap: 10px; min-width: 0; font-size: 12px; }
+  .capture-panel__connection-info > span { color: var(--text-dim); }
+  .capture-panel__setup-content progress { width: 100%; accent-color: var(--secondary); }
+  .capture-panel__mesh-viewport { position: relative; width: 100%; height: 100%; min-height: 260px; overflow: hidden; background: #090c12; }
 
   .capture-panel__mesh-status,
   .capture-panel__mesh-error {
@@ -1729,104 +1711,21 @@
   .capture-panel__mesh-status strong { color: var(--primary); }
   .capture-panel__mesh-error { bottom: 10px; color: var(--danger); white-space: normal; }
 
-  .capture-panel__label {
-    font-family: var(--font-mono);
-    font-size: 1rem;
-    letter-spacing: 0.08em;
-    color: var(--primary);
-    text-transform: uppercase;
-  }
-
-  .capture-panel__camera-status,
-  .capture-panel__pairing-url {
-    max-width: min(90%, 640px);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-family: var(--font-mono);
-    color: var(--text-dim);
-  }
-
-  .capture-panel__trust-url {
-    color: var(--secondary);
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-  }
-
-  .capture-panel__trust-disclosure {
-    width: min(90%, 640px);
-    overflow: hidden;
-    border: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg-100) 88%, transparent);
-    font-family: var(--font-mono);
-  }
-
-  .capture-panel__trust-disclosure > summary {
-    padding: 8px 10px;
-    overflow: hidden;
-    color: var(--text-dim);
-    cursor: pointer;
-    list-style: none;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .capture-panel__trust-disclosure > summary::-webkit-details-marker { display: none; }
-  .capture-panel__trust-disclosure > summary::before { content: '+ '; color: var(--primary); }
-  .capture-panel__trust-disclosure[open] > summary {
-    border-bottom: 1px solid var(--bg-300);
-    color: var(--primary);
-  }
-  .capture-panel__trust-disclosure[open] > summary::before { content: '− '; }
-  .capture-panel__trust-disclosure > .capture-panel__trust-steps { padding: 10px; }
-
-  .capture-panel__trust-steps {
-    width: min(90%, 640px);
-    display: grid;
-    gap: 4px;
-    overflow: hidden;
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    color: var(--text-dim);
-  }
-
-  .capture-panel__trust-steps strong {
-    color: var(--secondary);
-  }
-
-  .capture-panel__trust-steps code {
-    overflow-wrap: anywhere;
-    white-space: normal;
-    color: var(--text);
-  }
-
-  .capture-panel__qr {
-    width: 148px;
-    height: 148px;
-    border: 1px solid var(--bg-300);
-    image-rendering: pixelated;
-  }
-
-  .capture-panel__qr-row {
-    display: grid;
-    grid-template-columns: 148px 148px;
-    justify-content: space-between;
-    column-gap: 120px;
-    width: min(92%, 720px);
-    overflow: hidden;
-  }
-
-  .capture-panel__qr-row figure {
-    margin: 0;
-    display: grid;
-    gap: 4px;
-    color: var(--text-dim);
-    font-size: 0.68rem;
-    text-align: center;
-  }
+  .capture-panel__camera-status { margin: 0; color: var(--text-dim); overflow-wrap: anywhere; }
+  .capture-panel__pairing-url { color: var(--secondary); overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12px; }
+  .capture-panel__trust-url { color: var(--secondary); }
+  .capture-panel__trust-disclosure { width: 100%; border-top: 1px solid var(--bg-300); }
+  .capture-panel__trust-steps { display: grid; gap: 10px; padding: 0 0 16px; color: var(--text-dim); font-size: 12px; }
+  .capture-panel__trust-steps p { margin: 0; }
+  .capture-panel__trust-steps code { white-space: normal; overflow-wrap: anywhere; }
+  .capture-panel__qr { width: 148px; height: 148px; flex: none; image-rendering: pixelated; border: 6px solid white; background: white; }
 
   .capture-panel__side {
-    padding: 12px;
+    min-height: 0;
+    min-width: 0;
+    border-left: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    padding: 16px;
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -1838,7 +1737,6 @@
     flex-direction: column;
     gap: 4px;
     font-family: var(--font-mono);
-    text-transform: uppercase;
   }
 
   .capture-panel__header,
@@ -1853,11 +1751,6 @@
   .capture-panel__header strong {
     color: var(--primary);
     font-size: 0.9rem;
-  }
-
-  .capture-panel__header span {
-    color: var(--text-dim);
-    font-size: 0.72rem;
   }
 
   .capture-panel__stats {
@@ -2135,8 +2028,12 @@
   .capture-panel__actions {
     display: flex;
     gap: 8px;
+    flex-wrap: wrap;
     margin-top: auto;
-    overflow: hidden;
+    padding-top: 12px;
+    position: sticky;
+    bottom: -16px;
+    background: var(--bg-200);
   }
 
   .capture-panel__guided-entry,
@@ -2457,9 +2354,10 @@
 
   .capture-panel__primary,
   .capture-panel__secondary {
-    flex: 1 1 0;
+    flex: 1 1 110px;
     min-width: 0;
-    height: 40px;
+    min-height: 36px;
+    padding: 6px 10px;
     border: 1px solid var(--bg-300);
     border-radius: 0;
     font-family: var(--font-mono);
@@ -2482,23 +2380,16 @@
     color: var(--text);
   }
 
-  @media (max-width: 920px) {
-    .capture-panel {
-      grid-template-columns: 1fr;
-    }
-
-    .capture-panel__viewfinder {
-      min-height: 320px;
-    }
-
-    .capture-panel__mesh-viewport { min-height: 320px; }
+  @container (max-width: 720px) {
+    .capture-panel__body { grid-template-columns: minmax(0, 1fr); overflow-y: auto; display: flex; flex-direction: column; }
+    .capture-panel__viewport { flex: 1 0 280px; overflow: visible; }
+    .capture-panel__side { flex: none; border-left: 0; border-top: 1px solid var(--bg-300); overflow: visible; }
+    .scan-setup .capture-panel__viewport { flex-basis: auto; }
+    .capture-panel__preparation { grid-template-columns: 1fr; gap: 16px; }
   }
-
-  @media (max-width: 560px) {
-    .capture-panel__qr-row {
-      grid-template-columns: 148px;
-      justify-content: center;
-      row-gap: 56px;
-    }
+  @container (max-width: 440px) {
+    .capture-panel__connection { flex-direction: column; align-items: flex-start; }
+    .capture-panel__navigation { padding: 8px; }
+    .capture-panel__workflow button { padding: 5px 8px; }
   }
 </style>

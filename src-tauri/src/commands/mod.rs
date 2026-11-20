@@ -29,6 +29,7 @@ pub mod mission_evaluation;
 pub mod profile;
 pub mod project_mirror;
 pub mod provider_writer;
+pub mod puppet;
 pub mod render;
 pub mod semantic_manifest;
 pub mod session;

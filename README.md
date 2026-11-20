@@ -79,6 +79,42 @@ acceptance criteria. `scripts/generate_live_paper_template.py` regenerates the
 bundled PDF and deterministic fixtures; its development dependencies are listed
 in that script. Production uses the bundled template.
 
+## Rigid puppets for games
+
+Open the **Puppet** tab in **External Shapes** to assemble separate rigid body parts
+inside Ecky. Add STL/OBJ files, the current CAD model, or the current completed
+scan. **Add current scan** reads the original Object Capture OBJ with its colour
+texture, before the CAD STL conversion; CAD crop edits are not included.
+Keep OBJ, MTL and PNG/JPEG images together when importing files. STL has no colour
+texture. File imports expose units and up axis; scans use metres/Y-up automatically.
+
+For a rough scan, select its part and adjust **Smoothing limit (mm)** under
+**Mesh**. Start at 0.1–0.2 mm and select **Update preview** before exporting.
+The limit caps how far the surface can move at the part's current scale.
+Open edges stay in place and narrow triangles get a lower limit. The original
+scan and its texture remain available. Set the limit to 0 to use the original geometry.
+
+Give each part a parent, place its joint relative to the parent, and set its rest
+rotation. **Pick joint on part** chooses a point on the visible surface; numeric
+joint coordinates can place the pivot inside the part. Moving the pivot or
+changing parents preserves the neutral assembly. Use **Update preview** after
+editing. Set a swing axis, angle and phase, then **Play motion**. Opposite phases
+(0° and 180°) alternate limbs. **Stop-motion** uses stepped poses at about 12 fps.
+
+**Save puppet** writes a portable `.eckypuppet` archive containing the parts,
+colour textures and joint settings; **Open puppet** restores it. The puppet is
+separate from the CAD project's `.ecky` version history. The draft stays in the
+Puppet tab during this app session; save before restarting Ecky.
+**Export GLB** produces a self-contained glTF 2.0 asset in metres/Y-up, with a
+`puppet_motion` animation when any swing angle is nonzero. Viewport markers are
+not exported. Blender is not required.
+
+This first workflow supports rigid parts and one cyclic motion. It does not
+automatically segment a whole scan, deform skin, generate colliders, or simplify
+textured meshes. Import separate pieces and check dense scans against the game's
+performance budget. OBJ imports retain diffuse colour/texture; advanced material
+maps and texture transforms are not reproduced.
+
 ## The model source
 
 Save this as `model.ecky`:
