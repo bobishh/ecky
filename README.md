@@ -20,6 +20,8 @@ After launching the desktop app, create a project and paste the
 or STL. The [command-line example](#command-line) uses the same source and
 parameter.
 
+[Watch the 31-second command-line walkthrough](docs/screenshots/ecky-cli-demo.mp4).
+
 [Illustrated CAD book](docs/books/ecky-ir/missions/03-rake.md) · [Language reference](public/docs/ecky-ir.md)
 
 ## Working with a model
