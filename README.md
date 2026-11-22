@@ -1,20 +1,26 @@
 # Ecky CAD
 
-Ecky is an experimental desktop application for building parametric 3D parts from code, with optional AI assistance. It brings projects, a source editor, a 3D viewport, parameter controls, and conversation and version history into one workspace. You can work manually, use an API provider, connect Codex inside Ecky, or bring an external MCP agent.
+Ecky is a desktop CAD workspace for editing parametric parts. Describe a part
+with an optional AI connection or write its `.ecky` source yourself. Inspect
+the model alongside its source, change a dimension, and export STEP for CAD or
+STL for slicing.
 
-Models are stored as `.ecky` source: a small modeling language with Lisp-style syntax. You can write it yourself, ask a model to generate it, or let an external agent edit it through MCP. The native geometry backend uses Open CASCADE Technology (OCCT); supported models can be exported as STEP or STL.
+**Version 0.0.1 is an experimental source preview.** The first build requires
+Rust, Node.js and an installed Open CASCADE SDK. AI setup is optional.
 
-The project is at **0.0.1** and under active development. Expect to build from source, encounter bugs, and see changes to the language and APIs.
+[Build the desktop app](#running-from-source) · [Try a small model](#the-model-source) · [See worked examples](https://ecky-cad.com/)
 
-[Illustrated CAD book](docs/books/ecky-ir/missions/03-rake.md) · [Language reference](public/docs/ecky-ir.md) · [Website and examples](https://ecky-cad.com/)
+![Ecky workbench showing a filament-dryer model beside its editable source](docs/screenshots/ecky-workbench.png)
 
-![Ecky desktop workspace with project cards, a filament-dryer model, editable source, and a Codex conversation](docs/screenshots/ecky-workbench.png)
+## Try a part
 
-*The desktop workbench: projects, source, model preview, and conversation share a rearrangeable window layout.*
+After launching the desktop app, create a project and paste the
+[sphere example](#the-model-source) into its source. Change **Radius** from
+10 mm to 12 mm, wait for the preview, and export the rendered part as STEP
+or STL. The [command-line example](#command-line) uses the same source and
+parameter.
 
-## A code-first CAD workspace
-
-Ecky keeps a model's source, parameters, preview, and revision history in one workspace. Models use the `.ecky` language and compile to native geometry; AI assistance is optional. Edit a part, inspect the result, adjust its dimensions, and export it when ready.
+[Illustrated CAD book](docs/books/ecky-ir/missions/03-rake.md) · [Language reference](public/docs/ecky-ir.md)
 
 ## Working with a model
 
