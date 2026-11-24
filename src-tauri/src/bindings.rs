@@ -200,6 +200,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::sketch::accepted_brep_candidate_to_component_package,
         crate::commands::sketch::accept_sketch_brep_candidate_solution,
         crate::commands::design::apply_manual_code,
+        crate::commands::design::preview_parameter_ghost,
+        crate::commands::design::cancel_parameter_ghost,
         crate::commands::design::apply_manual_parameters,
         crate::commands::design::apply_imported_parameters,
         crate::commands::design::import_model_intent,

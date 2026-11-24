@@ -747,7 +747,7 @@ fn lower_ecky_with_large_stack(
     })
 }
 
-fn run_direct_occt_with_large_stack<T: Send + 'static>(
+pub(crate) fn run_direct_occt_with_large_stack<T: Send + 'static>(
     label: &'static str,
     task: impl FnOnce() -> AppResult<T> + Send + 'static,
 ) -> AppResult<T> {

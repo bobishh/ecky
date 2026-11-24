@@ -314,6 +314,8 @@ import {
     applyExternalShapeEdit,
     applyInlineComponentImport,
     previewInlineComponentImport,
+    previewParameterGhost,
+    cancelParameterGhost,
     applySemanticControlValue,
     previewExternalShapeSurfaceTrimPath,
     previewExternalShapeSurfaceTrimLoop,
@@ -5562,7 +5564,112 @@ import {
     handleTargetSelect(nextTarget);
   }
 
+  const PARAMETER_GHOST_DEBOUNCE_MS = 250;
+  const parameterGhostUiSupported = $derived(Boolean(
+    $activeThreadId && activeAuthoringContext.sourceLanguage === 'ecky' &&
+    activeAuthoringContext.geometryBackend === 'mesh' && !$workingCopy.postProcessing,
+  ));
+  const parameterGhostTarget = $derived.by(() => {
+    const snapshot = $activeRenderSnapshot;
+    if (
+      !snapshot?.messageId || snapshot.threadId !== $activeThreadId || snapshot.messageId !== $activeVersionId ||
+      $currentView !== 'workbench' || !paramsWindowState.visible || $activeThreadVersionLoading ||
+      !hasRenderableModel || hasSketchPreview || $workingCopy.dirty || $workingCopy.postProcessing ||
+      snapshot.design.postProcessing || snapshot.design.sourceLanguage !== 'ecky' ||
+      snapshot.artifactBundle.geometryBackend !== 'mesh'
+    ) return null;
+    return {
+      threadId: snapshot.threadId,
+      targetMessageId: snapshot.messageId,
+      key: JSON.stringify([snapshot.threadId, snapshot.messageId, snapshot.snapshotId]),
+    };
+  });
+  const parameterGhostTargetKey = $derived(parameterGhostTarget?.key ?? null);
+  let parameterGhostAsset = $state.raw<{ key: string; url: string } | null>(null);
+  const parameterGhostStlUrl = $derived(
+    parameterGhostAsset?.key === parameterGhostTargetKey ? parameterGhostAsset?.url ?? null : null,
+  );
+  let parameterGhostStatus = $state<string | null>(null);
+  let parameterGhostDraftSignature: string | null = null;
+  let parameterGhostTimer: ReturnType<typeof setTimeout> | null = null;
+  let parameterGhostRequestId: string | null = null;
+
+  function stopParameterGhostRequest() {
+    if (parameterGhostTimer !== null) clearTimeout(parameterGhostTimer);
+    parameterGhostTimer = null;
+    const requestId = parameterGhostRequestId;
+    parameterGhostRequestId = null;
+    if (requestId) {
+      void cancelParameterGhost(requestId).catch((error: unknown) => {
+        console.warn('Parameter preview cancellation failed:', formatBackendError(error));
+      });
+    }
+  }
+
+  function clearParameterGhost() {
+    stopParameterGhostRequest();
+    parameterGhostDraftSignature = null;
+    parameterGhostAsset = null;
+    parameterGhostStatus = null;
+  }
+
+  $effect(() => {
+    if (parameterGhostTargetKey) return clearParameterGhost;
+  });
+
+  function stageParameterGhost(parameters: DesignParams | null) {
+    const target = parameterGhostTarget;
+    if (!parameters || !target) {
+      clearParameterGhost();
+      return;
+    }
+
+    const signature = JSON.stringify(parameters);
+    if (signature === parameterGhostDraftSignature) return;
+    stopParameterGhostRequest();
+    parameterGhostDraftSignature = signature;
+    parameterGhostStatus = 'Updating draft preview…';
+    parameterGhostTimer = setTimeout(() => {
+      parameterGhostTimer = null;
+      if (parameterGhostTargetKey !== target.key) return;
+      const requestId = crypto.randomUUID();
+      parameterGhostRequestId = requestId;
+      void requestParameterGhost(target, parameters, requestId);
+    }, PARAMETER_GHOST_DEBOUNCE_MS);
+  }
+
+  async function requestParameterGhost(
+    { key, threadId, targetMessageId }: NonNullable<typeof parameterGhostTarget>,
+    parameters: DesignParams,
+    requestId: string,
+  ) {
+    try {
+      const { modelStlPath } = await previewParameterGhost({ threadId, targetMessageId, parameters, requestId });
+      if (parameterGhostRequestId !== requestId || parameterGhostTargetKey !== key) return;
+      if (modelStlPath) {
+        const stlUrl = toAssetUrl(modelStlPath);
+        if (parameterGhostStlUrl === stlUrl) parameterGhostStatus = 'Draft preview';
+        parameterGhostAsset = { key, url: stlUrl };
+      } else {
+        parameterGhostAsset = null;
+        parameterGhostStatus = 'No geometry changed.';
+      }
+    } catch (error) {
+      if (parameterGhostRequestId === requestId && parameterGhostTargetKey === key) {
+        parameterGhostStatus = `Draft preview failed: ${formatBackendError(error)}`;
+      }
+    } finally {
+      if (parameterGhostRequestId === requestId) parameterGhostRequestId = null;
+    }
+  }
+
+  function handleParameterGhostLoad(url: string, error?: string) {
+    if (url !== parameterGhostStlUrl || parameterGhostTimer !== null || parameterGhostRequestId) return;
+    parameterGhostStatus = error ? `Draft preview failed: ${error}` : 'Draft preview';
+  }
+
   function handleParamPanelChange(nextParams: DesignParams) {
+    clearParameterGhost();
     return handleParamChange(nextParams, null, true);
   }
 
@@ -5935,6 +6042,8 @@ ${detail}`,
                 overlayAdvisories={hasSketchPreview ? [] : overlayAdvisories}
                 activeMeasurementCallout={hasSketchPreview ? null : activeMeasurementCallout}
                 previewTransforms={hasSketchPreview ? {} : effectivePreviewTransforms}
+                {parameterGhostStlUrl}
+                onParameterGhostLoad={handleParameterGhostLoad}
                 viewerMode={!componentPlacementPreview && !hasSketchPreview && paramsWindowState.visible ? viewerMode : 'orbit'}
                 onOverlayChange={handleSemanticControlChange}
                 onControlFocusChange={(focus) => focusedMeasurementControl = focus}
@@ -6383,6 +6492,9 @@ ${detail}`,
           onSemanticChange={handleSemanticControlChange}
           onApplyMacroCode={(code) => applyManualCodeDraft(code)}
           onchange={handleParamPanelChange}
+          onPreviewDraft={parameterGhostTargetKey ? stageParameterGhost : undefined}
+          {parameterGhostStatus}
+          showParameterGhostControls={parameterGhostUiSupported}
           manualApplyBusy={$manualApplyBusyStore}
           onspecchange={(spec, params) => {
             paramPanelState.setUiSpec(spec);

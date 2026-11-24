@@ -533,6 +533,7 @@ pub struct AppState {
     /// Latest-wins admission authority for sketch preview submissions.
     pub sketch_preview_run_registry:
         Arc<crate::services::sketch_preview_submission::SketchPreviewRunRegistry>,
+    pub(crate) parameter_ghost_runs: Arc<crate::services::parameter_ghost::ParameterGhostRuns>,
     /// App-global journal of typed agent activity events.
     pub agent_activity: Arc<Mutex<crate::services::agent_activity::AgentActivityJournal>>,
     /// App handle for emitting runtime PTY events back into the frontend.
@@ -781,6 +782,7 @@ impl AppState {
             sketch_preview_run_registry: Arc::new(
                 crate::services::sketch_preview_submission::SketchPreviewRunRegistry::default(),
             ),
+            parameter_ghost_runs: Arc::default(),
             agent_activity: Arc::new(Mutex::new(
                 crate::services::agent_activity::AgentActivityJournal::default(),
             )),

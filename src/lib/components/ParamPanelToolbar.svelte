@@ -10,6 +10,8 @@
     saveValuesState = 'idle',
     activeVersionId = null,
     onApplyChanges,
+    onCancelDraft,
+    canCancelDraft = false,
     onUndoParams,
     onSaveValues,
     onSaveFields,
@@ -24,6 +26,8 @@
     manualApplyBusy?: boolean;
     activeVersionId?: string | null;
     onApplyChanges?: () => void;
+    onCancelDraft?: () => void;
+    canCancelDraft?: boolean;
     onUndoParams?: () => void;
     onSaveValues?: () => void;
     onSaveFields?: () => void;
@@ -47,6 +51,14 @@
           APPLY
         {/if}
       </button>
+      {#if onCancelDraft}
+        <button
+          class="btn btn-xs btn-ghost"
+          onclick={onCancelDraft}
+          disabled={!canCancelDraft || applying || manualApplyBusy || saveValuesState === 'saving'}
+          title="Discard edits and clear the draft preview"
+        >CANCEL</button>
+      {/if}
       <button
         class="btn btn-xs btn-secondary"
         onclick={onUndoParams}

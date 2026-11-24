@@ -8900,6 +8900,10 @@ void derive_exact_profile(const ProfileDerivationRequest& request, const fs::pat
 // deflection so curved surfaces stay smooth at small scales and avoid
 // over-tessellating large parts. Linear deflection stays fixed.
 static constexpr double kStlLinearDeflection = 0.04;  // mm chord error
+static constexpr double kPreviewLinearDeflection = 0.25;
+static constexpr double kPreviewAngularDeflection = 0.30;
+
+enum class PartMeshQuality { Production, Preview };
 static constexpr double kStlAngularDeflectionMin = 0.005;
 static constexpr double kStlAngularDeflectionMax = 0.1;
 
@@ -8980,20 +8984,31 @@ std::size_t configured_part_mesh_memory_budget_bytes() {
     }
 }
 
-std::string part_mesh_runtime_policy_identity(const ExecutionContext& context) {
+std::string part_mesh_runtime_policy_identity(
+    const ExecutionContext& context, PartMeshQuality quality
+) {
     if (context.runner_binary_digest.empty()) {
         throw EvalError("runner binary digest unavailable for part mesh identity");
     }
-    return std::string(ecky::kPartMeshPolicyIdentity) + "|cache=" + kSelectiveCacheSchema +
+    const std::string policy = quality == PartMeshQuality::Preview
+        ? "preview-part-mesh-v1;linear=" + ecky::canonical_f64(kPreviewLinearDeflection) +
+            ";angular=" + ecky::canonical_f64(kPreviewAngularDeflection)
+        : ecky::kPartMeshPolicyIdentity;
+    return policy + "|cache=" + kSelectiveCacheSchema +
         "|abi=" + direct_occt_runner_abi_digest() + "|binary=" + context.runner_binary_digest +
         "|occt=" + OCC_VERSION_COMPLETE;
 }
 
 ecky::PartMesh tessellate_brep_part_mesh(
-    const TopoDS_Shape& shape, const std::string& part_id, ExecutionContext& context
+    const TopoDS_Shape& shape, const std::string& part_id, ExecutionContext& context,
+    PartMeshQuality quality
 ) {
     StageExecutionTimer stage_timer(context, "mesh");
-    const double angular_deflection = stl_angular_deflection_for_linear(kStlLinearDeflection);
+    const bool preview = quality == PartMeshQuality::Preview;
+    const double linear_deflection = preview ? kPreviewLinearDeflection : kStlLinearDeflection;
+    const double angular_deflection = preview
+        ? kPreviewAngularDeflection
+        : stl_angular_deflection_for_linear(linear_deflection);
     // BRepMesh stores triangulation on face TShapes. Parts may be instances of
     // one root, so give every concurrent job private topology while retaining
     // read-only analytic geometry and dropping any prior triangulation.
@@ -9005,7 +9020,7 @@ ecky::PartMesh tessellate_brep_part_mesh(
     const Standard_Boolean mesher_parallel =
         context.worker_budget > 1 ? Standard_True : Standard_False;
     BRepMesh_IncrementalMesh mesher(
-        mesh_shape, kStlLinearDeflection, Standard_False, angular_deflection, mesher_parallel);
+        mesh_shape, linear_deflection, Standard_False, angular_deflection, mesher_parallel);
     (void)mesher;
 
     ecky::PartMesh mesh;
@@ -9127,7 +9142,8 @@ std::vector<ecky::PartMesh> build_part_meshes(
     const std::vector<ShapeRecord>& parts,
     const std::optional<fs::path>& cache_root,
     ecky::RenderCacheTransaction* cache_transaction,
-    ExecutionContext& context
+    ExecutionContext& context,
+    PartMeshQuality quality
 ) {
     struct InFlightMesh {
         std::size_t part_index = 0;
@@ -9144,7 +9160,7 @@ std::vector<ecky::PartMesh> build_part_meshes(
         staged_cache = std::make_unique<ecky::PartMeshCache>(
             cache_transaction->staging_root() / "part-meshes");
     }
-    const std::string policy_identity = part_mesh_runtime_policy_identity(context);
+    const std::string policy_identity = part_mesh_runtime_policy_identity(context, quality);
     for (std::size_t index = 0; index < parts.size(); ++index) {
         identities[index] = ecky::part_mesh_identity(part_cache_key(plan.parts[index], context), policy_identity);
         if (!cache) continue;
@@ -9174,10 +9190,14 @@ std::vector<ecky::PartMesh> build_part_meshes(
             in_flight.push_back({
                 index,
                 identities[index],
-                std::async(std::launch::async, [part, &context, lease = std::move(*lease)]() mutable {
-                    return part.kind == ShapeRecord::Kind::Manifold
-                        ? manifold_part_mesh(part.manifold, part.part_id, context)
-                        : tessellate_brep_part_mesh(part.shape, part.part_id, context);
+                std::async(std::launch::async, [part, &context, quality, lease = std::move(*lease)]() mutable {
+                    if (part.kind == ShapeRecord::Kind::Manifold) {
+                        const manifold::Manifold mesh = quality == PartMeshQuality::Preview
+                            ? part.manifold.Simplify(kPreviewLinearDeflection)
+                            : part.manifold;
+                        return manifold_part_mesh(mesh, part.part_id, context);
+                    }
+                    return tessellate_brep_part_mesh(part.shape, part.part_id, context, quality);
                 })
             });
         }
@@ -9344,6 +9364,8 @@ int run(int argc, char** argv, ExecutionContext& context) {
     fs::path plan_path;
     fs::path profile_request_path;
     fs::path drawing_request_path;
+    bool preview = false;
+    constexpr const char* usage = "usage: direct-occt-runner (--plan PLAN [--preview] | --derive-profile REQUEST.json | --project-drawing REQUEST.json) --out DIR";
     fs::path out_dir;
     for (int index = 1; index < argc; ++index) {
         std::string arg = argv[index];
@@ -9369,18 +9391,22 @@ int run(int argc, char** argv, ExecutionContext& context) {
             drawing_request_path = argv[++index];
             continue;
         }
+        if (arg == "--preview") {
+            preview = true;
+            continue;
+        }
         if (arg == "--out" && index + 1 < argc) {
             out_dir = argv[++index];
             continue;
         }
-        throw ParseError("usage: direct-occt-runner (--plan PLAN | --derive-profile REQUEST.json | --project-drawing REQUEST.json) --out DIR");
+        throw ParseError(usage);
     }
 
     const int selected_modes = static_cast<int>(!plan_path.empty()) +
                               static_cast<int>(!profile_request_path.empty()) +
                               static_cast<int>(!drawing_request_path.empty());
-    if (selected_modes != 1 || out_dir.empty()) {
-        throw ParseError("usage: direct-occt-runner (--plan PLAN | --derive-profile REQUEST.json | --project-drawing REQUEST.json) --out DIR");
+    if (selected_modes != 1 || out_dir.empty() || (preview && plan_path.empty())) {
+        throw ParseError(usage);
     }
 
     std::error_code runner_path_error;
@@ -9470,6 +9496,23 @@ int run(int argc, char** argv, ExecutionContext& context) {
     }
 
     fs::create_directories(out_dir);
+    if (preview) {
+        context.set_stage("write-preview-stl");
+        const std::vector<ecky::PartMesh> part_meshes = build_part_meshes(
+            plan, parts, cache_root, cache_transaction ? &*cache_transaction : nullptr,
+            context, PartMeshQuality::Preview);
+        std::vector<const ecky::PartMesh*> meshes;
+        meshes.reserve(part_meshes.size());
+        for (const ecky::PartMesh& mesh : part_meshes) meshes.push_back(&mesh);
+        write_part_mesh_stl_file(out_dir / "model.stl", meshes);
+        if (cache_transaction.has_value()) {
+            cache_transaction->commit();
+            evict_cache_to_budget(*cache_root);
+        }
+        context.set_stage("complete");
+        return 0;
+    }
+
     const fs::path step_path = out_dir / "model.step";
     const fs::path stl_path = out_dir / "model.stl";
     const fs::path topology_path = out_dir / "topology.json";
@@ -9503,7 +9546,8 @@ int run(int argc, char** argv, ExecutionContext& context) {
     // tessellate through the bounded/cacheable OCCT path; mesh-domain parts copy
     // their canonical Manifold triangles without a remesh or cross-part union.
     std::vector<ecky::PartMesh> part_meshes = build_part_meshes(
-        plan, parts, cache_root, cache_transaction ? &*cache_transaction : nullptr, context);
+        plan, parts, cache_root, cache_transaction ? &*cache_transaction : nullptr,
+        context, PartMeshQuality::Production);
     std::vector<const ecky::PartMesh*> preview_meshes;
     preview_meshes.reserve(part_meshes.size());
     for (const ecky::PartMesh& mesh : part_meshes) preview_meshes.push_back(&mesh);

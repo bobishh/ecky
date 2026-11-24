@@ -36,6 +36,7 @@ import {
   type ExternalShapeSource,
   type ApplyExternalShapeEditInput,
   type ApplyInlineComponentImportInput,
+  type ParameterGhostPreviewInput,
   type LibraryPanelIntent,
   type LibraryPanelProjection,
   type SurfaceTrimPathPreviewRequest,
@@ -1423,6 +1424,14 @@ export type ManualParameterApplyResult = {
   snapshotId: string | null;
   error: AppError | null;
 };
+
+export function previewParameterGhost(input: ParameterGhostPreviewInput) {
+  return invokeCommand(commands.previewParameterGhost(input));
+}
+
+export async function cancelParameterGhost(requestId: string): Promise<void> {
+  await invokeCommand(commands.cancelParameterGhost(requestId));
+}
 
 export async function applyManualParameters(input: {
   threadId: string;

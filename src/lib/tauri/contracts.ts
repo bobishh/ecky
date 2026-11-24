@@ -1564,6 +1564,22 @@ async applyManualCode(input: ManualCodeApplyRequest) : Promise<Result<ManualCode
     else return { status: "error", error: e  as any };
 }
 },
+async previewParameterGhost(input: ParameterGhostPreviewInput) : Promise<Result<ParameterGhostPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_parameter_ghost", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cancelParameterGhost(requestId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_parameter_ghost", { requestId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async applyManualParameters(input: ManualParameterApplyRequest) : Promise<Result<ManualParameterApplyResponse, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("apply_manual_parameters", { input }) };
@@ -2418,6 +2434,8 @@ export type PackageDependency = { packageId: string; version: string }
 export type PackageDistribution = { files: string[]; license?: string | null; repository?: string | null; dependencies?: PackageDependency[] }
 export type PackageVisibility = "source" | "compiled" | "locked" | "private"
 export type ParamValue = string | number | boolean | null
+export type ParameterGhostPreview = { modelStlPath: string | null }
+export type ParameterGhostPreviewInput = { threadId: string; targetMessageId: string; parameters: Partial<{ [key in string]: ParamValue }>; requestId: string }
 export type ParameterGroup = { groupId: string; label: string; parameterKeys?: string[]; partIds?: string[]; editable: boolean; presentation?: string | null; order?: number | null }
 export type ParsedParamsResult = { fields: UiField[]; params: Partial<{ [key in string]: ParamValue }> }
 export type PartBinding = { partId: string; freecadObjectName: string; label: string; kind: string; semanticRole?: string | null; viewerAssetPath?: string | null; viewerNodeIds?: string[]; parameterKeys?: string[]; editable: boolean; bounds?: ManifestBounds | null; volume?: number | null; area?: number | null }

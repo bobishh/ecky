@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 
 async function openSeededMacroMap(page: Page) {
   await page.getByRole('button', { name: 'Dialogue', exact: true }).click();
@@ -13,9 +13,25 @@ async function openSeededMacroMap(page: Page) {
   await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
 }
 
+async function holdParameterGhost(page: Page, field: Locator, value: number): Promise<string> {
+  await page.evaluate(() => { (window as any).__HOLD_PARAMETER_GHOST__ = true; });
+  await field.fill(String(value));
+  await expect.poll(() => page.evaluate(() => Boolean((window as any).__RESOLVE_PARAMETER_GHOST__))).toBe(true);
+  return page.evaluate(() => (window as any).__PARAM_CALLS__.filter(
+    (call: { cmd: string }) => call.cmd === 'preview_parameter_ghost',
+  ).at(-1).args.input.requestId);
+}
+
+async function releaseParameterGhost(page: Page) {
+  await page.evaluate(async () => {
+    (window as any).__RESOLVE_PARAMETER_GHOST__();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  });
+}
+
 test.describe('ParamPanel Persistence', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route(/\/(?:mock|model)\.stl(?:\?.*)?$/, async (route) => {
+    await page.route(/\/(?:mock|model|parameter-ghost)\.stl(?:\?.*)?$/, async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'model/stl',
@@ -641,6 +657,16 @@ endsolid mock
             error: null,
           };
         }
+        if (cmd === 'preview_parameter_ghost') {
+          const modelStlPath = `/parameter-ghost.stl?request=${args?.input?.requestId}`;
+          if ((window as any).__HOLD_PARAMETER_GHOST__) {
+            return new Promise((resolve) => {
+              (window as any).__RESOLVE_PARAMETER_GHOST__ = () => resolve({ modelStlPath });
+            });
+          }
+          return { modelStlPath };
+        }
+        if (cmd === 'cancel_parameter_ghost') return null;
         if (cmd === 'apply_manual_parameters') {
           if ((window as any).__PARAM_DELAY_APPLY__ && !args?.input?.persist) {
             await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1378,6 +1404,83 @@ endsolid mock
         ),
       )
       .toBe(beforeApplyCount + 1);
+  });
+
+  test('Given a saved native model When editing a value Then a debounced ghost appears before applying', async ({ page }) => {
+    await openSeededMacroMap(page);
+    await page.locator('.macro-ast-node-param .macro-ast-node__header').first().click();
+    const parameter = page.locator('.macro-ast-map-shell .param-field input.param-input').first();
+    const viewer = page.locator('.viewer-shell .viewer-host');
+    const panel = page.locator('.param-panel');
+    const initialValue = Number(await parameter.inputValue());
+    await expect(viewer).toHaveAttribute('data-model-status', 'loaded');
+    const modelKey = await page.locator('.viewer-shell').getAttribute('data-model-key');
+
+    await parameter.evaluate((input, initial) => {
+      const field = input as HTMLInputElement;
+      for (const next of [initial + 1, initial + 2, initial + 3]) {
+        field.value = String(next);
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }, initialValue);
+
+    await expect(viewer).toHaveAttribute('data-parameter-ghost-ready', 'true');
+    await expect(viewer).toHaveAttribute('data-model-status', 'loaded');
+    await expect(page.locator('.viewer-shell')).toHaveAttribute('data-model-key', modelKey ?? '');
+    const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
+    const previews = calls.filter((call: { cmd: string }) => call.cmd === 'preview_parameter_ghost');
+    expect(previews).toHaveLength(1);
+    expect(previews[0].args.input).toMatchObject({
+      threadId: 'mock-thread-1',
+      targetMessageId: 'mock-msg-1',
+      parameters: expect.objectContaining({ model_size_mm: initialValue + 3 }),
+      requestId: expect.any(String),
+    });
+    expect(calls.filter((call: { cmd: string }) => call.cmd === 'apply_manual_parameters')).toHaveLength(0);
+
+    await panel.getByRole('button', { name: 'CANCEL', exact: true }).click();
+    await expect(parameter).toHaveValue(String(initialValue));
+    await expect(viewer).toHaveAttribute('data-parameter-ghost-ready', 'false');
+    await expect(viewer).toHaveAttribute('data-model-status', 'loaded');
+
+    await parameter.fill(String(initialValue + 4));
+    await expect(viewer).toHaveAttribute('data-parameter-ghost-ready', 'true');
+    const pendingId = await holdParameterGhost(page, parameter, initialValue + 5);
+    await expect(viewer).toHaveAttribute('data-parameter-ghost-ready', 'true');
+    await panel.getByRole('button', { name: 'APPLY', exact: true }).click();
+    await expect(panel.getByRole('button', { name: 'APPLY', exact: true })).toBeEnabled();
+    await releaseParameterGhost(page);
+    await expect(viewer).toHaveAttribute('data-parameter-ghost-ready', 'false');
+    const finalCalls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
+    const applies = finalCalls.filter((call: { cmd: string }) => call.cmd === 'apply_manual_parameters');
+    expect(applies).toHaveLength(1);
+    expect(applies[0].args.input).toMatchObject({
+      targetMessageId: 'mock-msg-1', persist: true,
+      parameters: expect.objectContaining({ model_size_mm: initialValue + 5 }),
+    });
+    expect(finalCalls).toContainEqual({ cmd: 'cancel_parameter_ghost', args: { requestId: pendingId } });
+  });
+
+  test('Given a draft ghost When a newer preview is pending and cancelled Then late geometry stays hidden', async ({ page }) => {
+    await openSeededMacroMap(page);
+    await page.locator('.macro-ast-node-param .macro-ast-node__header').first().click();
+    const parameter = page.locator('.macro-ast-map-shell .param-field input.param-input').first();
+    const viewer = page.locator('.viewer-shell .viewer-host');
+    const initialValue = Number(await parameter.inputValue());
+    await parameter.fill(String(initialValue + 1));
+    await expect(viewer).toHaveAttribute('data-parameter-ghost-ready', 'true');
+
+    const pendingId = await holdParameterGhost(page, parameter, initialValue + 2);
+    await expect(viewer).toHaveAttribute('data-parameter-ghost-ready', 'true');
+
+    await page.locator('.param-panel').getByRole('button', { name: 'CANCEL', exact: true }).click();
+    await expect(viewer).toHaveAttribute('data-parameter-ghost-ready', 'false');
+    await releaseParameterGhost(page);
+    await expect(viewer).toHaveAttribute('data-parameter-ghost-ready', 'false');
+    await expect(parameter).toHaveValue(String(initialValue));
+    const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
+    expect(calls).toContainEqual({ cmd: 'cancel_parameter_ghost', args: { requestId: pendingId } });
+    expect(calls.filter((call: { cmd: string }) => call.cmd === 'apply_manual_parameters')).toHaveLength(0);
   });
 
   test('Given several map params When search result is chosen Then owning region frames, pulses, and inline apply keeps identity', async ({

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { get } from 'svelte/store';
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { uiHighlightStore } from './stores/uiHighlightStore';
   import { open } from '@tauri-apps/plugin-dialog';
@@ -132,6 +132,9 @@
     onSemanticChange,
     onControlFocusChange,
     onchange,
+    onPreviewDraft,
+    parameterGhostStatus = null,
+    showParameterGhostControls = false,
     onspecchange,
     onpostprocessingchange,
     onShowCode = undefined,
@@ -165,6 +168,9 @@
     onSemanticChange?: (primitiveId: string, value: ParamValue) => Promise<void> | void;
     onControlFocusChange?: (focus: MeasurementControlFocus | null) => void;
     onchange?: (params: DesignParams) => Promise<boolean | void> | boolean | void;
+    onPreviewDraft?: (params: DesignParams | null) => void;
+    parameterGhostStatus?: string | null;
+    showParameterGhostControls?: boolean;
     onspecchange?: (uiSpec: UiSpec, params: DesignParams) => void;
     onpostprocessingchange?: (postProcessing: PostProcessingSpec | null) => void;
     onShowCode?: () => void;
@@ -188,6 +194,7 @@
   let localParams = $state<DesignParams>({});
   let pendingParamDrafts = $state<DesignParams>({});
   let paramUndoStack = $state<DesignParams[]>([]);
+  let undoBeforeParameterDraft: DesignParams[] | null = null;
   let paramUndoDepth = $derived(paramUndoStack.length);
   const effectiveLocalParams = $derived.by(() => ({ ...localParams, ...pendingParamDrafts }));
   const pendingImages = $derived(
@@ -509,6 +516,7 @@
       localParams = {};
       pendingParamDrafts = {};
       paramUndoStack = [];
+      undoBeforeParameterDraft = null;
       localPostProcessing = null;
       selectedLithoId = null;
       lastVersionId = null;
@@ -526,11 +534,13 @@
     if (historySourceSignature !== lastHistorySourceSignature) {
       pendingParamDrafts = {};
       paramUndoStack = [];
+      undoBeforeParameterDraft = null;
       lastHistorySourceSignature = historySourceSignature;
     }
 
     // If we switched to a different version/thread, we must reset everything
     if (activeVersionId !== lastVersionId) {
+      undoBeforeParameterDraft = null;
       localParams = { ...parameters };
       pendingParamDrafts = {};
       lastVersionId = activeVersionId;
@@ -543,6 +553,7 @@
     }
 
     if (incomingParamsSignature !== lastIncomingParamsSignature && !editing) {
+      undoBeforeParameterDraft = null;
       if (suppressNextIncomingHistory) {
         suppressNextIncomingHistory = false;
       } else if (lastIncomingParamsSnapshot && !paramsEqual(lastIncomingParamsSnapshot, parameters)) {
@@ -1115,6 +1126,20 @@
     paramUndoStack = [...paramUndoStack, cloned].slice(-PARAM_UNDO_LIMIT);
   }
 
+  function recordParameterDraftHistory() {
+    if (showParameterGhostControls && !hasPendingChanges) undoBeforeParameterDraft = paramUndoStack;
+    pushParamHistory(effectiveLocalParams);
+  }
+
+  function cancelParameterDraft() {
+    localParams = cloneParams(parameters);
+    pendingParamDrafts = {};
+    if (undoBeforeParameterDraft) paramUndoStack = undoBeforeParameterDraft;
+    undoBeforeParameterDraft = null;
+    onPreviewDraft?.(null);
+    session.setStatus('Parameter edits discarded.');
+  }
+
   function clearPendingParamDraft(key: string) {
     if (!(key in pendingParamDrafts)) return;
     const nextDrafts = { ...pendingParamDrafts };
@@ -1125,7 +1150,7 @@
   function stageParamDraft(key: string, value: ParamValue) {
     const nextParams = { ...effectiveLocalParams, [key]: value };
     if (!paramsEqual(nextParams, effectiveLocalParams)) {
-      pushParamHistory(effectiveLocalParams);
+      recordParameterDraftHistory();
     }
     pendingParamDrafts = { ...pendingParamDrafts, [key]: value };
   }
@@ -1163,7 +1188,7 @@
     }
 
     if (!paramsEqual(nextParams, effectiveLocalParams)) {
-      pushParamHistory(effectiveLocalParams);
+      recordParameterDraftHistory();
     }
     localParams = nextParams;
     clearPendingParamDraft(key);
@@ -1213,6 +1238,7 @@
     const paramsToApply = cloneParams(effectiveLocalParams);
     console.log('ParamPanel: applyChanges clicked', { localParams: paramsToApply, hasPendingChanges });
     if (onchange) {
+      undoBeforeParameterDraft = null;
       applying = true;
       session.setError(null);
       try {
@@ -1239,6 +1265,7 @@
   async function undoParams() {
     if (applying || paramUndoStack.length === 0) return;
     const previousParams = cloneParams(paramUndoStack[paramUndoStack.length - 1]);
+    undoBeforeParameterDraft = null;
     paramUndoStack = paramUndoStack.slice(0, -1);
     localParams = previousParams;
     pendingParamDrafts = {};
@@ -1286,6 +1313,14 @@
       saveValuesState = 'idle';
     }
   }
+
+  $effect(() => {
+    if (!onPreviewDraft) return;
+    const draft = hasPendingChanges && !applying && !manualApplyBusy && saveValuesState !== 'saving' && !pendingImages.length
+      ? cloneParams(effectiveLocalParams)
+      : null;
+    untrack(() => onPreviewDraft?.(draft));
+  });
 
   function getRangeProps(field: ResolvedUiField) {
     if (field.type !== 'range' && field.type !== 'number') {
@@ -2040,7 +2075,7 @@
   }
 </script>
 
-<div class="param-panel">
+<div class="param-panel" class:parameter-ghost-enabled={showParameterGhostControls}>
   <ParamPanelModeTabs
     activeTab={activeTab}
     macroCode={macroCode}
@@ -2362,7 +2397,14 @@
         onApplyChanges={applyChanges}
         onUndoParams={undoParams}
         onSaveValues={saveValues}
+        onCancelDraft={showParameterGhostControls ? cancelParameterDraft : undefined}
+        canCancelDraft={hasPendingChanges}
       />
+      {#if showParameterGhostControls}
+        <div class="parameter-ghost-status" role="status" aria-label="Parameter preview">
+          {parameterGhostStatus ?? ''}
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -2426,6 +2468,10 @@
     scrollbar-gutter: stable;
   }
 
+  .parameter-ghost-enabled {
+    padding-bottom: 114px;
+  }
+
   .param-panel-body > :global(*) {
     flex-shrink: 0;
   }
@@ -2440,6 +2486,16 @@
     border: 1px solid var(--bg-300);
     background: color-mix(in srgb, var(--bg-200) 88%, var(--bg-100));
     overflow: hidden;
+  }
+
+  .parameter-ghost-status {
+    block-size: 2.6em;
+    margin-top: 5px;
+    overflow: auto;
+    overflow-wrap: anywhere;
+    color: var(--text-dim);
+    font-size: 0.68rem;
+    line-height: 1.3;
   }
 
   .auxiliary-panel {

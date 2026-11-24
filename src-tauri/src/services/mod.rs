@@ -31,6 +31,7 @@ pub mod live_paper_vision;
 pub mod managed_jev_trace;
 pub mod manual_code;
 pub mod manual_parameters;
+pub mod parameter_ghost;
 pub mod printability;
 pub mod profile_authoring;
 pub mod project_naming;

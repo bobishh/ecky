@@ -79,6 +79,8 @@
     overlayAdvisories = [],
     activeMeasurementCallout = null,
     previewTransforms = {},
+    parameterGhostStlUrl = null,
+    onParameterGhostLoad,
     isGenerating = false,
     retainModelWhileLoading = false,
     hideModelWhileBusy = false,
@@ -149,6 +151,8 @@
     overlayAdvisories?: Advisory[];
     activeMeasurementCallout?: ResolvedMeasurementCallout | null;
     previewTransforms?: Record<string, ImportedPreviewTransform>;
+    parameterGhostStlUrl?: string | null;
+    onParameterGhostLoad?: (url: string, error?: string) => void;
     isGenerating?: boolean;
     retainModelWhileLoading?: boolean;
     hideModelWhileBusy?: boolean;
@@ -248,6 +252,8 @@
   } | null = null;
   let componentPlacementReady = $state(false);
   let componentPlacementPositionChosen = false;
+  let parameterGhostMesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial> | null = null;
+  let parameterGhostReady = $state(false);
   let modelRoot: THREE.Group | null = null;
   let runtimeMeshes: RuntimeMesh[] = [];
   let runtimeEdges: RuntimeEdge[] = [];
@@ -426,6 +432,7 @@
       componentPlacementPreview.frame.updateMatrixWorld(true);
       bounds.expandByObject(componentPlacementPreview.mesh);
     }
+    if (parameterGhostMesh?.visible) bounds.expandByObject(parameterGhostMesh);
     if (bounds.isEmpty()) return;
     const clipPlanes = resolveViewerClipPlanes(bounds, camera.position);
     if (!Number.isFinite(clipPlanes.near) || !Number.isFinite(clipPlanes.far)) return;
@@ -489,20 +496,22 @@
   function renderModelForCapture() {
     if (!renderer || !scene || !camera) return;
     const preview = componentPlacementPreview;
-    if (!preview) {
-      renderer.render(scene, camera);
-      return;
+    const helper = preview?.transform.getHelper();
+    const gridPosition = preview ? viewerGrid?.position.clone() : null;
+    const ghost = parameterGhostMesh;
+    const ghostWasVisible = ghost?.visible ?? false;
+    if (preview && helper) {
+      preview.frame.visible = false;
+      helper.visible = false;
+      viewerGrid?.position.set(0, 0, 0);
     }
-    const helper = preview.transform.getHelper();
-    const gridPosition = viewerGrid?.position.clone();
-    preview.frame.visible = false;
-    helper.visible = false;
-    viewerGrid?.position.set(0, 0, 0);
+    if (ghost) ghost.visible = false;
     try {
       renderer.render(scene, camera);
     } finally {
-      preview.frame.visible = true;
-      helper.visible = true;
+      if (preview) preview.frame.visible = true;
+      if (helper) helper.visible = true;
+      if (ghost) ghost.visible = ghostWasVisible;
       if (gridPosition) viewerGrid?.position.copy(gridPosition);
     }
   }
@@ -932,6 +941,62 @@
     }
   }
 
+  function alignParameterGhost() {
+    if (!parameterGhostMesh) return;
+    parameterGhostMesh.visible = Boolean(modelRoot);
+    if (modelRoot) {
+      parameterGhostMesh.position.copy(modelRoot.position);
+      parameterGhostMesh.quaternion.copy(modelRoot.quaternion);
+    }
+  }
+
+  function disposeParameterGhost() {
+    parameterGhostMesh?.removeFromParent();
+    parameterGhostMesh?.geometry.dispose();
+    parameterGhostMesh?.material.dispose();
+    parameterGhostMesh = null;
+  }
+
+  function clearParameterGhostMesh() {
+    disposeParameterGhost();
+    parameterGhostReady = false;
+    updateCameraClipPlanes();
+  }
+
+  async function loadParameterGhost(stlUrl: string, cancelled: () => boolean) {
+    try {
+      const geometry = await loadStlGeometry(new STLLoader(), stlUrl);
+      if (cancelled() || !scene || parameterGhostStlUrl !== stlUrl) {
+        geometry.dispose();
+        return;
+      }
+      geometry.computeBoundingBox();
+      if (!geometry.boundingBox || geometry.boundingBox.isEmpty()) {
+        geometry.dispose();
+        throw new Error('The parameter preview STL has no geometry.');
+      }
+      const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+        color: 0xdca85c,
+        transparent: true,
+        opacity: 0.42,
+        depthTest: false,
+        depthWrite: false,
+      }));
+      mesh.renderOrder = 3;
+      disposeParameterGhost();
+      parameterGhostMesh = mesh;
+      alignParameterGhost();
+      scene.add(mesh);
+      updateCameraClipPlanes();
+      parameterGhostReady = true;
+      onParameterGhostLoad?.(stlUrl);
+    } catch (error) {
+      if (!cancelled() && parameterGhostStlUrl === stlUrl) {
+        onParameterGhostLoad?.(stlUrl, error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
+
   onMount(() => {
     setupViewer();
 
@@ -958,6 +1023,7 @@
     controls?.removeEventListener?.('end', handleOrbitEnd);
     controls?.removeEventListener?.('change', handleControlsChange);
     disposeComponentPlacement();
+    disposeParameterGhost();
     viewerGrid?.dispose();
     viewerGrid = null;
     if (!retainModelWhileLoading || !modelRoot) disposeModel();
@@ -1010,6 +1076,18 @@
 
   $effect(() => {
     if (componentPlacementReady) syncComponentPlacementControls();
+  });
+
+  $effect(() => {
+    const stlUrl = parameterGhostStlUrl;
+    if (!stlUrl) {
+      untrack(clearParameterGhostMesh);
+      return;
+    }
+    if (!scene) return;
+    let cancelled = false;
+    void untrack(() => loadParameterGhost(stlUrl, () => cancelled));
+    return () => { cancelled = true; };
   });
 
   $effect(() => {
@@ -1960,6 +2038,7 @@
       object.position.y -= box.min.y;
       object.updateMatrixWorld(true);
       syncComponentPlacementFrame();
+      alignParameterGhost();
       center.set(0, maxDim * 0.35, 0);
       camera.position.set(maxDim * 1.3, maxDim * 1.1, maxDim * 1.3);
     } else {
@@ -2625,6 +2704,7 @@
     disposeDetachedGroup(modelRoot);
     modelRoot = null;
     syncComponentPlacementFrame();
+    alignParameterGhost();
     modelStatus = 'empty';
     runtimeMeshes = [];
     runtimeEdges = [];
@@ -3046,6 +3126,7 @@
   class="viewer-host"
   data-model-status={modelStatus}
   data-component-placement-ready={componentPlacementReady}
+  data-parameter-ghost-ready={parameterGhostReady}
   data-window-drag-ignore
   data-capture-comparison-loaded={captureComparisonLoaded}
   data-capture-reference-visible={captureReferenceVisible}

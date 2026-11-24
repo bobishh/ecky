@@ -330,6 +330,95 @@ fn run_plan_step_stl_with_mode_and_bindings(
     app: &dyn PathResolver,
     enabled: bool,
 ) -> AppResult<Option<super::direct_occt_sdk::NativeExportOutcome>> {
+    let output_dir = output_dir.as_ref();
+    let Some(source_mesh_digests) = invoke_runner_plan(
+        plan,
+        authored_shape_bindings,
+        output_dir,
+        app,
+        enabled,
+        PlanOutput::Production,
+    )?
+    else {
+        return Ok(None);
+    };
+    let stl_path = output_dir.join(MODEL_STL_FILE_NAME);
+    let stage_report = read_runner_stage_report(output_dir)?;
+
+    // Scan for per-part binary STL files written by the runner into parts/.
+    let mut part_stl_paths = Vec::new();
+    let parts_dir = output_dir.join("parts");
+    if parts_dir.is_dir() {
+        for part in plan.parts.iter() {
+            let key = if part.key.trim().is_empty() {
+                "body".to_string()
+            } else {
+                part.key.clone()
+            };
+            let candidate = parts_dir.join(format!("{}.stl", key));
+            if candidate.is_file() {
+                part_stl_paths.push((key, candidate));
+            }
+        }
+    }
+
+    let step_path = output_dir.join(MODEL_STEP_FILE_NAME);
+    Ok(Some(if step_path.is_file() {
+        super::direct_occt_sdk::NativeExportOutcome::Exported {
+            step_path: output_dir.join(MODEL_STEP_FILE_NAME),
+            stl_path,
+            part_stl_paths,
+            tessellated_step: stage_report.tessellated_step_part_count.unwrap_or(0) > 0,
+            source_mesh_digests,
+        }
+    } else {
+        super::direct_occt_sdk::NativeExportOutcome::MeshExported {
+            stl_path,
+            part_stl_paths,
+            source_mesh_digests,
+        }
+    }))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlanOutput {
+    Production,
+    Preview,
+}
+
+pub(crate) fn run_plan_preview_mesh(
+    plan: &OcctPlan,
+    authored_shape_bindings: &[OcctAuthoredShapeBinding],
+    output_dir: &Path,
+    app: &dyn PathResolver,
+) -> AppResult<PathBuf> {
+    invoke_runner_plan(
+        plan,
+        authored_shape_bindings,
+        output_dir,
+        app,
+        runner_enabled(),
+        PlanOutput::Preview,
+    )?
+    .ok_or_else(|| {
+        AppError::render("The Direct OCCT runner is unavailable for parameter preview.")
+    })?;
+    fs::remove_file(output_dir.join(PLAN_FILE_NAME)).map_err(|error| {
+        AppError::persistence(format!(
+            "Could not remove the temporary preview plan: {error}"
+        ))
+    })?;
+    Ok(output_dir.join(MODEL_STL_FILE_NAME))
+}
+
+fn invoke_runner_plan(
+    plan: &OcctPlan,
+    authored_shape_bindings: &[OcctAuthoredShapeBinding],
+    output_dir: &Path,
+    app: &dyn PathResolver,
+    enabled: bool,
+    output_kind: PlanOutput,
+) -> AppResult<Option<Vec<String>>> {
     if !enabled {
         return Ok(None);
     }
@@ -365,7 +454,6 @@ fn run_plan_step_stl_with_mode_and_bindings(
         ))
     })?;
 
-    let output_dir = output_dir.as_ref();
     fs::create_dir_all(output_dir).map_err(|err| {
         AppError::validation(format!(
             "Direct OCCT runner could not create output dir '{}': {}",
@@ -392,6 +480,9 @@ fn run_plan_step_stl_with_mode_and_bindings(
         .arg(&plan_path)
         .arg("--out")
         .arg(output_dir);
+    if output_kind == PlanOutput::Preview {
+        command.arg("--preview");
+    }
     let cancellation = active_runner_cancellation();
     let output = run_command_output_with_cancellation(&mut command, cancellation.as_deref())
         .map_err(|err| {
@@ -450,41 +541,7 @@ fn run_plan_step_stl_with_mode_and_bindings(
             stl_path.display()
         )));
     }
-    let stage_report = read_runner_stage_report(output_dir)?;
-
-    // Scan for per-part binary STL files written by the runner into parts/.
-    let mut part_stl_paths = Vec::new();
-    let parts_dir = output_dir.join("parts");
-    if parts_dir.is_dir() {
-        for part in plan.parts.iter() {
-            let key = if part.key.trim().is_empty() {
-                "body".to_string()
-            } else {
-                part.key.clone()
-            };
-            let candidate = parts_dir.join(format!("{}.stl", key));
-            if candidate.is_file() {
-                part_stl_paths.push((key, candidate));
-            }
-        }
-    }
-
-    let step_path = output_dir.join(MODEL_STEP_FILE_NAME);
-    Ok(Some(if step_path.is_file() {
-        super::direct_occt_sdk::NativeExportOutcome::Exported {
-            step_path: output_dir.join(MODEL_STEP_FILE_NAME),
-            stl_path,
-            part_stl_paths,
-            tessellated_step: stage_report.tessellated_step_part_count.unwrap_or(0) > 0,
-            source_mesh_digests,
-        }
-    } else {
-        super::direct_occt_sdk::NativeExportOutcome::MeshExported {
-            stl_path,
-            part_stl_paths,
-            source_mesh_digests,
-        }
-    }))
+    Ok(Some(source_mesh_digests))
 }
 
 pub(crate) fn discover_direct_occt_runner_with_mode(

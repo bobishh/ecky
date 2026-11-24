@@ -987,6 +987,28 @@ pub async fn add_manual_version(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn preview_parameter_ghost(
+    input: crate::services::parameter_ghost::ParameterGhostPreviewInput,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<crate::services::parameter_ghost::ParameterGhostPreview> {
+    crate::services::parameter_ghost::preview_parameter_ghost(
+        input,
+        &state,
+        std::sync::Arc::new(app),
+    )
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn cancel_parameter_ghost(request_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    state.parameter_ghost_runs.cancel(&request_id);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn apply_manual_parameters(
     input: crate::services::manual_parameters::ManualParameterApplyRequest,
     state: State<'_, AppState>,

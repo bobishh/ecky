@@ -2063,7 +2063,7 @@ impl Drop for DirectOcctTextFontEnvGuard {
     }
 }
 
-fn with_direct_occt_text_font_path<T>(
+pub(crate) fn with_direct_occt_text_font_path<T>(
     cad_text_font_path: Option<&str>,
     run: impl FnOnce() -> AppResult<T>,
 ) -> AppResult<T> {
