@@ -20,11 +20,13 @@
 
   let {
     onImportFreecadLibraryPart,
-    onApplyComponentImport,
+    onPlaceComponent,
+    componentPlacementOpen = false,
     freecadEnabled = false,
   }: {
     onImportFreecadLibraryPart?: (item: FreecadLibraryItem) => Promise<void> | void;
-    onApplyComponentImport?: (input: LibraryComponentSelection & { label: string }) => Promise<void> | void;
+    onPlaceComponent?: (input: LibraryComponentSelection & { label: string }) => void;
+    componentPlacementOpen?: boolean;
     freecadEnabled?: boolean;
   } = $props();
 
@@ -42,7 +44,6 @@
   let componentRefreshSerial = 0;
   let packagesLoaded = $state(false);
   let packageImportBusy = $state(false);
-  let importingComponentId = $state<string | null>(null);
   let expandedPackageId = $state<string | null>(null);
   let hubReleases = $state<RegistryReleaseSummary[]>([]);
   let hubLoaded = $state(false);
@@ -234,42 +235,25 @@
     freecadPage = projection.page;
   }
 
-  async function importComponent(pkg: ComponentPackageHeader, component: ComponentHeader) {
-    if (importingComponentId || !onApplyComponentImport) return;
-    const importId = `${pkg.packageId}@${pkg.version}:${component.componentId}`;
-    importingComponentId = importId;
+  function placeComponent(selection: LibraryComponentSelection, label: string) {
+    if (componentPlacementOpen || !onPlaceComponent) return;
     loadError = null;
     try {
-      await onApplyComponentImport({
-        packageId: pkg.packageId,
-        version: pkg.version,
-        componentId: component.componentId,
-        label: component.displayName,
-      });
+      onPlaceComponent({ ...selection, label });
     } catch (error) {
       loadError = formatBackendError(error);
-    } finally {
-      importingComponentId = null;
     }
   }
 
-  async function insertAvailableComponent(component: ExtractedComponentSearchResult) {
-    if (importingComponentId || !onApplyComponentImport) return;
-    importingComponentId = component.componentId ?? `${component.origin}:${component.name}`;
-    loadError = null;
-    try {
-      if (component.componentId && !component.revisionDigest) {
-        throw new Error('Component has no pinned revision. Refresh the library before inserting.');
-      }
-      const selection: LibraryComponentSelection = component.componentId && component.revisionDigest
-        ? { componentId: component.componentId, revisionDigest: component.revisionDigest }
-        : { name: component.name };
-      await onApplyComponentImport({ ...selection, label: component.name });
-    } catch (error) {
-      loadError = formatBackendError(error);
-    } finally {
-      importingComponentId = null;
+  function placeAvailableComponent(component: ExtractedComponentSearchResult) {
+    if (component.componentId && !component.revisionDigest) {
+      loadError = 'Component has no pinned revision. Refresh the library before placing it.';
+      return;
     }
+    const selection: LibraryComponentSelection = component.componentId && component.revisionDigest
+      ? { componentId: component.componentId, revisionDigest: component.revisionDigest }
+      : { name: component.name };
+    placeComponent(selection, component.name);
   }
 
   async function handleImportPackageArchive() {
@@ -490,11 +474,11 @@
               {/if}
               <button
                 class="primary-action"
-                aria-label={`${importingComponentId === (component.componentId ?? `${component.origin}:${component.name}`) ? 'INSERTING' : 'INSERT'} ${component.name}`}
-                onclick={() => insertAvailableComponent(component)}
-                disabled={Boolean(importingComponentId) || !onApplyComponentImport}
+                aria-label={`Place ${component.name} in scene`}
+                onclick={() => placeAvailableComponent(component)}
+                disabled={componentPlacementOpen || !onPlaceComponent}
               >
-                {importingComponentId === (component.componentId ?? `${component.origin}:${component.name}`) ? 'INSERTING...' : 'INSERT INTO CODE'}
+                PLACE IN SCENE
               </button>
             </article>
           {/each}
@@ -518,15 +502,18 @@
               {#if expandedPackageId === `${pkg.packageId}@${pkg.version}`}
                 <div class="component-list" aria-label={`${pkg.displayName} components`}>
                   {#each pkg.components as component (component.componentId)}
-                    {@const importId = `${pkg.packageId}@${pkg.version}:${component.componentId}`}
                     <div class="component-row">
                       <span>{component.displayName}</span>
                       <button
-                        aria-label={`${importingComponentId === importId ? 'IMPORTING' : 'IMPORT'} ${component.displayName}`}
-                        onclick={() => importComponent(pkg, component)}
-                        disabled={Boolean(importingComponentId)}
+                        aria-label={`Place ${component.displayName} in scene`}
+                        onclick={() => placeComponent({
+                          packageId: pkg.packageId,
+                          version: pkg.version,
+                          componentId: component.componentId,
+                        }, component.displayName)}
+                        disabled={componentPlacementOpen || !onPlaceComponent}
                       >
-                        {importingComponentId === importId ? 'IMPORTING...' : 'IMPORT'}
+                        PLACE IN SCENE
                       </button>
                     </div>
                   {/each}

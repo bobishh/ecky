@@ -19,6 +19,7 @@
     focused = false,
     highlighted = false,
     maximizedByDefault = false,
+    closeDisabled = false,
     onclose,
     children
   }: {
@@ -35,6 +36,7 @@
     focused?: boolean;
     highlighted?: boolean;
     maximizedByDefault?: boolean;
+    closeDisabled?: boolean;
     onclose: () => void;
     children: Snippet;
   } = $props();
@@ -198,6 +200,8 @@
   });
 </script>
 
+<svelte:window onresize={() => { if (!windowId) fitToViewport(); }} />
+
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="window"
@@ -209,6 +213,7 @@
   data-window-id={windowId ?? undefined}
   style="left: {x}px; top: {y}px; width: {width}px; height: {height}px; z-index: {2000 + z};"
   role="dialog"
+  aria-label={title || undefined}
   aria-hidden={hidden}
   onmousedown={handleWindowMouseDown}
   ondblclick={handleWindowDoubleClick}
@@ -229,7 +234,7 @@
           {/if}
         </svg>
       </button>
-      <button class="window-close" onclick={handleClose}>&times;</button>
+      <button type="button" class="window-close" aria-label="Close window" disabled={closeDisabled} onclick={handleClose}>&times;</button>
     </div>
   </div>
   <div class="window-content">

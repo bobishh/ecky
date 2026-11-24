@@ -531,6 +531,14 @@ async resolveInstalledComponentSource(packageId: string, version: string, compon
     else return { status: "error", error: e  as any };
 }
 },
+async previewInlineComponentImport(input: ApplyInlineComponentImportInput) : Promise<Result<InlineComponentImportPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_inline_component_import", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async applyInlineComponentImport(input: ApplyInlineComponentImportInput) : Promise<Result<ApplyInlineComponentImportResult, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("apply_inline_component_import", { input }) };
@@ -1853,7 +1861,7 @@ export type ApplyCapturePreviewInput = { runId: string }
 export type ApplyCapturePreviewResult = { source: string; draft: ManualCodeApplyResponse }
 export type ApplyExternalShapeEditInput = { threadId: string; baseMessageId?: string | null; expectedSourceDigest: string; edit: ExternalShapeEditIntent }
 export type ApplyExternalShapeEditResult = { version: ManualCodeApplyResponse; sourceDigest: string; externalSources: ExternalShapeSource[] }
-export type ApplyInlineComponentImportInput = ({ packageId: string; version: string; componentId: string } | { componentId: string; revisionDigest: string } | { name: string }) & { threadId: string; baseMessageId: string; expectedSourceDigest: string }
+export type ApplyInlineComponentImportInput = ({ packageId: string; version: string; componentId: string } | { componentId: string; revisionDigest: string } | { name: string }) & { threadId: string; baseMessageId: string; expectedSourceDigest: string; positionMm?: [number, number, number] | null }
 export type ApplyInlineComponentImportResult = { version: ManualCodeApplyResponse; sourceDigest: string; entrySymbol: string; partKey: string }
 export type ApplySemanticControlValueInput = { threadId: string; targetMessageId: string; primitiveId: string; value: ParamValue }
 export type ApplySemanticControlValueResult = { parameterPatch: Partial<{ [key in string]: ParamValue }>; changedParameterKeys: string[]; appliedPrimitiveIds: string[] }
@@ -2305,6 +2313,7 @@ export type ImportModelIntent = { source: ImportedModelSource; threadId?: string
 export type ImportedModelProjection = { threadId: string; messageId: string; title: string; message: Message; designOutput: DesignOutput; artifactBundle: ArtifactBundle; modelManifest: ModelManifest; snapshotId: string }
 export type ImportedModelSource = { kind: "fcstd"; sourcePath: string } | { kind: "freecadLibrary"; item: FreecadLibraryItem }
 export type ImportedParameterApplyRequest = { threadId: string; targetMessageId: string; parameters: Partial<{ [key in string]: ParamValue }>; persist?: boolean; title?: string | null; versionName?: string | null }
+export type InlineComponentImportPreview = { modelStlPath: string }
 export type InstalledAssemblyComponentControls = { instanceId: string; componentId: string; parameters: Partial<{ [key in string]: ParamValue }>; placementFrame?: PortFrame | null; installedSource: InstalledComponentSource }
 export type InstalledAssemblyComponentRuntime = { instanceId: string; componentId: string; parameters: Partial<{ [key in string]: ParamValue }>; placementFrame?: PortFrame | null; runtime: InstalledComponentRuntime }
 export type InstalledAssemblyComponentSource = { instanceId: string; componentId: string; placementFrame?: PortFrame | null; installedSource: InstalledComponentSource }

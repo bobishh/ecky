@@ -1084,6 +1084,10 @@ export async function applyExternalShapeEdit(
   };
 }
 
+export async function previewInlineComponentImport(input: ApplyInlineComponentImportInput) {
+  return invokeCommand(commands.previewInlineComponentImport(input));
+}
+
 export async function applyInlineComponentImport(
   input: ApplyInlineComponentImportInput,
 ): Promise<{

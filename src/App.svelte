@@ -35,6 +35,7 @@
   import { getAgentActivity, getProjectSource, type FemMeshPreviewResponse, type FemRunResponse } from './lib/tauri/client';
   import type { FemDisplayOptions } from './lib/femDisplay';
   import LibraryPanel from './lib/LibraryPanel.svelte';
+  import ComponentPlacementWindow from './lib/workbench/ComponentPlacementWindow.svelte';
   import { campaignDefinitionClient, type CampaignCurrentStepPayload, type CampaignDefinitionSummary } from './lib/projects/campaignDefinitionClient';
   import { campaignRunClient, type CampaignRun } from './lib/projects/campaignRunClient';
   import {
@@ -312,6 +313,7 @@ import {
     listExternalShapeSources,
     applyExternalShapeEdit,
     applyInlineComponentImport,
+    previewInlineComponentImport,
     applySemanticControlValue,
     previewExternalShapeSurfaceTrimPath,
     previewExternalShapeSurfaceTrimLoop,
@@ -378,6 +380,7 @@ import {
     SurfaceTrimRegionPreviewResponse,
     ReopenedCaptureRun,
     FreecadLibraryItem,
+    ApplyInlineComponentImportInput,
     LibraryComponentSelection,
     SketchDocument,
     SketchDraftSource,
@@ -5713,66 +5716,179 @@ import {
     return { status: 'saved' };
   }
 
-  async function handleApplyComponentImport(input: LibraryComponentSelection & { label: string }) {
+  type ComponentPlacementDraft = {
+    id: number;
+    label: string;
+    target: ApplyInlineComponentImportInput;
+    stlUrl: string | null;
+    positionMm: [number, number, number];
+    coordinates: [number | null, number | null, number | null];
+    previewReady: boolean;
+    applying: boolean;
+    error: string | null;
+  };
+
+  let componentPlacement = $state.raw<ComponentPlacementDraft | null>(null);
+  let nextComponentPlacementId = 0;
+  const componentPlacementTargetError = $derived(
+    componentPlacement && (
+      componentPlacement.target.threadId !== $activeThreadId ||
+      componentPlacement.target.baseMessageId !== $activeVersionId || $workingCopy.dirty
+    ) ? 'The target model changed. Close this window and place the component again.' : null,
+  );
+  const componentPlacementCanApply = $derived(Boolean(
+    componentPlacement?.previewReady && !componentPlacement.applying &&
+      !componentPlacementTargetError && componentPlacement.coordinates.every((value) => value !== null),
+  ));
+  const componentPlacementPreview = $derived(
+    componentPlacement?.stlUrl && !componentPlacementTargetError
+      ? {
+        stlUrl: componentPlacement.stlUrl,
+        positionMm: componentPlacement.positionMm,
+        disabled: componentPlacement.applying,
+      }
+      : null,
+  );
+
+  $effect(() => {
+    const draft = componentPlacement;
+    if (draft && (draft.target.threadId !== $activeThreadId || $currentView !== 'workbench')) {
+      componentPlacement = null;
+    }
+  });
+
+  function patchComponentPlacement(id: number, patch: Partial<ComponentPlacementDraft>) {
+    if (componentPlacement?.id === id) componentPlacement = { ...componentPlacement, ...patch };
+  }
+
+  function handlePlaceComponent(input: LibraryComponentSelection & { label: string }) {
+    if (componentPlacement) return;
     const threadId = get(activeThreadId);
     const baseMessageId = get(activeVersionId);
     const expectedSourceDigest =
-      sessionModelManifest?.sourceDigest ?? activeVersionMessage?.modelManifest?.sourceDigest;
-    if (!threadId || !baseMessageId || !expectedSourceDigest) {
-      throw new Error('Component import requires an active persisted design source.');
+      activeVersionMessage?.modelManifest?.sourceDigest ?? sessionModelManifest?.sourceDigest;
+    if (!threadId || !baseMessageId || !expectedSourceDigest || activeAuthoringContext.sourceLanguage !== 'ecky') {
+      throw new Error('Open a saved Ecky source model before placing a component.');
+    }
+    if (get(workingCopy).dirty) {
+      throw new Error('Apply or discard the current edits before placing a component.');
     }
 
-    session.setStatus(`Copy-inlining component: ${input.label}...`);
-    const { label: _label, ...selection } = input;
-    const result = await applyInlineComponentImport({
-      threadId,
-      baseMessageId,
-      expectedSourceDigest,
-      ...selection,
-    });
-    const imported = result.version;
-    if (
-      imported.status === 'error' ||
-      imported.error ||
-      !imported.messageId ||
-      !imported.artifactBundle ||
-      !imported.modelManifest ||
-      !imported.snapshotId
-    ) {
-      throw imported.error ?? new Error('Component import returned no persisted runtime.');
-    }
+    const { label, ...selection } = input;
+    const target = { ...selection, threadId, baseMessageId, expectedSourceDigest };
+    const id = ++nextComponentPlacementId;
+    componentPlacement = {
+      id, label, target, stlUrl: null, positionMm: [0, 0, 0], coordinates: [0, 0, 0],
+      previewReady: false, applying: false, error: null,
+    };
+    currentView.set('workbench');
+    closeWindowStore('library');
+    drawMode = false;
+    void previewInlineComponentImport(target).then(
+      ({ modelStlPath }) => patchComponentPlacement(id, { stlUrl: toAssetUrl(modelStlPath) }),
+      (error) => patchComponentPlacement(id, { error: formatBackendError(error) }),
+    );
+  }
 
-    rememberCommittedVersionMessage(threadId, imported.designOutput.title, {
-      id: imported.messageId,
-      role: 'assistant',
-      content: imported.designOutput.response,
-      status: imported.status,
-      output: imported.designOutput,
-      usage: null,
-      artifactBundle: imported.artifactBundle,
-      modelManifest: imported.modelManifest,
-      agentOrigin: null,
-      imageData: null,
-      visualKind: null,
-      attachmentImages: [],
-      timestamp: Date.now() / 1000,
-    });
-    hydrateActiveRenderSnapshot({
-      snapshotId: imported.snapshotId,
-      threadId,
-      messageId: imported.messageId,
-      design: imported.designOutput,
-      artifactBundle: imported.artifactBundle,
-      modelManifest: imported.modelManifest,
-      selectedPartId: null,
-      stlUrl: toAssetUrl(imported.artifactBundle.modelStlPath),
-      status: `${input.label} imported as a new version.`,
-    });
+  function cancelComponentPlacement() {
+    if (!componentPlacement?.applying) componentPlacement = null;
+  }
+
+  function moveComponentPlacement(positionMm: [number, number, number]) {
+    if (!componentPlacement || componentPlacement.applying) return;
+    patchComponentPlacement(componentPlacement.id, { positionMm, coordinates: positionMm });
+  }
+
+  function editComponentPlacementCoordinate(index: 0 | 1 | 2, value: number | null) {
+    if (!componentPlacement || componentPlacement.applying) return;
+    const coordinates: ComponentPlacementDraft['coordinates'] = [...componentPlacement.coordinates];
+    const positionMm: ComponentPlacementDraft['positionMm'] = [...componentPlacement.positionMm];
+    coordinates[index] = value;
+    if (value !== null) positionMm[index] = value;
+    patchComponentPlacement(componentPlacement.id, { coordinates, positionMm });
+  }
+
+  async function applyComponentPlacement() {
+    const draft = componentPlacement;
+    if (!draft || !componentPlacementCanApply) return;
+    const { threadId, baseMessageId } = draft.target;
+    patchComponentPlacement(draft.id, { applying: true, error: null });
+    try {
+      const { version } = await applyInlineComponentImport({ ...draft.target, positionMm: draft.positionMm });
+      if (version.status === 'error' || version.error) {
+        const detail = formatBackendError(version.error ?? new Error('See the version history for details.'));
+        if (version.messageId) {
+          patchComponentPlacement(draft.id, {
+            previewReady: false,
+            stlUrl: null,
+            error: `The version was saved but failed to render.
+${detail}`,
+          });
+          void refreshThreadHistoryProjection(threadId);
+          return;
+        }
+        patchComponentPlacement(draft.id, { error: detail });
+        return;
+      }
+      if (!version.messageId || !version.artifactBundle || !version.modelManifest || !version.snapshotId) {
+        throw new Error('Component placement returned no persisted runtime.');
+      }
+      if (componentPlacement?.id === draft.id) componentPlacement = null;
+      const selectedVersionId = get(activeVersionId);
+      if (get(activeThreadId) !== threadId || (selectedVersionId !== baseMessageId && selectedVersionId !== version.messageId)) {
+        void refreshThreadHistoryProjection(threadId);
+        return;
+      }
+      rememberCommittedVersionMessage(threadId, version.designOutput.title, {
+        id: version.messageId,
+        role: 'assistant',
+        content: version.designOutput.response,
+        status: version.status,
+        output: version.designOutput,
+        usage: null,
+        artifactBundle: version.artifactBundle,
+        modelManifest: version.modelManifest,
+        agentOrigin: null,
+        imageData: null,
+        visualKind: null,
+        attachmentImages: [],
+        timestamp: Date.now() / 1000,
+      });
+      hydrateActiveRenderSnapshot({
+        snapshotId: version.snapshotId,
+        threadId,
+        messageId: version.messageId,
+        design: version.designOutput,
+        artifactBundle: version.artifactBundle,
+        modelManifest: version.modelManifest,
+        selectedPartId: null,
+        stlUrl: toAssetUrl(version.artifactBundle.modelStlPath),
+        status: `${draft.label} placed as a new version.`,
+      });
+    } catch (error) {
+      patchComponentPlacement(draft.id, { error: formatBackendError(error) });
+    } finally {
+      patchComponentPlacement(draft.id, { applying: false });
+    }
   }
 
 </script>
 
 <svelte:window onbeforeunload={hardFlushWindowLayout} onresize={handleViewportResize} />
+
+{#if componentPlacement}
+  <ComponentPlacementWindow
+    label={componentPlacement.label}
+    coordinates={componentPlacement.coordinates}
+    preparing={!componentPlacement.previewReady}
+    applying={componentPlacement.applying}
+    canApply={componentPlacementCanApply}
+    error={componentPlacement.error ?? componentPlacementTargetError}
+    onCoordinateChange={editComponentPlacementCoordinate}
+    onApply={() => void applyComponentPlacement()}
+    onCancel={cancelComponentPlacement}
+  />
+{/if}
 
 <div class="app-page" role="application" style:--workbench-bottom-inset={`${workbenchBottomInset}px`}>
   {#if $onboarding.isActive}
@@ -5819,7 +5935,7 @@ import {
                 overlayAdvisories={hasSketchPreview ? [] : overlayAdvisories}
                 activeMeasurementCallout={hasSketchPreview ? null : activeMeasurementCallout}
                 previewTransforms={hasSketchPreview ? {} : effectivePreviewTransforms}
-                viewerMode={!hasSketchPreview && paramsWindowState.visible ? viewerMode : 'orbit'}
+                viewerMode={!componentPlacementPreview && !hasSketchPreview && paramsWindowState.visible ? viewerMode : 'orbit'}
                 onOverlayChange={handleSemanticControlChange}
                 onControlFocusChange={(focus) => focusedMeasurementControl = focus}
                 onSearchQueryChange={(query) => sharedContextSearchQuery = query}
@@ -5833,6 +5949,18 @@ import {
                 busyPhase={viewerBusyPhase}
                 busyText={viewerBusyText}
                 topologyMode={viewerTopologyMode}
+                componentPlacement={componentPlacementPreview}
+                onComponentPlacementMove={moveComponentPlacement}
+                onComponentPlacementLoad={(url) => {
+                  if (componentPlacement?.stlUrl === url) {
+                    patchComponentPlacement(componentPlacement.id, { previewReady: true });
+                  }
+                }}
+                onComponentPlacementError={(url, error) => {
+                  if (componentPlacement?.stlUrl === url) {
+                    patchComponentPlacement(componentPlacement.id, { previewReady: false, error });
+                  }
+                }}
               />
               {#if selectedVersionHasNoModel}
                 <section class="viewport-version-error" role="alert" aria-label="Selected version has no model">
@@ -6062,8 +6190,8 @@ import {
     {mountedWindows}
     highlightTarget={$onboarding.highlightTarget}
     {drawMode}
-    canDraw={selectedModelCapabilities.supportsVision}
-    drawUnavailableReason={selectedModelCapabilities.reason}
+    canDraw={!componentPlacement && selectedModelCapabilities.supportsVision}
+    drawUnavailableReason={componentPlacement ? 'Finish placing the component before drawing annotations.' : selectedModelCapabilities.reason}
     terminalDock={visibleAgentTerminal
       ? { agentLabel: visibleAgentTerminal.agentLabel, attentionRequired: visibleAgentTerminal.attentionRequired }
       : null}
@@ -6095,7 +6223,8 @@ import {
       <LibraryPanel
         freecadEnabled={activeAuthoringContext.geometryBackend === 'freecad'}
         onImportFreecadLibraryPart={handleImportFreecadLibraryPart}
-        onApplyComponentImport={handleApplyComponentImport}
+        onPlaceComponent={handlePlaceComponent}
+        componentPlacementOpen={componentPlacement !== null}
       />
     {/snippet}
 

@@ -195,6 +195,19 @@ pub struct CopyInlineComponentImportResponse {
     pub part_key: String,
 }
 
+impl CopyInlineComponentImportResponse {
+    pub(crate) fn standalone_source(&self) -> AppResult<String> {
+        Ok(insert_inline_component_source(
+            "(model)",
+            &self.component_source,
+            &self.entry_symbol,
+            &self.part_key,
+            None,
+        )?
+        .authored_source)
+    }
+}
+
 /// Exact library selection shared by UI and MCP. Local insertions always pin a
 /// revision; legacy name lookup remains available for extracted/built-in source.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, specta::Type, PartialEq, Eq)]
@@ -223,19 +236,29 @@ pub fn copy_inline_library_component(
     selection: LibraryComponentSelection,
     authored_source: String,
 ) -> AppResult<CopyInlineComponentImportResponse> {
+    copy_inline_library_component_at(app, selection, &authored_source, None)
+}
+
+pub(crate) fn copy_inline_library_component_at(
+    app: &dyn PathResolver,
+    selection: LibraryComponentSelection,
+    authored_source: &str,
+    position_mm: Option<[f64; 3]>,
+) -> AppResult<CopyInlineComponentImportResponse> {
     let record = match selection {
         LibraryComponentSelection::Package {
             package_id,
             version,
             component_id,
         } => {
-            return copy_inline_component_import(
-                CopyInlineComponentImportRequest {
+            return copy_inline_package_at(
+                ComponentCoordinate {
                     package_id,
                     version,
                     component_id,
-                    authored_source,
                 },
+                authored_source,
+                position_mm,
                 &InstalledLibraryComponentResolver { app },
             );
         }
@@ -251,7 +274,13 @@ pub fn copy_inline_library_component(
             crate::component_package_runtime::read_extracted_component(app, &name)?
         }
     };
-    insert_inline_component_source(&authored_source, &record.source, &record.name, &record.name)
+    insert_inline_component_source(
+        authored_source,
+        &record.source,
+        &record.name,
+        &record.name,
+        position_mm,
+    )
 }
 
 /// Materialize an installed source component into authored source.
@@ -263,11 +292,24 @@ pub fn copy_inline_component_import(
     request: CopyInlineComponentImportRequest,
     resolver: &dyn InstalledComponentResolver,
 ) -> AppResult<CopyInlineComponentImportResponse> {
-    let coordinate = ComponentCoordinate {
-        package_id: request.package_id,
-        version: request.version,
-        component_id: request.component_id,
-    };
+    copy_inline_package_at(
+        ComponentCoordinate {
+            package_id: request.package_id,
+            version: request.version,
+            component_id: request.component_id,
+        },
+        &request.authored_source,
+        None,
+        resolver,
+    )
+}
+
+fn copy_inline_package_at(
+    coordinate: ComponentCoordinate,
+    authored_source: &str,
+    position_mm: Option<[f64; 3]>,
+    resolver: &dyn InstalledComponentResolver,
+) -> AppResult<CopyInlineComponentImportResponse> {
     let component = resolver.resolve_source_component(&coordinate)?;
     if component.coordinate != coordinate {
         return Err(AppError::validation(format!(
@@ -277,10 +319,11 @@ pub fn copy_inline_component_import(
         )));
     }
     insert_inline_component_source(
-        &request.authored_source,
+        authored_source,
         &component.source,
         &component.entry_symbol,
         &coordinate.component_id,
+        position_mm,
     )
 }
 
@@ -289,6 +332,7 @@ fn insert_inline_component_source(
     component_source: &str,
     entry_symbol: &str,
     part_name: &str,
+    position_mm: Option<[f64; 3]>,
 ) -> AppResult<CopyInlineComponentImportResponse> {
     inspect_package_source(component_source, entry_symbol)?;
     let definitions = |text: &str| -> AppResult<BTreeMap<String, String>> {
@@ -327,7 +371,14 @@ fn insert_inline_component_source(
         .join("\n");
     let model_end = top_level_model_end(source)?;
     let part_key = next_copy_inline_part_key(source, part_name);
-    let instance = format!("\n  (part {part_key} ({entry_symbol}))");
+    let geometry = match position_mm {
+        Some([x, y, z]) if [x, y, z].into_iter().all(f64::is_finite) => {
+            format!("(translate {x} {y} {z} ({entry_symbol}))")
+        }
+        Some(_) => return Err(AppError::validation("Component position must be finite.")),
+        None => format!("({entry_symbol})"),
+    };
+    let instance = format!("\n  (part {part_key} {geometry})");
     let mut authored_source =
         String::with_capacity(source.len() + prefix.len() + instance.len() + 4);
     authored_source.push_str(&prefix);

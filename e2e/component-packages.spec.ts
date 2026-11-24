@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 type PackageLibraryMockMode = 'hub' | 'hubInstallError' | 'ok' | 'discovery' | 'discoveryCards' | 'discoveryIndexing' | 'discoveryIndexFailed' | 'error' | 'empty' | 'installError' | 'componentImportError' | 'componentImportPending' | 'discoveryError' | 'discoveryPending';
 
@@ -186,6 +186,8 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
     mockWindow.__LAST_PACKAGE_ARCHIVE__ = null;
     mockWindow.__LAST_PACKAGE_FILTERS__ = null;
     mockWindow.__LAST_COMPONENT_IMPORT__ = null;
+    mockWindow.__LAST_COMPONENT_PREVIEW__ = null;
+    mockWindow.__COMPONENT_APPLY_COUNT__ = 0;
     mockWindow.__LEGACY_COMPONENT_IMPORT_CALLED__ = false;
     mockWindow.__RESOLVE_COMPONENT_IMPORT__ = null;
 
@@ -317,7 +319,17 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
         mockWindow.__LEGACY_COMPONENT_IMPORT_CALLED__ = true;
         throw new Error('legacy component import command called');
       }
+      if (cmd === 'preview_inline_component_import') {
+        mockWindow.__LAST_COMPONENT_PREVIEW__ = args?.input ?? null;
+        if (mockMode === 'discoveryPending') {
+          return new Promise((resolve) => {
+            mockWindow.__RESOLVE_COMPONENT_PREVIEW__ = () => resolve({ modelStlPath: '/mock/component-placement.stl' });
+          });
+        }
+        return { modelStlPath: '/mock/component-placement.stl' };
+      }
       if (cmd === 'apply_inline_component_import') {
+        mockWindow.__COMPONENT_APPLY_COUNT__ += 1;
         mockWindow.__LAST_COMPONENT_IMPORT__ = args?.input ?? null;
         if (['componentImportError', 'discoveryError'].includes(mockMode)) {
           throw {
@@ -326,7 +338,7 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
             details: 'raw package source has unresolved dependency',
           };
         }
-        if (['componentImportPending', 'discoveryPending'].includes(mockMode)) {
+        if (mockMode === 'componentImportPending') {
           return new Promise((resolve) => {
             mockWindow.__RESOLVE_COMPONENT_IMPORT__ = () => resolve(importedResult);
           });
@@ -340,6 +352,49 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
       return null;
     };
   }, mode);
+}
+
+async function dragRedPlacementArrow(page: Page, canvas: Locator, origin: { x: number; y: number }) {
+  async function findArrowTip() {
+    return canvas.evaluate((element: HTMLCanvasElement, origin) => {
+      const sample = document.createElement('canvas');
+      sample.width = 180;
+      sample.height = 180;
+      const context = sample.getContext('2d')!;
+      const scaleX = element.width / element.clientWidth;
+      const scaleY = element.height / element.clientHeight;
+      context.drawImage(
+        element, (origin.x - 90) * scaleX, (origin.y - 90) * scaleY,
+        180 * scaleX, 180 * scaleY, 0, 0, 180, 180,
+      );
+      const { data } = context.getImageData(0, 0, 180, 180);
+      let farthest = 25;
+      let tip = null;
+      for (let pixel = 0; pixel < data.length / 4; pixel++) {
+        const [red, green, blue] = data.subarray(pixel * 4, pixel * 4 + 3);
+        if (red < 160 || green > red * 0.42 || blue > red * 0.42) continue;
+        const x = (pixel % 180) - 90;
+        const y = Math.floor(pixel / 180) - 90;
+        const distance = Math.hypot(x, y);
+        if (distance > farthest) {
+          farthest = distance;
+          tip = { x, y };
+        }
+      }
+      return tip;
+    }, origin);
+  }
+
+  await expect.poll(findArrowTip).not.toBeNull();
+  const tip = await findArrowTip();
+  const bounds = await canvas.boundingBox();
+  if (!tip || !bounds) throw new Error('The placement arrow disappeared before dragging.');
+  const originX = bounds.x + origin.x;
+  const originY = bounds.y + origin.y;
+  await page.mouse.move(originX + tip.x * 0.76, originY + tip.y * 0.76);
+  await page.mouse.down();
+  await page.mouse.move(originX + tip.x * 1.45, originY + tip.y * 1.45, { steps: 8 });
+  await page.mouse.up();
 }
 
 test.describe('Component package library', () => {
@@ -389,7 +444,7 @@ test.describe('Component package library', () => {
     await expect(page.getByRole('button', { name: 'REBUILD INDEX' })).toBeEnabled();
   });
 
-  test('Given a rendered local component When inserted Then exact revision is submitted without FreeCAD catalog', async ({ page }) => {
+  test('Given a pinned local component When positioned and applied Then one save uses its revision and XYZ', async ({ page }) => {
     await installProjectLibraryMocks(page, 'discovery');
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
@@ -397,44 +452,90 @@ test.describe('Component package library', () => {
     await expect(page.getByRole('button', { name: 'FREECAD PARTS', exact: true })).toHaveCount(0);
     await page.getByPlaceholder('Search library...').fill('bottleDiameter');
     const loads = await page.evaluate(() => (window as any).__LIBRARY_LOAD_COUNT__);
-    await page.getByRole('button', { name: 'INSERT bottle-cage', exact: true }).click();
-    await expect(page.evaluate(() => (window as any).__LAST_COMPONENT_IMPORT__)).resolves.toMatchObject({
+    await page.getByRole('button', { name: 'Place bottle-cage in scene', exact: true }).click();
+
+    const placement = page.getByRole('dialog', { name: 'Place component' });
+    const viewer = page.locator('.viewer-shell .viewer-host');
+    await expect(placement).toBeVisible();
+    await expect(viewer).toHaveAttribute('data-component-placement-ready', 'true');
+    await expect(page.evaluate(() => (window as any).__LAST_COMPONENT_PREVIEW__)).resolves.toMatchObject({
       threadId: 'component-thread-1', baseMessageId: 'component-message-1',
       expectedSourceDigest: 'sha256:source-1', componentId: 'local-' + 'a'.repeat(64),
       revisionDigest: 'sha256:' + 'b'.repeat(64),
     });
+    const canvas = viewer.locator('canvas');
+    const initialPoint = { x: 320, y: 390 };
+    await canvas.click({ position: initialPoint });
+    const xField = placement.getByRole('spinbutton', { name: 'X (mm)' });
+    await expect(xField).not.toHaveValue('0');
+    await expect(placement.getByRole('spinbutton', { name: 'Z (mm)' })).toHaveValue('0');
+    const planeX = await xField.inputValue();
+    await dragRedPlacementArrow(page, canvas, initialPoint);
+    await expect(xField).not.toHaveValue(planeX);
+    await xField.fill('14.5');
+    await placement.getByRole('spinbutton', { name: 'Y (mm)' }).fill('-7');
+    await placement.getByRole('spinbutton', { name: 'Z (mm)' }).fill('3.25');
+    await expect(page.evaluate(() => (window as any).__COMPONENT_APPLY_COUNT__)).resolves.toBe(0);
+
+    await placement.getByRole('button', { name: 'Apply', exact: true }).click();
+    await expect(placement).toHaveCount(0);
+    await expect(viewer).not.toHaveAttribute('data-component-placement-ready', 'true');
+    await expect(page.locator('.viewer-shell')).toHaveAttribute('data-model-key', /component-model-2/);
+    await expect(page.evaluate(() => (window as any).__LAST_COMPONENT_IMPORT__)).resolves.toMatchObject({
+      threadId: 'component-thread-1', baseMessageId: 'component-message-1',
+      expectedSourceDigest: 'sha256:source-1', componentId: 'local-' + 'a'.repeat(64),
+      revisionDigest: 'sha256:' + 'b'.repeat(64), positionMm: [14.5, -7, 3.25],
+    });
+    await expect(page.evaluate(() => (window as any).__COMPONENT_APPLY_COUNT__)).resolves.toBe(1);
     await expect(page.evaluate(() => (window as any).__LIBRARY_LOAD_COUNT__)).resolves.toBe(loads);
   });
 
-  test('Given builtin component When inserted Then name selects shipped source', async ({ page }) => {
+  test('Given a builtin placement When cancelled Then the viewport clears without saving', async ({ page }) => {
     await installProjectLibraryMocks(page, 'discovery');
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
     await page.getByRole('button', { name: 'LIBRARY' }).click();
-    await page.getByRole('button', { name: 'INSERT hex-bolt', exact: true }).click();
-    await expect(page.evaluate(() => (window as any).__LAST_COMPONENT_IMPORT__)).resolves.toMatchObject({ name: 'hex-bolt' });
+    await page.getByRole('button', { name: 'Place hex-bolt in scene', exact: true }).click();
+    const placement = page.getByRole('dialog', { name: 'Place component' });
+    const viewer = page.locator('.viewer-shell .viewer-host');
+    await expect(viewer).toHaveAttribute('data-component-placement-ready', 'true');
+    await expect(page.evaluate(() => (window as any).__LAST_COMPONENT_PREVIEW__)).resolves.toMatchObject({ name: 'hex-bolt' });
+    await placement.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(placement).toHaveCount(0);
+    await expect(viewer).not.toHaveAttribute('data-component-placement-ready', 'true');
+    await expect(page.evaluate(() => (window as any).__COMPONENT_APPLY_COUNT__)).resolves.toBe(0);
   });
 
-  test('Given local insertion pending When clicked Then duplicate inserts disabled', async ({ page }) => {
+  test('Given a pending preview When cancelled Then its late response cannot reopen placement', async ({ page }) => {
     await installProjectLibraryMocks(page, 'discoveryPending');
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
     await page.getByRole('button', { name: 'LIBRARY' }).click();
-    await page.getByRole('button', { name: 'INSERT bottle-cage', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'INSERTING bottle-cage', exact: true })).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'INSERT hex-bolt', exact: true })).toBeDisabled();
-    await page.evaluate(() => (window as any).__RESOLVE_COMPONENT_IMPORT__?.());
+    await page.getByRole('button', { name: 'Place bottle-cage in scene', exact: true }).click();
+    const placement = page.getByRole('dialog', { name: 'Place component' });
+    await expect(placement.getByText('Preparing component preview…')).toBeVisible();
+    await expect(placement.getByRole('button', { name: 'Apply', exact: true })).toBeDisabled();
+    await placement.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await page.evaluate(() => (window as any).__RESOLVE_COMPONENT_PREVIEW__?.());
+    await expect(placement).toHaveCount(0);
+    await expect(page.locator('.viewer-shell .viewer-host')).not.toHaveAttribute('data-component-placement-ready', 'true');
+    await expect(page.evaluate(() => (window as any).__COMPONENT_APPLY_COUNT__)).resolves.toBe(0);
   });
 
-  test('Given local insertion fails When clicked Then backend detail and retry remain available', async ({ page }) => {
+  test('Given Apply fails When placing a component Then details, coordinates and retry stay available', async ({ page }) => {
     await installProjectLibraryMocks(page, 'discoveryError');
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
     await page.getByRole('button', { name: 'LIBRARY' }).click();
-    await page.getByRole('button', { name: 'INSERT bottle-cage', exact: true }).click();
-    await expect(page.getByText('raw package source has unresolved dependency')).toBeVisible();
-    await page.getByRole('button', { name: 'RETRY', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'INSERT bottle-cage', exact: true })).toBeEnabled();
+    await page.getByRole('button', { name: 'Place bottle-cage in scene', exact: true }).click();
+    const placement = page.getByRole('dialog', { name: 'Place component' });
+    const x = placement.getByRole('spinbutton', { name: 'X (mm)' });
+    await x.fill('12');
+    const apply = placement.getByRole('button', { name: 'Apply', exact: true });
+    await apply.click();
+    await expect(placement.getByText('raw package source has unresolved dependency')).toBeVisible();
+    await expect(x).toHaveValue('12');
+    await expect(apply).toBeEnabled();
   });
 
   test('Given saved and builtin components without packages When Components opens Then both appear and search finds their metadata', async ({ page }) => {
@@ -543,7 +644,9 @@ test.describe('Component package library', () => {
 
     await page.getByRole('button', { name: 'LIBRARY' }).click();
     await page.getByRole('button', { name: 'SHOW Bike Bottle System COMPONENTS' }).click();
-    await page.getByRole('button', { name: 'IMPORT Bottle Cage' }).click();
+    await page.getByRole('button', { name: 'Place Bottle Cage in scene', exact: true }).click();
+    const placement = page.getByRole('dialog', { name: 'Place component' });
+    await placement.getByRole('button', { name: 'Apply', exact: true }).click();
 
     await expect(page.evaluate(() => (window as any).__LAST_COMPONENT_IMPORT__)).resolves.toMatchObject({
       threadId: 'component-thread-1',
@@ -564,7 +667,9 @@ test.describe('Component package library', () => {
 
     await page.getByRole('button', { name: 'LIBRARY' }).click();
     await page.getByRole('button', { name: 'SHOW Bike Bottle System COMPONENTS' }).click();
-    await page.getByRole('button', { name: 'IMPORT Bottle Cage' }).click();
+    await page.getByRole('button', { name: 'Place Bottle Cage in scene', exact: true }).click();
+    const placement = page.getByRole('dialog', { name: 'Place component' });
+    await placement.getByRole('button', { name: 'Apply', exact: true }).click();
 
     await expect(page.getByText('component import failed')).toBeVisible();
     await expect(page.getByText('raw package source has unresolved dependency')).toBeVisible();
@@ -577,9 +682,12 @@ test.describe('Component package library', () => {
 
     await page.getByRole('button', { name: 'LIBRARY' }).click();
     await page.getByRole('button', { name: 'SHOW Bike Bottle System COMPONENTS' }).click();
-    await page.getByRole('button', { name: 'IMPORT Bottle Cage' }).click();
+    await page.getByRole('button', { name: 'Place Bottle Cage in scene', exact: true }).click();
+    const placement = page.getByRole('dialog', { name: 'Place component' });
+    await placement.getByRole('button', { name: 'Apply', exact: true }).click();
 
-    await expect(page.getByRole('button', { name: 'IMPORTING Bottle Cage' })).toBeVisible();
+    await expect(placement.getByRole('button', { name: 'Applying…', exact: true })).toBeDisabled();
+    await expect(placement.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled();
     await page.evaluate(() => (window as any).__RESOLVE_COMPONENT_IMPORT__?.());
   });
 });

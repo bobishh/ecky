@@ -57,6 +57,7 @@
   import { femColorRamp, normalizeFemField, type FemDisplayOptions } from './femDisplay';
 
   type ViewportBusyPhase = 'generating' | 'repairing' | 'rendering' | 'committing' | null;
+  type PositionMm = [number, number, number];
 
   let {
     modelKey = null,
@@ -89,6 +90,7 @@
     cropBoxEnabled = false,
     cropBoxMode = 'translate',
     cropBounds = null,
+    componentPlacement = null,
     captureLandmarkMode = false,
     captureSourceMeshContentDigest = null,
     capturePlaneAnchors = [],
@@ -119,6 +121,9 @@
     onModelLoaded,
     onModelLoadError,
     onCropBoundsChange,
+    onComponentPlacementMove,
+    onComponentPlacementLoad,
+    onComponentPlacementError,
     onCaptureSurfaceAnchor,
     onCaptureSurfaceHover,
     onCaptureSurfaceAnchorError,
@@ -155,6 +160,7 @@
     cropBoxEnabled?: boolean;
     cropBoxMode?: 'translate' | 'scale';
     cropBounds?: { min: [number, number, number]; max: [number, number, number] } | null;
+    componentPlacement?: { stlUrl: string; positionMm: PositionMm; disabled?: boolean } | null;
     captureLandmarkMode?: boolean;
     captureSourceMeshContentDigest?: string | null;
     capturePlaneAnchors?: CaptureSurfaceAnchorValue[];
@@ -185,6 +191,9 @@
     onModelLoaded?: () => void;
     onModelLoadError?: (message: string) => void;
     onCropBoundsChange?: (bounds: { min: [number, number, number]; max: [number, number, number] }) => void;
+    onComponentPlacementMove?: (positionMm: PositionMm) => void;
+    onComponentPlacementLoad?: (stlUrl: string) => void;
+    onComponentPlacementError?: (stlUrl: string, message: string) => void;
     onCaptureSurfaceAnchor?: (anchor: CaptureSurfaceAnchorValue) => void;
     onCaptureSurfaceHover?: (anchor: CaptureSurfaceAnchorValue | null) => void;
     onCaptureSurfaceAnchorError?: (message: string) => void;
@@ -231,6 +240,14 @@
   let cropTransformHelper: THREE.Object3D | null = null;
   let cropBoxMesh: THREE.Mesh<THREE.BoxGeometry, THREE.MeshBasicMaterial> | null = null;
   let appliedCropBoundsSignature = '';
+  let viewerGrid: THREE.GridHelper | null = null;
+  let componentPlacementPreview: {
+    frame: THREE.Group;
+    mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+    transform: TransformControls;
+  } | null = null;
+  let componentPlacementReady = $state(false);
+  let componentPlacementPositionChosen = false;
   let modelRoot: THREE.Group | null = null;
   let runtimeMeshes: RuntimeMesh[] = [];
   let runtimeEdges: RuntimeEdge[] = [];
@@ -340,6 +357,7 @@
   );
   const showEditableCallouts = $derived(false);
   const selectionMode = $derived.by(() => viewerMode === 'select');
+  const componentPlacementUrl = $derived(componentPlacement?.stlUrl ?? null);
   const capturePickingMode = $derived.by(() => captureLandmarkMode && Boolean(captureSourceMeshContentDigest));
   const captureGuidePrimitives = $derived.by(() =>
     captureGuide ? buildCaptureGuideOverlayPrimitives(captureGuide) : null,
@@ -400,12 +418,17 @@
     updateOverlayAnchor();
   }
 
-  function updateCameraClipPlanes(object: THREE.Object3D | null = modelRoot) {
-    if (!camera || !object) return;
-    object.updateMatrixWorld(true);
-    const bounds = new THREE.Box3().setFromObject(object);
+  function updateCameraClipPlanes() {
+    if (!camera || (!modelRoot && !componentPlacementPreview)) return;
+    const bounds = new THREE.Box3();
+    if (modelRoot) bounds.expandByObject(modelRoot);
+    if (componentPlacementPreview) {
+      componentPlacementPreview.frame.updateMatrixWorld(true);
+      bounds.expandByObject(componentPlacementPreview.mesh);
+    }
     if (bounds.isEmpty()) return;
     const clipPlanes = resolveViewerClipPlanes(bounds, camera.position);
+    if (!Number.isFinite(clipPlanes.near) || !Number.isFinite(clipPlanes.far)) return;
     camera.near = clipPlanes.near;
     camera.far = clipPlanes.far;
     camera.updateProjectionMatrix();
@@ -463,11 +486,32 @@
     applyCameraState(nextState);
   }
 
+  function renderModelForCapture() {
+    if (!renderer || !scene || !camera) return;
+    const preview = componentPlacementPreview;
+    if (!preview) {
+      renderer.render(scene, camera);
+      return;
+    }
+    const helper = preview.transform.getHelper();
+    const gridPosition = viewerGrid?.position.clone();
+    preview.frame.visible = false;
+    helper.visible = false;
+    viewerGrid?.position.set(0, 0, 0);
+    try {
+      renderer.render(scene, camera);
+    } finally {
+      preview.frame.visible = true;
+      helper.visible = true;
+      if (gridPosition) viewerGrid?.position.copy(gridPosition);
+    }
+  }
+
   export function captureScreenshotDetails(
     overlayCanvas: HTMLCanvasElement | null = null,
   ): { dataUrl: string; width: number; height: number; camera: ViewportCameraState } | null {
     if (!renderer || !scene || !camera) return null;
-    renderer.render(scene, camera);
+    renderModelForCapture();
     const source = renderer.domElement;
     const effectiveCamera = currentCameraState();
     if (!effectiveCamera) return null;
@@ -549,7 +593,7 @@
         cz + (dz / len) * dist,
       );
       controls.update();
-      renderer.render(scene, camera);
+      renderModelForCapture();
       results.push(renderer.domElement.toDataURL('image/jpeg', 0.75));
     }
 
@@ -691,8 +735,10 @@
     });
   }
 
-  function handleCropDraggingChanged(event: { value?: unknown }) {
-    if (controls) controls.enabled = !Boolean(event.value);
+  function syncOrbitEnabled() {
+    if (!controls) return;
+    controls.enabled = !selectionMode && !hideModelWhileBusy
+      && !cropTransformControls?.dragging && !componentPlacementPreview?.transform.dragging;
   }
 
   function handleCropMouseUp() {
@@ -711,7 +757,7 @@
 
   function disposeCropBox() {
     if (cropTransformControls) {
-      cropTransformControls.removeEventListener('dragging-changed', handleCropDraggingChanged);
+      cropTransformControls.removeEventListener('dragging-changed', syncOrbitEnabled);
       cropTransformControls.removeEventListener('mouseUp', handleCropMouseUp);
       cropTransformControls.detach();
       cropTransformControls.dispose();
@@ -726,7 +772,7 @@
     cropTransformHelper = null;
     cropBoxMesh = null;
     appliedCropBoundsSignature = '';
-    if (controls) controls.enabled = !selectionMode && !hideModelWhileBusy;
+    syncOrbitEnabled();
   }
 
   function syncCropBox() {
@@ -754,7 +800,7 @@
       cropTransformControls = new TransformControls(camera, renderer.domElement);
       cropTransformControls.setSpace('local');
       cropTransformControls.size = 0.8;
-      cropTransformControls.addEventListener('dragging-changed', handleCropDraggingChanged);
+      cropTransformControls.addEventListener('dragging-changed', syncOrbitEnabled);
       cropTransformControls.addEventListener('mouseUp', handleCropMouseUp);
       cropTransformHelper = cropTransformControls.getHelper();
       scene.add(cropTransformHelper);
@@ -770,6 +816,120 @@
       appliedCropBoundsSignature = signature;
     }
     if (!cropBounds) emitCropBoxBounds();
+  }
+
+  function syncComponentPlacementFrame() {
+    const preview = componentPlacementPreview;
+    if (!preview) return;
+    // The viewer recenters rendered meshes. Match that offset while keeping the pose in CAD coordinates.
+    if (modelRoot) {
+      preview.frame.position.copy(modelRoot.position);
+      preview.frame.quaternion.copy(modelRoot.quaternion);
+    } else {
+      preview.frame.position.set(0, 0, 0);
+      preview.frame.rotation.set(-Math.PI / 2, 0, 0);
+    }
+    viewerGrid?.position.copy(preview.frame.position);
+    preview.frame.updateMatrixWorld(true);
+  }
+
+  function emitComponentPlacementMove(position: THREE.Vector3) {
+    if (componentPlacement?.disabled || hideModelWhileBusy) return;
+    const [x, y, z] = position.toArray();
+    const mm: PositionMm = [Number(x.toFixed(2)), Number(y.toFixed(2)), Number(z.toFixed(2))];
+    if (!mm.every(Number.isFinite)) return;
+    componentPlacementPositionChosen = true;
+    onComponentPlacementMove?.(mm);
+  }
+
+  function handleComponentPlacementObjectChange() {
+    if (componentPlacementPreview) emitComponentPlacementMove(componentPlacementPreview.mesh.position);
+  }
+
+  function syncComponentPlacementControls() {
+    const preview = componentPlacementPreview;
+    if (!preview) return;
+    preview.transform.enabled = preview.transform.dragging || (!componentPlacement?.disabled && !hideModelWhileBusy);
+    const position = componentPlacement?.positionMm;
+    if (!position || !position.every(Number.isFinite) || preview.transform.dragging) return;
+    if (position.some((value, index) => value !== preview.mesh.position.getComponent(index))) {
+      componentPlacementPositionChosen = true;
+      preview.mesh.position.set(...position);
+      updateCameraClipPlanes();
+    }
+  }
+
+  function handleComponentPlacementDraggingChanged() {
+    syncOrbitEnabled();
+    syncComponentPlacementControls();
+    if (!componentPlacementPreview?.transform.dragging) updateCameraClipPlanes();
+  }
+
+  function disposeComponentPlacement() {
+    const preview = componentPlacementPreview;
+    if (!preview) return;
+    preview.transform.removeEventListener('dragging-changed', handleComponentPlacementDraggingChanged);
+    preview.transform.removeEventListener('objectChange', handleComponentPlacementObjectChange);
+    preview.transform.getHelper().removeFromParent();
+    preview.transform.detach();
+    const canvas = renderer?.domElement;
+    const touchAction = canvas?.style.touchAction;
+    preview.transform.dispose();
+    if (canvas && touchAction !== undefined) canvas.style.touchAction = touchAction;
+    preview.frame.removeFromParent();
+    preview.mesh.geometry.dispose();
+    preview.mesh.material.dispose();
+    componentPlacementPreview = null;
+    componentPlacementReady = false;
+    componentPlacementPositionChosen = false;
+    viewerGrid?.position.set(0, 0, 0);
+    syncOrbitEnabled();
+    updateCameraClipPlanes();
+  }
+
+  async function loadComponentPlacement(stlUrl: string, cancelled: () => boolean) {
+    try {
+      const geometry = await loadStlGeometry(new STLLoader(), stlUrl);
+      if (cancelled() || !scene || !camera || !renderer || componentPlacementUrl !== stlUrl) {
+        geometry.dispose();
+        return;
+      }
+      geometry.computeBoundingBox();
+      if (!geometry.boundingBox || geometry.boundingBox.isEmpty()) {
+        geometry.dispose();
+        throw new Error('The component STL has no geometry.');
+      }
+      const frame = new THREE.Group();
+      const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+        color: 0xdca85c,
+        transparent: true,
+        opacity: 0.46,
+        depthTest: false,
+        depthWrite: false,
+      }));
+      mesh.renderOrder = 3;
+      mesh.position.set(...(componentPlacement?.positionMm ?? [0, 0, 0]));
+      frame.add(mesh);
+      const transform = new TransformControls(camera, renderer.domElement);
+      transform.setMode('translate');
+      transform.setSpace('local');
+      transform.size = 0.8;
+      transform.attach(mesh);
+      transform.addEventListener('dragging-changed', handleComponentPlacementDraggingChanged);
+      transform.addEventListener('objectChange', handleComponentPlacementObjectChange);
+      componentPlacementPreview = { frame, mesh, transform };
+      scene.add(frame, transform.getHelper());
+      syncComponentPlacementFrame();
+      syncComponentPlacementControls();
+      if (!modelRoot) frameModel(mesh);
+      else updateCameraClipPlanes();
+      componentPlacementReady = true;
+      onComponentPlacementLoad?.(stlUrl);
+    } catch (error) {
+      if (cancelled() || componentPlacementUrl !== stlUrl) return;
+      disposeComponentPlacement();
+      onComponentPlacementError?.(stlUrl, error instanceof Error ? error.message : String(error));
+    }
   }
 
   onMount(() => {
@@ -792,10 +952,14 @@
       viewerHost.removeEventListener('pointermove', handlePointerMove);
       viewerHost.removeEventListener('pointerleave', handlePointerLeave);
       viewerHost.removeEventListener('pointerup', handlePointerUp);
+      viewerHost.removeEventListener('pointercancel', handlePointerCancel);
     }
     controls?.removeEventListener?.('start', handleOrbitStart);
     controls?.removeEventListener?.('end', handleOrbitEnd);
     controls?.removeEventListener?.('change', handleControlsChange);
+    disposeComponentPlacement();
+    viewerGrid?.dispose();
+    viewerGrid = null;
     if (!retainModelWhileLoading || !modelRoot) disposeModel();
     controls?.dispose?.();
     if (renderer) {
@@ -831,6 +995,21 @@
     void cropBoxMode;
     void cropBounds;
     syncCropBox();
+  });
+
+  $effect(() => {
+    const stlUrl = componentPlacementUrl;
+    if (!stlUrl || !scene) return;
+    let cancelled = false;
+    void untrack(() => loadComponentPlacement(stlUrl, () => cancelled));
+    return () => {
+      cancelled = true;
+      disposeComponentPlacement();
+    };
+  });
+
+  $effect(() => {
+    if (componentPlacementReady) syncComponentPlacementControls();
   });
 
   $effect(() => {
@@ -901,7 +1080,7 @@
     void viewerMode;
     void surfaceTrimActive;
     if (controls) {
-      controls.enabled = !selectionMode && !hideModelWhileBusy;
+      syncOrbitEnabled();
       controls.mouseButtons.LEFT = surfaceTrimActive
         ? (-1 as THREE.MOUSE)
         : THREE.MOUSE.ROTATE;
@@ -1148,12 +1327,13 @@
     viewerHost.addEventListener('pointermove', handlePointerMove);
     viewerHost.addEventListener('pointerleave', handlePointerLeave);
     viewerHost.addEventListener('pointerup', handlePointerUp);
+    viewerHost.addEventListener('pointercancel', handlePointerCancel);
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.autoRotate = false;
     controls.autoRotateSpeed = 0;
-    controls.enabled = !selectionMode && !hideModelWhileBusy;
+    syncOrbitEnabled();
     controls.mouseButtons.LEFT = surfaceTrimActive
       ? (-1 as THREE.MOUSE)
       : THREE.MOUSE.ROTATE;
@@ -1187,6 +1367,7 @@
       if ('opacity' in material) material.opacity = 0.22;
     }
     scene.add(grid);
+    viewerGrid = grid;
 
     animate();
   }
@@ -1769,21 +1950,23 @@
     const box = new THREE.Box3().setFromObject(object);
     if (box.isEmpty()) return;
 
-    const center = new THREE.Vector3();
-    box.getCenter(center);
-    object.position.x -= center.x;
-    object.position.z -= center.z;
-    object.position.y -= box.min.y;
-    object.updateMatrixWorld(true);
-
-    const reframed = new THREE.Box3().setFromObject(object);
-    const size = new THREE.Vector3();
-    reframed.getSize(size);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z, 1);
 
-    camera.position.set(maxDim * 1.3, maxDim * 1.1, maxDim * 1.3);
-    controls.target.set(0, maxDim * 0.35, 0);
-    updateCameraClipPlanes(object);
+    if (object === modelRoot) {
+      object.position.x -= center.x;
+      object.position.z -= center.z;
+      object.position.y -= box.min.y;
+      object.updateMatrixWorld(true);
+      syncComponentPlacementFrame();
+      center.set(0, maxDim * 0.35, 0);
+      camera.position.set(maxDim * 1.3, maxDim * 1.1, maxDim * 1.3);
+    } else {
+      camera.position.copy(center).add(new THREE.Vector3(1.3, 1.1, 1.3).multiplyScalar(maxDim));
+    }
+    controls.target.copy(center);
+    updateCameraClipPlanes();
     controls.update();
   }
 
@@ -2441,6 +2624,7 @@
     scene?.remove(modelRoot);
     disposeDetachedGroup(modelRoot);
     modelRoot = null;
+    syncComponentPlacementFrame();
     modelStatus = 'empty';
     runtimeMeshes = [];
     runtimeEdges = [];
@@ -2470,7 +2654,9 @@
     if (hideModelWhileBusy) return;
     if (isInteractiveViewerControl(event.target)) return;
     if (event.button !== 0) return;
-    pointerDownAt = { x: event.clientX, y: event.clientY };
+    pointerDownAt = componentPlacementPreview?.transform.dragging
+      ? null
+      : { x: event.clientX, y: event.clientY };
     orbitDraggedSincePointerDown = false;
   }
 
@@ -2747,8 +2933,34 @@
     }
   }
 
+  function handlePointerCancel() {
+    pointerDownAt = null;
+    orbitDraggedSincePointerDown = false;
+    componentPlacementPreview?.transform.pointerUp(null);
+  }
+
+  function placeComponentOnWorkingPlane(event: PointerEvent) {
+    const preview = componentPlacementPreview;
+    if (!preview || componentPlacement?.disabled || componentPlacementPositionChosen || !renderer || !camera) return;
+    const rect = renderer.domElement.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    pointer.set(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    camera.updateMatrixWorld();
+    raycaster.setFromCamera(pointer, camera);
+    const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(preview.frame.quaternion);
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, preview.frame.position);
+    const hit = raycaster.ray.intersectPlane(plane, new THREE.Vector3());
+    if (!hit) return;
+    const position = preview.frame.worldToLocal(hit);
+    position.z = 0;
+    emitComponentPlacementMove(position);
+  }
+
   function handlePointerUp(event: PointerEvent) {
-    if (hideModelWhileBusy || !renderer || !camera || !modelRoot || runtimeMeshes.length === 0) return;
+    if (hideModelWhileBusy || !renderer || !camera) return;
     if (isInteractiveViewerControl(event.target)) {
       pointerDownAt = null;
       orbitDraggedSincePointerDown = false;
@@ -2759,6 +2971,19 @@
       orbitDraggedSincePointerDown = false;
       return;
     }
+    if (componentPlacementPreview) {
+      const start = pointerDownAt;
+      pointerDownAt = null;
+      if (event.button === 0 && start && shouldHandleViewerClick({
+        hideModelWhileBusy,
+        pointerDownAt: start,
+        current: { x: event.clientX, y: event.clientY },
+      })) {
+        placeComponentOnWorkingPlane(event);
+      }
+      return;
+    }
+    if (!modelRoot || runtimeMeshes.length === 0) return;
     if (capturePickingMode) {
       if (
         !shouldHandleViewerClick({
@@ -2820,6 +3045,7 @@
   bind:this={viewerHost}
   class="viewer-host"
   data-model-status={modelStatus}
+  data-component-placement-ready={componentPlacementReady}
   data-window-drag-ignore
   data-capture-comparison-loaded={captureComparisonLoaded}
   data-capture-reference-visible={captureReferenceVisible}

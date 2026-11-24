@@ -5,7 +5,7 @@ use ecky_cad_lib::contracts::{
 use ecky_cad_lib::models::{AppState, PathResolver};
 use ecky_cad_lib::services::design::{add_manual_version, AddManualVersionRequest};
 use ecky_cad_lib::services::inline_component_import::{
-    apply_inline_component_import, ApplyInlineComponentImportInput,
+    apply_inline_component_import, preview_inline_component_import, ApplyInlineComponentImportInput,
 };
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
@@ -185,6 +185,7 @@ fn input(fixture: &Fixture) -> ApplyInlineComponentImportInput {
         thread_id: "thread-1".to_string(),
         base_message_id: fixture.base_message_id.clone(),
         expected_source_digest: fixture.source_digest.clone(),
+        position_mm: None,
         component: ecky_cad_lib::component_import_runtime::LibraryComponentSelection::Package {
             package_id: "test.library".to_string(),
             version: "1.0.0".to_string(),
@@ -247,47 +248,84 @@ async fn copy_inline_import_patches_renders_and_commits_one_version() {
 }
 
 #[tokio::test]
-async fn stale_source_digest_rejects_before_source_or_version_write() {
-    let fixture = fixture("").await;
-    let before = {
-        let conn = fixture.state.db.lock().await;
-        ecky_cad_lib::db::get_thread_latest_version(&conn, "thread-1")
-            .expect("latest")
-            .expect("base")
-            .id
-    };
-    let mut request = input(&fixture);
-    request.expected_source_digest = "sha256:stale".to_string();
+async fn preview_renders_only_the_component_and_preserves_the_target_source_and_head() {
+    let fixture = fixture("(part broken (sphere -1))").await;
+    let result =
+        preview_inline_component_import(input(&fixture), &fixture.state, &fixture.resolver)
+            .await
+            .expect("preview independent of invalid target geometry");
+    assert!(Path::new(&result.model_stl_path).is_file());
+    let conn = fixture.state.db.lock().await;
+    let head = ecky_cad_lib::db::get_thread_latest_version(&conn, "thread-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.id, fixture.base_message_id);
+    let binding = ecky_cad_lib::thread_source_binding::get_binding(&conn, "thread-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(binding.source_path).unwrap(),
+        fixture.source
+    );
+    drop(conn);
+    fixture.state.component_index_worker.wait_idle().await;
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
 
-    let error = apply_inline_component_import(request, &fixture.state, &fixture.resolver)
+#[tokio::test]
+async fn placed_component_is_saved_with_its_xyz_translation() {
+    let fixture = fixture("").await;
+    let mut request = serde_json::to_value(input(&fixture)).unwrap();
+    request["positionMm"] = serde_json::json!([14.5, -7.0, 3.25]);
+    let result = apply_inline_component_import(
+        serde_json::from_value(request).expect("placement input"),
+        &fixture.state,
+        &fixture.resolver,
+    )
+    .await
+    .expect("apply placement");
+    assert_eq!(result.version.status, MessageStatus::Success);
+    assert!(result
+        .version
+        .design_output
+        .macro_code
+        .contains("(part peg (translate 14.5 -7 3.25 (peg)))"));
+    fixture.state.component_index_worker.wait_idle().await;
+    std::fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[tokio::test]
+async fn source_edit_after_preview_rejects_apply_without_overwriting_that_edit() {
+    let fixture = fixture("").await;
+    let request = input(&fixture);
+    preview_inline_component_import(request.clone(), &fixture.state, &fixture.resolver)
         .await
-        .expect_err("stale source");
-    assert!(error.message.contains("changed before component import"));
-    let after = {
-        let conn = fixture.state.db.lock().await;
-        ecky_cad_lib::db::get_thread_latest_version(&conn, "thread-1")
-            .expect("latest")
-            .expect("base")
-            .id
-    };
-    assert_eq!(before, after);
+        .expect("initial component preview");
     let binding = {
         let conn = fixture.state.db.lock().await;
         ecky_cad_lib::thread_source_binding::get_binding(&conn, "thread-1")
             .expect("binding")
             .expect("bound source")
     };
+    let edited_source = "(model (part base (box 4 4 4)))";
+    std::fs::write(&binding.source_path, edited_source).unwrap();
+
+    let error = apply_inline_component_import(request, &fixture.state, &fixture.resolver)
+        .await
+        .expect_err("stale source");
+    assert!(error.message.contains("changed before component import"));
+    let conn = fixture.state.db.lock().await;
+    let head = ecky_cad_lib::db::get_thread_latest_version(&conn, "thread-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.id, fixture.base_message_id);
     assert_eq!(
-        std::fs::read_to_string(binding.source_path).expect("persisted source"),
-        fixture.source
+        std::fs::read_to_string(binding.source_path).unwrap(),
+        edited_source
     );
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        fixture.state.component_index_worker.wait_idle(),
-    )
-    .await
-    .expect("component indexing finishes before fixture cleanup");
-    std::fs::remove_dir_all(fixture.root).expect("cleanup");
+    drop(conn);
+    fixture.state.component_index_worker.wait_idle().await;
+    std::fs::remove_dir_all(fixture.root).unwrap();
 }
 
 #[tokio::test]
@@ -329,6 +367,7 @@ fn inline_component_import_contract_serializes_camel_case() {
         thread_id: "thread-1".to_string(),
         base_message_id: "message-1".to_string(),
         expected_source_digest: "sha256:source".to_string(),
+        position_mm: None,
         component: ecky_cad_lib::component_import_runtime::LibraryComponentSelection::Package {
             package_id: "test.library".to_string(),
             version: "1.0.0".to_string(),

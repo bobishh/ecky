@@ -71,6 +71,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::component_package::uninstall_component_package_coordinate,
         crate::commands::component_package::garbage_collect_component_package_store,
         crate::commands::component_package::resolve_installed_component_source,
+        crate::commands::inline_component_import::preview_inline_component_import,
         crate::commands::inline_component_import::apply_inline_component_import,
         crate::commands::library_panel::library_panel_intent,
         crate::commands::component_package::resolve_installed_component_controls,
