@@ -50,7 +50,7 @@
   <div id="models">
     <div class="models-head">
       <span class="kicker">EXAMPLE PROJECTS · SOURCE + ZIP</span>
-      <p>Inspect the source, rotate the geometry, or download all parts and source together as a ZIP.</p>
+      <p>Each project is one text file with named dimensions. Orbit the meshes, open the source, or download the parts and the file together.</p>
     </div>
     <ModelWorkbench />
   </div>

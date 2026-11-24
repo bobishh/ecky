@@ -21,8 +21,8 @@
     "archiveUrl": "/models/iphone-case/iphone-case.zip",
     "archiveDownloadName": "iphone-case.zip",
     "snapshot": {
-      "modelId": "generated-direct-occt-30bc31de37a6",
-      "sourceSha256": "6d1090bf159d32e116454f3a5257387cf9736d619a7f720e44243c14075c5d5d"
+      "modelId": "generated-direct-occt-e14e452bde81",
+      "sourceSha256": "5fb6c86348fa81058048df907aa7f47d7d77aee57c5c5588ae04f7de4425e1d6"
     }
   },
   {
@@ -119,8 +119,8 @@
     "archiveUrl": "/models/filament-dryer/filament-dryer.zip",
     "archiveDownloadName": "filament-dryer.zip",
     "snapshot": {
-      "modelId": "generated-direct-occt-a8482d92aaae",
-      "sourceSha256": "9bfd84e76c625c5c07dd26296262c5556346801b1ed308414451765a9f06aff6"
+      "modelId": "generated-direct-occt-c3b768d116c6",
+      "sourceSha256": "d9c28a0ac3593a0ed0bcd29d3fed7e56bdff78f00941f5073b1e43132b46eb69"
     },
     "preview": {
       "layout": "assembly",
@@ -194,14 +194,14 @@
         },
         {
           "label": "Hygrometer Cartridge",
-          "url": "/models/previews/dryer-hygrometer-cartridge-d487010808a9.stl",
-          "downloadName": "dryer-hygrometer-cartridge-d487010808a9.stl",
+          "url": "/models/previews/dryer-hygrometer-cartridge-a6fb52057a4c.stl",
+          "downloadName": "dryer-hygrometer-cartridge-a6fb52057a4c.stl",
           "color": "#dab87a"
         }
       ],
       "provenance": {
-        "modelId": "generated-direct-occt-6acb7a797888",
-        "sourceSha256": "9bfd84e76c625c5c07dd26296262c5556346801b1ed308414451765a9f06aff6",
+        "modelId": "generated-direct-occt-2d47c5cd6130",
+        "sourceSha256": "d9c28a0ac3593a0ed0bcd29d3fed7e56bdff78f00941f5073b1e43132b46eb69",
         "parameters": {
           "catch-pin-clearance": 0.25,
           "catch-pin-radius": 2.5,
@@ -266,8 +266,8 @@
     "archiveUrl": "/models/sara-brushing-board/sara-brushing-board.zip",
     "archiveDownloadName": "sara-brushing-board.zip",
     "snapshot": {
-      "modelId": "generated-direct-occt-9bbfe3272b82",
-      "sourceSha256": "1ca1d8c19acd6e6b93b97d7ab085c67af6a7f0bb9e21e8fe5a0a3e8454559104"
+      "modelId": "generated-direct-occt-541c11252fe5",
+      "sourceSha256": "97c9f04be830d2d75906fff57f5868015d48ecd17c39c076956bfe1024913c75"
     }
   },
   {
@@ -299,34 +299,39 @@
   {
     "id": "bicycle-bottle-holder",
     "label": "BOTTLE HOLDER",
-    "title": "Bicycle bottle holder + frame mount rail",
-    "note": "Bottle cage with the frame rail seated in its rear dovetail. ZIP contains separate print parts.",
+    "title": "Closed hex bottle holder",
+    "note": "Closed hex cage, ramped dovetail, and a printed-thread handlebar clamp.",
     "sourceUrl": "/models/bicycle-bottle-holder/bicycle-bottle-holder.ecky",
     "sourceDownloadName": "bicycle-bottle-holder.ecky",
     "sourceLabel": "BOTTLE HOLDER",
-    "companionSources": [
-      {
-        "label": "FRAME MOUNT RAIL",
-        "url": "/models/bicycle-bottle-holder/bottle-holder-frame-mount-rail.ecky",
-        "downloadName": "bottle-holder-frame-mount-rail.ecky"
-      }
-    ],
     "view": {
-      "yaw": -0.55,
-      "pitch": 0.35
+      "yaw": -0.7,
+      "pitch": 0.42
     },
     "parts": [
       {
-        "label": "Bottle holder",
-        "url": "/models/bicycle-bottle-holder/bicycle-bottle-holder.stl",
-        "downloadName": "bicycle-bottle-holder.stl",
+        "label": "Closed hex cage",
+        "url": "/models/bicycle-bottle-holder/bottle-cage.stl",
+        "downloadName": "bottle-cage.stl",
         "color": "#c8924f"
       },
       {
-        "label": "Frame mount rail",
-        "url": "/models/bicycle-bottle-holder/bottle-holder-frame-mount-rail.stl",
-        "downloadName": "bottle-holder-frame-mount-rail.stl",
+        "label": "Handlebar clamp",
+        "url": "/models/bicycle-bottle-holder/frame-mount-rail.stl",
+        "downloadName": "frame-mount-rail.stl",
         "color": "#729887"
+      },
+      {
+        "label": "Rear clamp",
+        "url": "/models/bicycle-bottle-holder/rear-clamp.stl",
+        "downloadName": "rear-clamp.stl",
+        "color": "#dab87a"
+      },
+      {
+        "label": "Clamp bolt",
+        "url": "/models/bicycle-bottle-holder/clamp-bolt.stl",
+        "downloadName": "clamp-bolt.stl",
+        "color": "#8b91a6"
       }
     ],
     "archiveUrl": "/models/bicycle-bottle-holder/bicycle-bottle-holder.zip",
@@ -336,27 +341,37 @@
       "upAxis": "z",
       "parts": [
         {
-          "label": "Bottle holder",
-          "url": "/models/previews/bottle-0-833ea1bdb127.stl",
-          "downloadName": "bottle-0-833ea1bdb127.stl",
+          "label": "Closed hex cage",
+          "url": "/models/previews/bottle-0-db6d70951f06.stl",
+          "downloadName": "bottle-0-db6d70951f06.stl",
           "color": "#c8924f"
         },
         {
-          "label": "Frame mount rail",
-          "url": "/models/previews/bottle-1-09834892a1da.stl",
-          "downloadName": "bottle-1-09834892a1da.stl",
+          "label": "Handlebar clamp",
+          "url": "/models/previews/bottle-1-671b9ad0baf8.stl",
+          "downloadName": "bottle-1-671b9ad0baf8.stl",
           "color": "#729887"
+        },
+        {
+          "label": "Rear clamp",
+          "url": "/models/previews/bottle-2-24cbd9dd9a87.stl",
+          "downloadName": "bottle-2-24cbd9dd9a87.stl",
+          "color": "#dab87a"
+        },
+        {
+          "label": "Clamp bolt",
+          "url": "/models/previews/bottle-3-ff8fc6dc0e25.stl",
+          "downloadName": "bottle-3-ff8fc6dc0e25.stl",
+          "color": "#8b91a6"
         }
       ],
       "provenance": {
-        "railTranslation": [
-          -25,
-          -47.5,
-          -72
-        ],
-        "sourceSha256": "4097ee305a539b38532f295a2fb6dac701ae7aef2a7497c78bd540b9f6bbef4f",
-        "railSourceSha256": "0f3d4da01cffe9842edc1ec5fee372ca8c562ff002372a9fbd975063e8e35135"
+        "sourceSha256": "8499a4c7c0934b97868a471f6b6efec6de63ccf71edfdbde76a48101f35df961"
       }
+    },
+    "snapshot": {
+      "modelId": "generated-direct-occt-3fecdaea2af0",
+      "sourceSha256": "8499a4c7c0934b97868a471f6b6efec6de63ccf71edfdbde76a48101f35df961"
     }
   }
 ]

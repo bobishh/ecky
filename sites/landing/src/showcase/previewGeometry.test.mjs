@@ -1,15 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { preparePreviewGeometry, bottleRailPlacement } from './previewGeometry.js';
-
-test('mount rail seats on the external spine and stops below the closed slot roof', () => {
-  const placement = bottleRailPlacement();
-  assert.deepEqual(placement, [-25, -47.5, -72]);
-  const railTop = placement[2] + 85;
-  const slotRoof = -72 + 85 + 0.2;
-  assert.ok(Math.abs(slotRoof - railTop - 0.2) < 1e-8);
-});
+import { preparePreviewGeometry } from './previewGeometry.js';
 
 test('Z-up CAD becomes upright while crease smoothing preserves every vertex', () => {
   const original = new THREE.CylinderGeometry(10, 10, 40, 32).toNonIndexed();

@@ -4,7 +4,12 @@ import { expect, test } from '@playwright/test';
 const require = createRequire(import.meta.url);
 const { PNG } = require(join(dirname(require.resolve('playwright-core/package.json')), 'lib/utilsBundle.js'));
 
-for (const label of ['FILAMENT DRYER', 'BOTTLE HOLDER']) {
+const assemblies = [
+  ['FILAMENT DRYER', 0.65],
+  ['BOTTLE HOLDER', 0.5],
+] as const;
+
+for (const [label, fill] of assemblies) {
   test(`Given ${label} When the gallery opens Then it shows an upright assembly with a separate print download`, async ({ page }, testInfo) => {
     await page.goto('/');
     const workbench = page.getByTestId('model-workbench');
@@ -26,7 +31,7 @@ for (const label of ['FILAMENT DRYER', 'BOTTLE HOLDER']) {
         top = Math.min(top, y); bottom = Math.max(bottom, y);
       }
     }
-    expect(bottom - top, 'assembly fills enough of the frame to inspect').toBeGreaterThan(png.height * 0.65);
+    expect(bottom - top, 'assembly fills enough of the frame to inspect').toBeGreaterThan(png.height * fill);
     expect(top).toBeGreaterThan(2);
     expect(bottom).toBeLessThan(png.height - 3);
   });

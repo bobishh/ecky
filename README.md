@@ -45,7 +45,7 @@ the neutral prefix before starting agents and file watchers, preserving source,
 additional files, history, and provider conversations. Occupied destinations
 are left untouched and reported in app logs.
 
-For a concrete example, the repository contains a [bicycle bottle holder](sites/landing/src/models/bicycle-bottle-holder.ecky) and a separate [frame mount rail](sites/landing/src/models/bottle-holder-frame-mount-rail.ecky). Their source includes dimensions for the bottle, frame, walls, and dovetail connection. These are modeling examples; the files alone do not establish physical fit.
+For a concrete example, the repository contains a [closed hex bottle holder](sites/landing/src/models/bicycle-bottle-holder.ecky). Its source names the bottle, the hex web, the ramped dovetail, and the printed thread on the handlebar clamp. These are modeling examples; the file alone does not establish physical fit.
 
 ## Live paper sketch
 

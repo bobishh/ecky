@@ -14,7 +14,7 @@ test.describe('Landing working model workbench', () => {
     const codeButton = page.getByTestId('model-workbench').getByRole('button', { name: 'SEE CODE' });
     await codeButton.click();
 
-    const inspector = page.getByRole('dialog', { name: 'Macro Inspector: Bicycle bottle holder + frame mount rail' });
+    const inspector = page.getByRole('dialog', { name: 'Macro Inspector: Closed hex bottle holder' });
     await expect(inspector).toBeVisible();
     // Static source: inspectable, highlighted, and deliberately not editable.
     const source = inspector.getByTestId('case-source');
@@ -22,14 +22,14 @@ test.describe('Landing working model workbench', () => {
     await expect(source.getByTestId('source-line-number').first()).toHaveText('1');
     await expect(source.locator('.source-token--keyword').filter({ hasText: 'model' })).toBeVisible();
     await expect(source.locator('.source-token--name').filter({ hasText: 'dovetail_clearance' })).toBeVisible();
-    await expect(source.locator('.source-token--string').filter({ hasText: 'BottleCage' })).toBeVisible();
+    await expect(source.locator('.source-token--name').filter({ hasText: 'BottleCage' })).toBeVisible();
     await expect(inspector.getByRole('textbox')).toHaveCount(0);
     await expect(inspector.getByRole('button', { name: 'APPLY' })).toHaveCount(0);
     await expect.poll(async () => Number(await source.getAttribute('data-source-length'))).toBeGreaterThan(300);
 
     await inspector.getByRole('button', { name: 'COPY CODE' }).click();
     await expect(inspector.getByRole('button', { name: 'COPIED' })).toBeVisible();
-    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('(part "BottleCage"');
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('(part BottleCage');
 
     await page.keyboard.press('Escape');
     await expect(inspector).toBeHidden();
@@ -45,14 +45,13 @@ test.describe('Landing working model workbench', () => {
     const models = workbench.getByRole('group', { name: 'Working models' });
 
     await workbench.getByRole('button', { name: 'SEE CODE' }).click();
-    let inspector = page.getByRole('dialog', { name: 'Macro Inspector: Bicycle bottle holder + frame mount rail' });
+    let inspector = page.getByRole('dialog', { name: 'Macro Inspector: Closed hex bottle holder' });
     let source = inspector.getByTestId('case-source');
-    await expect(source).toContainText('(part "BottleCage"');
-    await expect(source).toContainText('(repeat-union cell 18');
-    await inspector.getByRole('button', { name: 'FRAME MOUNT RAIL SOURCE' }).click();
-    source = inspector.getByTestId('case-source');
-    await expect(source).toContainText('(part "FrameMountRail"');
-    await expect(source).toContainText('(number rail_length');
+    await expect(source).toContainText('(part BottleCage');
+    await expect(source).toContainText('helical-ridge');
+    await expect(source).toContainText('(part FrameMountRail');
+    await expect(source).toContainText('(part clamp-bolt-upper');
+    await expect(inspector.getByRole('button', { name: 'FRAME MOUNT RAIL SOURCE' })).toHaveCount(0);
     await inspector.getByRole('button', { name: 'CLOSE CODE' }).click();
 
     await models.getByRole('button', { name: /PHONE CASE/ }).click();
@@ -89,7 +88,7 @@ test.describe('Landing working model workbench', () => {
 
     const workbench = page.getByTestId('model-workbench');
     const failure = workbench.getByRole('alert');
-    await expect(failure).toContainText(/bottle-[01]-[a-f0-9]+\.stl/);
+    await expect(failure).toContainText(/bottle-[0-3]-[a-f0-9]+\.stl/);
     await expect(workbench.locator('.viewer-load')).toHaveCount(0);
 
     await page.unroute('**/*.stl');
@@ -115,7 +114,7 @@ test.describe('Landing working model workbench', () => {
 
     const codeButton = workbench.getByRole('button', { name: 'SEE CODE' });
     await codeButton.click();
-    const inspector = page.getByRole('dialog', { name: 'Macro Inspector: Bicycle bottle holder + frame mount rail' });
+    const inspector = page.getByRole('dialog', { name: 'Macro Inspector: Closed hex bottle holder' });
     await expect(inspector).toBeVisible();
 
     const overflow = await page.evaluate(() => ({
