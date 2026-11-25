@@ -211,6 +211,8 @@ mod tests {
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
+
+            production_pending: false,
         }
     }
 

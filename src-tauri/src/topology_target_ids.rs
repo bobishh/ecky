@@ -1747,6 +1747,8 @@ mod tests {
                 status: EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
+
+            assembly_tree: Vec::new(),
         }
     }
 }

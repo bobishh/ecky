@@ -510,6 +510,193 @@ pub struct AnalysisDeclarationBinding {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct AssemblyNode {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameter_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<AssemblyNode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<ManifestBounds>,
+}
+
+fn merge_manifest_bounds(
+    left: Option<&ManifestBounds>,
+    right: Option<&ManifestBounds>,
+) -> Option<ManifestBounds> {
+    match (left, right) {
+        (Some(a), Some(b)) => Some(ManifestBounds {
+            x_min: a.x_min.min(b.x_min),
+            y_min: a.y_min.min(b.y_min),
+            z_min: a.z_min.min(b.z_min),
+            x_max: a.x_max.max(b.x_max),
+            y_max: a.y_max.max(b.y_max),
+            z_max: a.z_max.max(b.z_max),
+        }),
+        (Some(a), None) => Some(a.clone()),
+        (None, Some(b)) => Some(b.clone()),
+        (None, None) => None,
+    }
+}
+
+fn assembly_group_prefix(part_id: &str) -> Option<(String, String)> {
+    for sep in ["/", "::", "__", "."] {
+        if let Some((prefix, rest)) = part_id.split_once(sep) {
+            let prefix = prefix.trim();
+            let rest = rest.trim();
+            if !prefix.is_empty() && !rest.is_empty() {
+                return Some((prefix.to_string(), rest.to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Build a deterministic hierarchical assembly tree from manifest parts and
+/// imported component origins. Parts that share a path/module prefix or an
+/// imported component origin are nested under a group node with aggregated
+/// bounding boxes and parameter keys; standalone parts remain top-level leaves.
+pub fn build_assembly_tree(
+    parts: &[PartBinding],
+    import_origins: &[ComponentImportOrigin],
+) -> Vec<AssemblyNode> {
+    if parts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut group_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut part_groups: Vec<Option<(String, String)>> = Vec::with_capacity(parts.len());
+
+    for part in parts {
+        let matched_import = import_origins
+            .iter()
+            .find(|origin| {
+                !origin.component_id.trim().is_empty()
+                    && (part.part_id == origin.component_id
+                        || part
+                            .part_id
+                            .starts_with(&format!("{}_", origin.component_id))
+                        || part
+                            .part_id
+                            .starts_with(&format!("{}-", origin.component_id))
+                        || part
+                            .part_id
+                            .starts_with(&format!("{}/", origin.component_id)))
+            })
+            .map(|origin| (origin.component_id.clone(), part.label.clone()));
+
+        let group = matched_import.or_else(|| assembly_group_prefix(&part.part_id));
+        if let Some((ref prefix, _)) = group {
+            *group_counts.entry(prefix.clone()).or_insert(0) += 1;
+        }
+        part_groups.push(group);
+    }
+
+    let mut roots: Vec<AssemblyNode> = Vec::new();
+    let mut group_indices: BTreeMap<String, usize> = BTreeMap::new();
+
+    for (part, group) in parts.iter().zip(part_groups) {
+        let leaf = AssemblyNode {
+            id: format!("part:{}", part.part_id),
+            name: if part.label.trim().is_empty() {
+                part.part_id.clone()
+            } else {
+                part.label.clone()
+            },
+            part_key: Some(part.part_id.clone()),
+            parameter_keys: part.parameter_keys.clone(),
+            children: Vec::new(),
+            bounds: part.bounds.clone(),
+        };
+
+        if let Some((group_key, _)) =
+            group.filter(|(prefix, _)| group_counts.get(prefix).copied().unwrap_or(0) > 1)
+        {
+            let group_idx = if let Some(&idx) = group_indices.get(&group_key) {
+                idx
+            } else {
+                let idx = roots.len();
+                let pretty_name = group_key.replace(['_', '-'], " ");
+                roots.push(AssemblyNode {
+                    id: format!("group:{group_key}"),
+                    name: pretty_name,
+                    part_key: None,
+                    parameter_keys: Vec::new(),
+                    children: Vec::new(),
+                    bounds: None,
+                });
+                group_indices.insert(group_key, idx);
+                idx
+            };
+            let parent = &mut roots[group_idx];
+            parent.bounds = merge_manifest_bounds(parent.bounds.as_ref(), leaf.bounds.as_ref());
+            for key in &leaf.parameter_keys {
+                if !parent.parameter_keys.contains(key) {
+                    parent.parameter_keys.push(key.clone());
+                }
+            }
+            parent.children.push(leaf);
+        } else {
+            roots.push(leaf);
+        }
+    }
+
+    roots
+}
+
+#[cfg(test)]
+mod assembly_tree_tests {
+    use super::*;
+
+    fn sample_part(part_id: &str, label: &str, params: &[&str], x_max: f64) -> PartBinding {
+        PartBinding {
+            part_id: part_id.to_string(),
+            freecad_object_name: part_id.to_string(),
+            label: label.to_string(),
+            kind: "solid".to_string(),
+            semantic_role: None,
+            viewer_asset_path: None,
+            viewer_node_ids: Vec::new(),
+            parameter_keys: params.iter().map(|s| s.to_string()).collect(),
+            editable: true,
+            bounds: Some(ManifestBounds {
+                x_min: 0.0,
+                y_min: 0.0,
+                z_min: 0.0,
+                x_max,
+                y_max: 10.0,
+                z_max: 10.0,
+            }),
+            volume: None,
+            area: None,
+        }
+    }
+
+    #[test]
+    fn build_assembly_tree_groups_prefixed_parts_and_merges_bounds_and_params() {
+        let parts = vec![
+            sample_part("enclosure/base", "Base", &["width", "wall"], 20.0),
+            sample_part("enclosure/lid", "Lid", &["width", "clearance"], 35.0),
+            sample_part("bracket", "Bracket", &["bolt_d"], 12.0),
+        ];
+
+        let tree = build_assembly_tree(&parts, &[]);
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].id, "group:enclosure");
+        assert_eq!(tree[0].part_key, None);
+        assert_eq!(tree[0].children.len(), 2);
+        assert_eq!(tree[0].parameter_keys, vec!["width", "wall", "clearance"]);
+        assert_eq!(tree[0].bounds.as_ref().unwrap().x_max, 35.0);
+        assert_eq!(tree[1].id, "part:bracket");
+        assert_eq!(tree[1].part_key.as_deref(), Some("bracket"));
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelManifest {
     #[serde(default = "default_model_runtime_schema_version")]
     pub schema_version: u32,
@@ -568,6 +755,10 @@ pub struct ModelManifest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[specta(optional)]
     pub component_placement_evidence: Vec<super::ComponentPlacementEvidence>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[specta(optional)]
+    pub assembly_tree: Vec<AssemblyNode>,
 }
 
 impl ModelManifest {

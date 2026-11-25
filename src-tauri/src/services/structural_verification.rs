@@ -968,6 +968,8 @@ mod tests {
             callout_anchors: vec![],
             measurement_guides: vec![],
             export_artifacts: vec![],
+
+            production_pending: false,
         }
     }
 
@@ -1109,6 +1111,8 @@ mod tests {
                 status: EnrichmentStatus::None,
                 proposals: vec![],
             },
+
+            assembly_tree: Vec::new(),
         }
     }
 

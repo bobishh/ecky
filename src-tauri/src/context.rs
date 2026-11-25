@@ -1084,6 +1084,8 @@ mod tests {
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts,
+
+            production_pending: false,
         }
     }
 
@@ -1126,6 +1128,8 @@ mod tests {
                 status: EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
+
+            assembly_tree: Vec::new(),
         }
     }
 

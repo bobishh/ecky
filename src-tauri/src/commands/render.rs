@@ -1336,6 +1336,18 @@ pub async fn get_mess_stl_path(app: AppHandle) -> AppResult<String> {
 
 #[tauri::command]
 #[specta::specta]
+pub async fn materialize_production_bundle(
+    thread_id: String,
+    message_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<crate::contracts::VersionPreviewRuntime> {
+    crate::services::render::materialize_production_bundle(thread_id, message_id, &state, &app)
+        .await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn export_file(source_path: String, target_path: String) -> AppResult<()> {
     std::fs::copy(&source_path, &target_path).map_err(|err| {
         crate::contracts::AppError::persistence(format!("Failed to export file: {}", err))
@@ -1551,6 +1563,8 @@ mod tests {
                 status: EnrichmentStatus::Accepted,
                 proposals: Vec::new(),
             },
+
+            assembly_tree: Vec::new(),
         }
     }
 

@@ -237,6 +237,8 @@ fn persist_mesh_runtime(
             status: EnrichmentStatus::None,
             proposals: Vec::new(),
         },
+
+        assembly_tree: Vec::new(),
     };
     let viewer_asset = ViewerAsset {
         part_id: part_id.clone(),
@@ -280,6 +282,8 @@ fn persist_mesh_runtime(
             path: mesh_path_string,
             role: "source".to_string(),
         }],
+
+        production_pending: false,
     };
     crate::contracts::validate_model_runtime_bundle(&manifest, &bundle)?;
     write_json(&manifest_path, &manifest)?;

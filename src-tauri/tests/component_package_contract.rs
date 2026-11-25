@@ -2079,6 +2079,8 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
                 status: ecky_cad_lib::contracts::EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
+
+            assembly_tree: Vec::new(),
         })
         .expect("serialize manifest"),
     )
@@ -2170,6 +2172,8 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
                     path: step_path.to_string_lossy().to_string(),
                     role: "primary".to_string(),
                 }],
+
+                production_pending: false,
             },
             port_types: Vec::new(),
             params: Vec::new(),
@@ -2364,6 +2368,8 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
                 status: ecky_cad_lib::contracts::EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
+
+            assembly_tree: Vec::new(),
         })
         .expect("serialize manifest"),
     )
@@ -2406,6 +2412,8 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
                 callout_anchors: Vec::new(),
                 measurement_guides: Vec::new(),
                 export_artifacts: Vec::new(),
+
+                production_pending: false,
             },
             port_types: vec![sample_port_type(
                 "mechanical.plane.mount.v1",

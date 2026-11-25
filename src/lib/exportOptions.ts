@@ -27,6 +27,9 @@ export function getStepExportPath(bundle: ArtifactBundle | null | undefined): st
 }
 
 function stepExportSubtitle(bundle: ArtifactBundle | null | undefined): string {
+  if (bundle?.productionPending && !getStepExportPath(bundle)) {
+    return 'Materializes exact BRep STEP on demand when exported.';
+  }
   const stepArtifact = bundle?.exportArtifacts?.find((artifact) => artifact.format === 'step');
   const representation =
     stepArtifact?.geometryProvenance?.representation ??
@@ -46,6 +49,14 @@ function stepExportDisabledReason(
 ): string | undefined {
   if (getStepExportPath(bundle)) return undefined;
   if (!bundle) return 'No rendered model is available.';
+
+  if (bundle.productionPending && bundle.geometryBackend === 'mesh') {
+    const directOcct = runtimeCapabilities?.directOcct ?? null;
+    if (directOcct && !directOcct.available) {
+      return `STEP unavailable for Ecky Native render: ${directOcct.detail || 'Direct OCCT unavailable.'}`;
+    }
+    return undefined;
+  }
 
   if (bundle.geometryBackend === 'mesh') {
     const directOcct = runtimeCapabilities?.directOcct ?? null;
@@ -119,9 +130,11 @@ export function buildExportChooserOptions(
   options.push({
     id: 'stl',
     title: 'STL',
-    subtitle: isMultipart
-      ? 'Flattened single-mesh export. Use 3MF or Multipart STL to preserve separate bodies.'
-      : 'Single-mesh STL export.',
+    subtitle: bundle?.productionPending
+      ? 'Materializes high-resolution production STL on demand.'
+      : isMultipart
+        ? 'Flattened single-mesh export. Use 3MF or Multipart STL to preserve separate bodies.'
+        : 'Single-mesh STL export.',
     disabled: !Boolean(bundle?.modelStlPath),
     disabledReason: bundle?.modelStlPath ? undefined : 'Model STL is not available for this model.',
   });
@@ -136,11 +149,12 @@ export function buildExportChooserOptions(
 
   const stepPath = getStepExportPath(bundle);
   const stepDisabledReason = stepExportDisabledReason(bundle, runtimeCapabilities);
+  const stepAvailable = Boolean(stepPath) || Boolean(bundle?.productionPending && !stepDisabledReason);
   options.push({
     id: 'step',
     title: 'STEP',
     subtitle: stepExportSubtitle(bundle),
-    disabled: !Boolean(stepPath),
+    disabled: !stepAvailable,
     disabledReason: stepDisabledReason,
   });
 

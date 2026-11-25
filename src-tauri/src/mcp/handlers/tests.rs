@@ -432,6 +432,8 @@ fn sample_bundle(model_id: &str, preview_name: &str) -> ArtifactBundle {
         callout_anchors: Vec::new(),
         measurement_guides: Vec::new(),
         export_artifacts: Vec::new(),
+
+        production_pending: false,
     }
 }
 
@@ -568,6 +570,8 @@ fn sample_manifest(model_id: &str) -> ModelManifest {
             status: EnrichmentStatus::None,
             proposals: Vec::new(),
         },
+
+        assembly_tree: Vec::new(),
     }
 }
 

@@ -203,6 +203,10 @@ pub struct ArtifactBundle {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[specta(optional)]
     pub component_placement_evidence: Vec<super::ComponentPlacementEvidence>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[specta(optional)]
+    pub production_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]

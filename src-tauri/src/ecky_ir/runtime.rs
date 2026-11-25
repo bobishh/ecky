@@ -1611,6 +1611,8 @@ fn render_prepared_parts(
             status: crate::contracts::EnrichmentStatus::None,
             proposals: Vec::new(),
         },
+
+        assembly_tree: Vec::new(),
     };
 
     let manifest_path = dir.join(MANIFEST_FILE_NAME);
@@ -1651,6 +1653,8 @@ fn render_prepared_parts(
         callout_anchors: Vec::new(),
         measurement_guides: Vec::new(),
         export_artifacts,
+
+        production_pending: false,
     };
     write_bundle(&dir.join(BUNDLE_FILE_NAME), &bundle)?;
     Ok(bundle)

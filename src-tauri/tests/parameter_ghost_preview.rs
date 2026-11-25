@@ -162,10 +162,37 @@ async fn draft_renders_only_affected_geometry_at_the_saved_placement_and_apply_e
         "{:?}",
         applied.error
     );
-    let production = applied.artifact_bundle.unwrap();
+    let applied_id = applied.message_id.clone().expect("applied message id");
+    let display_bundle = applied.artifact_bundle.unwrap();
+    assert!(display_bundle.production_pending);
+    assert!(Path::new(&display_bundle.model_stl_path).is_file());
+    assert!(display_bundle.export_artifacts.is_empty());
+    assert_ne!(display_bundle.model_stl_path, draft_path);
+    let display_triangles = triangle_count(&fs::read(&display_bundle.model_stl_path).unwrap());
+    assert!(display_triangles > triangle_count(&draft));
+
+    let materialized = ecky_cad_lib::services::render::materialize_production_bundle(
+        "project".into(),
+        applied_id.clone(),
+        &state,
+        app.as_ref(),
+    )
+    .await
+    .unwrap();
+    let production = materialized.artifact_bundle;
+    assert!(!production.production_pending);
     assert!(Path::new(&production.model_stl_path).is_file());
-    assert!(!production.export_artifacts.is_empty());
-    assert_ne!(production.model_stl_path, draft_path);
-    assert!(triangle_count(&fs::read(production.model_stl_path).unwrap()) > triangle_count(&draft));
+    let step_artifact = production
+        .export_artifacts
+        .iter()
+        .find(|artifact| artifact.format == "step")
+        .expect("materialized STEP export artifact");
+    assert!(Path::new(&step_artifact.path).is_file());
+    assert!(fs::metadata(&step_artifact.path).unwrap().len() > 0);
+    assert!(triangle_count(&fs::read(&production.model_stl_path).unwrap()) > display_triangles);
+    assert!(
+        !materialized.model_manifest.assembly_tree.is_empty(),
+        "manifest must expose assembly tree"
+    );
     state.component_index_worker.wait_idle().await;
 }

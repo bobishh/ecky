@@ -166,17 +166,34 @@ async fn render_parameters(
             None,
             config_default_backend,
         )?;
-        let artifact_bundle = crate::services::render::render_model_with_previous_manifest(
-            &design.macro_code,
-            &design.initial_params,
-            Some(design.macro_dialect.clone()),
-            Some(context.geometry_backend),
-            design.post_processing.as_ref(),
-            previous_manifest,
-            state,
-            app,
-        )
-        .await?;
+        let artifact_bundle = if design.post_processing.is_none()
+            && design.source_language == crate::contracts::SourceLanguage::EckyIrV0
+            && context.geometry_backend == crate::contracts::GeometryBackend::EckyRust
+        {
+            crate::services::render::render_model_display_with_previous_manifest(
+                &design.macro_code,
+                &design.initial_params,
+                Some(design.macro_dialect.clone()),
+                Some(context.geometry_backend),
+                design.post_processing.as_ref(),
+                previous_manifest,
+                state,
+                app,
+            )
+            .await?
+        } else {
+            crate::services::render::render_model_with_previous_manifest(
+                &design.macro_code,
+                &design.initial_params,
+                Some(design.macro_dialect.clone()),
+                Some(context.geometry_backend),
+                design.post_processing.as_ref(),
+                previous_manifest,
+                state,
+                app,
+            )
+            .await?
+        };
         let manifest = crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id)?;
         (artifact_bundle, manifest)
     };

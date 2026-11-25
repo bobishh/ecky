@@ -1322,6 +1322,19 @@ export async function getMessStlPath(): Promise<string> {
   return invokeCommand(commands.getMessStlPath());
 }
 
+export async function materializeProductionBundle(input: {
+  threadId: string;
+  messageId: string;
+}): Promise<{ artifactBundle: ArtifactBundle; modelManifest: ModelManifest }> {
+  const result = await invokeCommand(
+    commands.materializeProductionBundle(input.threadId, input.messageId),
+  );
+  return {
+    artifactBundle: normalizeArtifactBundle(result.artifactBundle),
+    modelManifest: normalizeModelManifest(result.modelManifest),
+  };
+}
+
 export async function exportFile(sourcePath: string, targetPath: string): Promise<void> {
   await invokeCommand(commands.exportFile(sourcePath, targetPath));
 }

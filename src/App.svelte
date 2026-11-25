@@ -238,7 +238,11 @@ import {
     type MeasurementControlFocus,
     type ContextSelectionTarget,
   } from './lib/modelRuntime/contextualEditing';
-  import { type ExportMode } from './lib/exportOptions';
+  import {
+    buildMultipartExportParts,
+    hasMultipartExportAssets,
+    type ExportMode,
+  } from './lib/exportOptions';
   import { deriveContextState } from './lib/composables/contextState';
   import { deriveViewportState } from './lib/composables/viewportState';
   import { deriveAgentOpsState, type PendingViewportScreenshotChoice } from './lib/composables/agentOps';
@@ -279,6 +283,7 @@ import {
     exportFile,
     exportMultipart3mf,
     exportMultipartStlZip,
+    materializeProductionBundle,
     formatBackendError,
     getAgyProvider,
     getAgyProviderMessages,
@@ -5598,9 +5603,66 @@ import {
     return labels[phase] || phase.toUpperCase();
   }
 
+  let isolatedPartId = $state<string | null>(null);
+  let hiddenPartIds = $state<string[]>([]);
+  let ghostIsolatedSiblings = $state(true);
+
+  function toggleIsolatePart(partId: string) {
+    if (isolatedPartId === partId) {
+      isolatedPartId = null;
+      return;
+    }
+    isolatedPartId = partId;
+    hiddenPartIds = hiddenPartIds.filter((id) => id !== partId);
+    handlePartSelect(partId);
+  }
+
+  function toggleHidePart(partIds: string[]) {
+    const next = new Set(hiddenPartIds);
+    const allHidden = partIds.every((id) => next.has(id));
+    for (const id of partIds) {
+      if (allHidden) {
+        next.delete(id);
+      } else {
+        next.add(id);
+        if (isolatedPartId === id) {
+          isolatedPartId = null;
+        }
+      }
+    }
+    hiddenPartIds = [...next];
+  }
+
+  function resetPartVisibility() {
+    isolatedPartId = null;
+    hiddenPartIds = [];
+  }
+
   async function handleExport(mode: ExportMode) {
     showExportChooser = false;
-    await modelIo.exportModel(mode, activeArtifactBundle, exportDefaultNames, multipartExportParts, hasMultipartExportModel, exportModelTitle);
+    let exportBundle = activeArtifactBundle;
+    let exportParts = multipartExportParts;
+    let exportIsMultipart = hasMultipartExportModel;
+
+    if (exportBundle?.productionPending && $activeThreadId && $activeVersionId) {
+      try {
+        session.setStatus('Generating exact production geometry for export...');
+        const materialized = await materializeProductionBundle({
+          threadId: $activeThreadId,
+          messageId: $activeVersionId,
+        });
+        exportBundle = materialized.artifactBundle;
+        session.setModelRuntime(materialized.artifactBundle, materialized.modelManifest);
+        session.setStlUrl(toAssetUrl(materialized.artifactBundle.modelStlPath));
+        exportIsMultipart = hasMultipartExportAssets(exportBundle);
+        exportParts = buildMultipartExportParts(exportBundle);
+      } catch (error) {
+        session.setError(`Production Export Failed: ${formatBackendError(error)}`);
+        return;
+      }
+    }
+
+    await modelIo.exportModel(mode, exportBundle, exportDefaultNames, exportParts, exportIsMultipart, exportModelTitle);
   }
 
   function dismissGenie() {
@@ -5644,6 +5706,8 @@ import {
     selectedContextTargetId = null;
     sharedContextSearchQuery = '';
     focusedMeasurementControl = null;
+    isolatedPartId = null;
+    hiddenPartIds = [];
   });
 
   $effect(() => {
@@ -6165,6 +6229,11 @@ ${detail}`,
                 outlineEnabled={viewerOutlineEnabled}
                 persistedCameraState={hasSketchPreview ? null : persistedViewportCameraState}
                 selectedPartId={hasSketchPreview ? null : selectedPartId}
+                isolatedPartId={hasSketchPreview ? null : isolatedPartId}
+                hiddenPartIds={hasSketchPreview ? [] : hiddenPartIds}
+                {ghostIsolatedSiblings}
+                onExitIsolation={() => { isolatedPartId = null; }}
+                onToggleGhostIsolatedSiblings={() => { ghostIsolatedSiblings = !ghostIsolatedSiblings; }}
                 overlayPartLabel={hasSketchPreview ? null : selectedTarget?.label ?? overlaySelectedPart?.label ?? null}
                 overlayPartEditable={hasSketchPreview ? false : selectedTarget?.editable ?? overlaySelectedPart?.editable ?? false}
                 overlayPreviewOnly={hasSketchPreview ? false : overlayPreviewOnly}
@@ -6615,6 +6684,13 @@ ${detail}`,
           activeControlViewId={activeControlViewId}
           selectedTarget={selectedTarget}
           selectedPartId={selectedPartId}
+          {isolatedPartId}
+          {hiddenPartIds}
+          {ghostIsolatedSiblings}
+          onToggleIsolatePart={toggleIsolatePart}
+          onToggleHidePart={toggleHidePart}
+          onToggleGhostIsolatedSiblings={() => { ghostIsolatedSiblings = !ghostIsolatedSiblings; }}
+          onResetPartVisibility={resetPartVisibility}
           bind:searchQuery={sharedContextSearchQuery}
           onControlFocusChange={(focus) => focusedMeasurementControl = focus}
           onSelectControlView={handleSelectControlView}

@@ -3555,6 +3555,8 @@ mod tests {
                 status: EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
+
+            assembly_tree: Vec::new(),
         }
     }
 
@@ -3600,6 +3602,8 @@ mod tests {
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
+
+            production_pending: false,
         }
     }
 
@@ -3720,6 +3724,8 @@ mod tests {
                 status: EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
+
+            assembly_tree: Vec::new(),
         }
     }
 
@@ -4335,6 +4341,8 @@ mod tests {
             }],
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
+
+            production_pending: false,
         };
 
         let err = validate_model_runtime_bundle(&manifest, &bundle)
@@ -4420,6 +4428,8 @@ mod tests {
                 target_ids: vec!["legacy-target-shell".to_string()],
             }],
             export_artifacts: Vec::new(),
+
+            production_pending: false,
         };
 
         validate_model_runtime_bundle(&manifest, &bundle)
@@ -4502,6 +4512,8 @@ mod tests {
                 target_ids: vec!["canonical-target-shell".to_string()],
             }],
             export_artifacts: Vec::new(),
+
+            production_pending: false,
         };
 
         validate_model_runtime_bundle(&manifest, &bundle)
@@ -4554,6 +4566,8 @@ mod tests {
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
+
+            production_pending: false,
         };
 
         let err = validate_model_runtime_bundle(&manifest, &bundle)
@@ -4605,6 +4619,8 @@ mod tests {
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
+
+            production_pending: false,
         };
 
         let err = validate_model_runtime_bundle(&manifest, &bundle)

@@ -8815,6 +8815,8 @@ mod tests {
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
+
+            production_pending: false,
         }
     }
 
@@ -8857,6 +8859,8 @@ mod tests {
                 status: crate::contracts::EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
+
+            assembly_tree: Vec::new(),
         }
     }
 
@@ -12049,6 +12053,8 @@ mod tests {
                 path: format!("/tmp/{model_id}.step"),
                 role: "cad-exchange".to_string(),
             }],
+
+            production_pending: false,
         }
     }
 
@@ -12091,6 +12097,8 @@ mod tests {
                 status: crate::contracts::EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
+
+            assembly_tree: Vec::new(),
         }
     }
 

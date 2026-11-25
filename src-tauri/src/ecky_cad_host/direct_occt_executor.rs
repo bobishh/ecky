@@ -72,6 +72,28 @@ pub fn export_core_program_step_stl_with_params_runner_first(
     )
 }
 
+pub fn export_core_program_display_stl_with_params_runner_first(
+    program: &CoreProgram,
+    parameters: &DesignParams,
+    _layout: &DirectOcctSdkLayout,
+    output_dir: impl AsRef<Path>,
+    app: &dyn PathResolver,
+) -> AppResult<NativeExportOutcome> {
+    let parameters = effective_program_parameters(program, parameters);
+    let planned =
+        super::direct_occt::plan_core_program_with_params_and_bindings(program, &parameters)?;
+    let resolved_plan = resolve_plan_parameters(&planned.plan, &parameters)?;
+    direct_occt_runner::run_plan_display_stl_if_available_with_bindings(
+        &resolved_plan,
+        &planned.authored_shape_bindings,
+        output_dir,
+        app,
+    )?
+    .ok_or_else(|| {
+        AppError::render("Direct OCCT runner unavailable; generated-C++ fallback was removed.")
+    })
+}
+
 pub fn export_plan_step_stl(
     plan: &OcctPlan,
     layout: &DirectOcctSdkLayout,

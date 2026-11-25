@@ -755,6 +755,7 @@ fn artifact_bundle_core(bundle: &ArtifactBundle) -> ArtifactBundle {
         component_dependency_lock_digest: bundle.component_dependency_lock_digest.clone(),
         component_import_origins: bundle.component_import_origins.clone(),
         component_placement_evidence: bundle.component_placement_evidence.clone(),
+        production_pending: bundle.production_pending,
     }
 }
 
@@ -788,6 +789,7 @@ fn model_manifest_core(manifest: &ModelManifest) -> ModelManifest {
         geometry_provenance: manifest.geometry_provenance.clone(),
         component_import_origins: manifest.component_import_origins.clone(),
         component_placement_evidence: manifest.component_placement_evidence.clone(),
+        assembly_tree: manifest.assembly_tree.clone(),
     }
 }
 
@@ -5657,6 +5659,8 @@ mod tests {
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
+
+            production_pending: false,
         }
     }
 
@@ -7243,6 +7247,8 @@ mod tests {
                 callout_anchors: Vec::new(),
                 measurement_guides: Vec::new(),
                 export_artifacts: Vec::new(),
+
+                production_pending: false,
             },
             model_manifest: crate::contracts::ModelManifest {
                 geometry_provenance: None,
@@ -7295,6 +7301,8 @@ mod tests {
                     status: crate::contracts::EnrichmentStatus::None,
                     proposals: Vec::new(),
                 },
+
+                assembly_tree: Vec::new(),
             },
             draft_feedback: Some(crate::contracts::AgentDraftFeedback {
                 session_id: "session-1".to_string(),

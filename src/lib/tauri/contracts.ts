@@ -1257,6 +1257,14 @@ async renderModel(macroCode: string, parameters: Partial<{ [key in string]: Para
     else return { status: "error", error: e  as any };
 }
 },
+async materializeProductionBundle(threadId: string, messageId: string) : Promise<Result<VersionPreviewRuntime, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("materialize_production_bundle", { threadId, messageId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async applySemanticManifestEdit(input: ApplySemanticManifestEditInput) : Promise<Result<SemanticManifestEditResult, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("apply_semantic_manifest_edit", { input }) };
@@ -1908,12 +1916,13 @@ export type ApplyInlineComponentImportResult = { version: ManualCodeApplyRespons
 export type ApplySemanticControlValueInput = { threadId: string; targetMessageId: string; primitiveId: string; value: ParamValue }
 export type ApplySemanticControlValueResult = { parameterPatch: Partial<{ [key in string]: ParamValue }>; changedParameterKeys: string[]; appliedPrimitiveIds: string[] }
 export type ApplySemanticManifestEditInput = { modelId: string; messageId?: string | null; edit: SemanticManifestEditIntent }
-export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; modelStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[]; geometryProvenance?: GeometryProvenance | null; componentDependencyLock?: ComponentDependencyLock | null; componentDependencyLockDigest?: string | null; componentImportOrigins?: ComponentImportOrigin[]; componentPlacementEvidence?: ComponentPlacementEvidence[] }
+export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; modelStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[]; geometryProvenance?: GeometryProvenance | null; componentDependencyLock?: ComponentDependencyLock | null; componentDependencyLockDigest?: string | null; componentImportOrigins?: ComponentImportOrigin[]; componentPlacementEvidence?: ComponentPlacementEvidence[]; productionPending?: boolean }
 export type ArtifactBundleComponentPackageRequest = { packageId: string; version: string; displayName: string; tags?: string[]; componentId: string; componentVersion: string; componentDisplayName: string; sourceRef?: string | null; artifactBundle: ArtifactBundle; portTypes?: PortTypeDefinition[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
 export type AssemblyComponentRef = { instanceId: string; componentId: string }
 export type AssemblyDefinition = { assemblyId: string; displayName: string; components?: AssemblyComponentRef[]; mates?: AssemblyMate[]; operations?: AssemblyOperation[]; output: AssemblyOutput }
 export type AssemblyHeader = { assemblyId: string; displayName: string; componentCount: number; mateCount: number; operationCount: number; output: AssemblyOutput }
 export type AssemblyMate = { mateId: string; typeId: string; a: PortReference; b: PortReference; params?: Partial<{ [key in string]: ComponentInterfaceValue }> }
+export type AssemblyNode = { id: string; name: string; partKey?: string | null; parameterKeys: string[]; children: AssemblyNode[]; bounds?: ManifestBounds | null }
 export type AssemblyOperation = { operationId: string; kind: OperationKind; targetInstanceIds?: string[]; portRefs?: PortReference[]; params?: Partial<{ [key in string]: ComponentInterfaceValue }> }
 export type AssemblyOutput = { mode: AssemblyOutputMode }
 export type AssemblyOutputMode = "separateParts" | "joinedAssembly" | "fusedSolid" | "moldedSolid"
@@ -2449,7 +2458,7 @@ export type MessageVisualKind = "conceptPreview"
 export type MicrowaveConfig = { humId?: string | null; dingId?: string | null; muted?: boolean }
 export type MissionCoreIrEvaluation = { matched: boolean }
 export type ModelCatalogProjection = { config: Config; models: string[] }
-export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; sourceDigest?: string | null; coreDigest?: string | null; astSchemaVersion?: number | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; previewViews?: PreviewView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; taggedAnchors: Partial<{ [key in string]: TaggedAnchorBinding }>; featureGraph?: FeatureGraph | null; correspondenceGraph?: CorrespondenceGraph | null; analysisDeclarations: AnalysisDeclarationBinding[]; warnings?: string[]; enrichmentState?: ManifestEnrichmentState; geometryProvenance?: GeometryProvenance | null; componentImportOrigins?: ComponentImportOrigin[]; componentPlacementEvidence?: ComponentPlacementEvidence[] }
+export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; sourceDigest?: string | null; coreDigest?: string | null; astSchemaVersion?: number | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; previewViews?: PreviewView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; taggedAnchors: Partial<{ [key in string]: TaggedAnchorBinding }>; featureGraph?: FeatureGraph | null; correspondenceGraph?: CorrespondenceGraph | null; analysisDeclarations: AnalysisDeclarationBinding[]; warnings?: string[]; enrichmentState?: ManifestEnrichmentState; geometryProvenance?: GeometryProvenance | null; componentImportOrigins?: ComponentImportOrigin[]; componentPlacementEvidence?: ComponentPlacementEvidence[]; assemblyTree?: AssemblyNode[] }
 export type ModelSourceKind = "generated" | "importedFcstd" | "importedStep" | "importedMesh"
 export type OpenCampaignProjectIntent = { kind: "start"; definitionId: string } | { kind: "resume"; runId: string }
 export type OpenCampaignProjectResult = { run: CampaignRun; step: CampaignStepPayload }

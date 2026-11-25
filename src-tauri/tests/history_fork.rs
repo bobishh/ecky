@@ -448,6 +448,8 @@ fn runtime_only_message(id: &str) -> Message {
         component_dependency_lock_digest: None,
         component_import_origins: Vec::new(),
         component_placement_evidence: Vec::new(),
+
+        production_pending: false,
     };
     let manifest = ModelManifest {
         schema_version: 1,
@@ -487,6 +489,8 @@ fn runtime_only_message(id: &str) -> Message {
         geometry_provenance: None,
         component_import_origins: Vec::new(),
         component_placement_evidence: Vec::new(),
+
+        assembly_tree: Vec::new(),
     };
     Message {
         id: id.to_string(),

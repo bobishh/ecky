@@ -2430,6 +2430,8 @@ mod tests {
                 status: EnrichmentStatus::Accepted,
                 proposals: vec![],
             },
+
+            assembly_tree: Vec::new(),
         }
     }
 
@@ -2508,6 +2510,8 @@ mod tests {
                     role: "preview".to_string(),
                 },
             ],
+
+            production_pending: false,
         }
     }
 

@@ -126,14 +126,24 @@ pub fn write_artifact_bundle(
 pub fn read_model_manifest(app: &dyn PathResolver, model_id: &str) -> AppResult<ModelManifest> {
     let bundle_dir = runtime_bundle_dir(app, model_id)?;
     let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
-    let manifest = read_manifest_file(&manifest_path)?;
+    let mut manifest = read_manifest_file(&manifest_path)?;
     if manifest.model_id != model_id {
         return Err(AppError::validation(format!(
             "Model manifest modelId '{}' does not match requested model id '{}'.",
             manifest.model_id, model_id
         )));
     }
+    backfill_assembly_tree_from_parts(&mut manifest);
     Ok(manifest)
+}
+
+fn backfill_assembly_tree_from_parts(manifest: &mut ModelManifest) {
+    if manifest.assembly_tree.is_empty() && !manifest.parts.is_empty() {
+        manifest.assembly_tree = crate::contracts::build_assembly_tree(
+            &manifest.parts,
+            &manifest.component_import_origins,
+        );
+    }
 }
 
 pub fn write_model_manifest(
@@ -151,6 +161,7 @@ pub fn write_model_manifest(
     let mut stored_manifest = manifest.clone();
     remove_ecky_control_views(&mut stored_manifest);
     backfill_feature_graph_from_parts(&mut stored_manifest);
+    backfill_assembly_tree_from_parts(&mut stored_manifest);
     validate_model_manifest(&stored_manifest)?;
 
     let bundle_dir = artifact_dir(app, stored_manifest.source_kind.clone(), model_id)?;
@@ -595,6 +606,8 @@ mod tests {
                 status: EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
+
+            assembly_tree: Vec::new(),
         }
     }
 
@@ -623,6 +636,8 @@ mod tests {
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
+
+            production_pending: false,
         }
     }
 

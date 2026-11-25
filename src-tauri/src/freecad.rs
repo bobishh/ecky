@@ -886,6 +886,8 @@ fn build_bundle(
         callout_anchors: Vec::new(),
         measurement_guides: Vec::new(),
         export_artifacts: step_export_artifacts(step_path)?,
+
+        production_pending: false,
     })
 }
 
@@ -1677,6 +1679,8 @@ fn build_manifest_with_stable_node_keys(
             },
             proposals: enrichment_proposals,
         },
+
+        assembly_tree: Vec::new(),
     };
 
     validate_model_manifest(&manifest)?;
@@ -3050,6 +3054,8 @@ mod tests {
                 status: EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
+
+            assembly_tree: Vec::new(),
         }
     }
 
@@ -3085,6 +3091,8 @@ mod tests {
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
+
+            production_pending: false,
         }
     }
 

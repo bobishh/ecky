@@ -37,6 +37,11 @@ fn main() {
         .replace(
             "componentPlacementEvidence: ComponentPlacementEvidence[]",
             "componentPlacementEvidence?: ComponentPlacementEvidence[]",
+        )
+        .replace("productionPending: boolean", "productionPending?: boolean")
+        .replace(
+            "assemblyTree: AssemblyNode[]",
+            "assemblyTree?: AssemblyNode[]",
         );
     if patched != generated {
         fs::write(&output_path, patched).expect("Failed to patch generated contracts");

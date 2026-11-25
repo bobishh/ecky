@@ -885,6 +885,8 @@ fn accepted_brep_step_gate_rejects_mesh_only_bundle() {
         callout_anchors: vec![],
         measurement_guides: vec![],
         export_artifacts: vec![],
+
+        production_pending: false,
     };
 
     let err = require_step_export_artifact(&bundle).expect_err("mesh-only bundle should fail");
@@ -948,6 +950,8 @@ fn accepted_step_bundle_with_edge_target(target_id: &str) -> ArtifactBundle {
             path: "/tmp/accepted.step".to_string(),
             role: "primary".to_string(),
         }],
+
+        production_pending: false,
     }
 }
 
@@ -1001,6 +1005,8 @@ fn accepted_step_bundle_with_face_target(target_id: &str) -> ArtifactBundle {
             path: "/tmp/accepted.step".to_string(),
             role: "primary".to_string(),
         }],
+
+        production_pending: false,
     }
 }
 

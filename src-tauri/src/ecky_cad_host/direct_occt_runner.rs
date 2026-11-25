@@ -380,6 +380,49 @@ fn run_plan_step_stl_with_mode_and_bindings(
     }))
 }
 
+pub(crate) fn run_plan_display_stl_if_available_with_bindings(
+    plan: &OcctPlan,
+    authored_shape_bindings: &[OcctAuthoredShapeBinding],
+    output_dir: impl AsRef<Path>,
+    app: &dyn PathResolver,
+) -> AppResult<Option<super::direct_occt_sdk::NativeExportOutcome>> {
+    let output_dir = output_dir.as_ref();
+    let Some(source_mesh_digests) = invoke_runner_plan(
+        plan,
+        authored_shape_bindings,
+        output_dir,
+        app,
+        runner_enabled(),
+        PlanOutput::Preview,
+    )?
+    else {
+        return Ok(None);
+    };
+    let stl_path = output_dir.join(MODEL_STL_FILE_NAME);
+    let mut part_stl_paths = Vec::new();
+    let parts_dir = output_dir.join("parts");
+    if parts_dir.is_dir() {
+        for part in plan.parts.iter() {
+            let key = if part.key.trim().is_empty() {
+                "body".to_string()
+            } else {
+                part.key.clone()
+            };
+            let candidate = parts_dir.join(format!("{}.stl", key));
+            if candidate.is_file() {
+                part_stl_paths.push((key, candidate));
+            }
+        }
+    }
+    Ok(Some(
+        super::direct_occt_sdk::NativeExportOutcome::MeshExported {
+            stl_path,
+            part_stl_paths,
+            source_mesh_digests,
+        },
+    ))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlanOutput {
     Production,

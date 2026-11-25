@@ -561,6 +561,12 @@ pub(crate) fn render_core_program_runtime_bundle(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectOcctRenderTier {
+    Production,
+    Display,
+}
+
 pub(crate) fn render_core_program_runtime_bundle_with_font_path(
     program: &CoreProgram,
     source_identity: &str,
@@ -569,11 +575,35 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
     app: &dyn PathResolver,
     cad_text_font_path: Option<&str>,
 ) -> AppResult<(ArtifactBundle, ModelManifest)> {
-    let params_json =
-        serde_json::to_string(parameters).map_err(|err| AppError::validation(err.to_string()))?;
-    let content_hash = content_hash_with_runtime_inputs(
+    render_core_program_runtime_bundle_with_tier(
         program,
         source_identity,
+        parameters,
+        layout,
+        app,
+        cad_text_font_path,
+        DirectOcctRenderTier::Production,
+    )
+}
+
+pub(crate) fn render_core_program_runtime_bundle_with_tier(
+    program: &CoreProgram,
+    source_identity: &str,
+    parameters: &DesignParams,
+    layout: &DirectOcctSdkLayout,
+    app: &dyn PathResolver,
+    cad_text_font_path: Option<&str>,
+    tier: DirectOcctRenderTier,
+) -> AppResult<(ArtifactBundle, ModelManifest)> {
+    let params_json =
+        serde_json::to_string(parameters).map_err(|err| AppError::validation(err.to_string()))?;
+    let tier_salted_source = match tier {
+        DirectOcctRenderTier::Production => source_identity.to_string(),
+        DirectOcctRenderTier::Display => format!("{source_identity}\n; eckyRenderTier=display\n"),
+    };
+    let content_hash = content_hash_with_runtime_inputs(
+        program,
+        &tier_salted_source,
         &params_json,
         parameters,
         cad_text_font_path,
@@ -597,28 +627,59 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
     fs::write(&source_path, source_identity)
         .map_err(|err| AppError::persistence(err.to_string()))?;
 
-    let geometry_hash =
-        direct_occt_geometry_hash(program, &params_json, parameters, cad_text_font_path, app)?;
-    let export_outcome = match read_cached_direct_occt_geometry(app, &geometry_hash, &bundle_dir)? {
-        Some(outcome) => outcome,
-        None => match with_direct_occt_text_font_path(cad_text_font_path, || {
-            super::direct_occt_executor::export_core_program_step_stl_with_params_runner_first(
+    let export_outcome = match tier {
+        DirectOcctRenderTier::Display => {
+            match with_direct_occt_text_font_path(cad_text_font_path, || {
+                super::direct_occt_executor::export_core_program_display_stl_with_params_runner_first(
+                    program,
+                    parameters,
+                    layout,
+                    &bundle_dir,
+                    app,
+                )
+            }) {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    let _ = fs::remove_dir_all(&bundle_dir);
+                    return Err(err);
+                }
+            }
+        }
+        DirectOcctRenderTier::Production => {
+            let geometry_hash = direct_occt_geometry_hash(
                 program,
+                &params_json,
                 parameters,
-                layout,
-                &bundle_dir,
+                cad_text_font_path,
                 app,
-            )
-        }) {
-            Ok(outcome) => {
-                write_cached_direct_occt_geometry(app, &geometry_hash, &bundle_dir, &outcome)?;
-                outcome
+            )?;
+            match read_cached_direct_occt_geometry(app, &geometry_hash, &bundle_dir)? {
+                Some(outcome) => outcome,
+                None => match with_direct_occt_text_font_path(cad_text_font_path, || {
+                    super::direct_occt_executor::export_core_program_step_stl_with_params_runner_first(
+                        program,
+                        parameters,
+                        layout,
+                        &bundle_dir,
+                        app,
+                    )
+                }) {
+                    Ok(outcome) => {
+                        write_cached_direct_occt_geometry(
+                            app,
+                            &geometry_hash,
+                            &bundle_dir,
+                            &outcome,
+                        )?;
+                        outcome
+                    }
+                    Err(err) => {
+                        let _ = fs::remove_dir_all(&bundle_dir);
+                        return Err(err);
+                    }
+                },
             }
-            Err(err) => {
-                let _ = fs::remove_dir_all(&bundle_dir);
-                return Err(err);
-            }
-        },
+        }
     };
 
     let (step_path, stl_path, part_stl_paths, geometry_provenance) = match export_outcome {
@@ -646,7 +707,11 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
             None,
             stl_path,
             part_stl_paths,
-            direct_occt_provenance(GeometryRepresentation::MeshNative, source_mesh_digests),
+            if tier == DirectOcctRenderTier::Display {
+                direct_occt_analytic_brep_provenance()
+            } else {
+                direct_occt_provenance(GeometryRepresentation::MeshNative, source_mesh_digests)
+            },
         ),
         NativeExportOutcome::Blocked { blockers } => {
             let _ = fs::remove_dir_all(&bundle_dir);
@@ -667,8 +732,13 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         ));
     }
     let topology_path = bundle_dir.join(TOPOLOGY_FILE_NAME);
-    let topology_report = read_direct_occt_topology_report(&topology_path)?;
-    let topology_report = Some(&topology_report);
+    let topology_report_owned = if tier == DirectOcctRenderTier::Display && !topology_path.is_file()
+    {
+        None
+    } else {
+        Some(read_direct_occt_topology_report(&topology_path)?)
+    };
+    let topology_report = topology_report_owned.as_ref();
     let parameter_keys = program
         .parameters
         .iter()
@@ -768,12 +838,15 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         &manifest,
     )?;
     bundle.geometry_provenance = Some(geometry_provenance.clone());
+    bundle.production_pending = tier == DirectOcctRenderTier::Display;
     for artifact in &mut bundle.export_artifacts {
         artifact.geometry_provenance = Some(geometry_provenance.clone());
     }
     if step_path.is_none() {
         bundle.export_artifacts.clear();
     }
+    manifest.assembly_tree =
+        crate::contracts::build_assembly_tree(&manifest.parts, &manifest.component_import_origins);
     let stored = crate::model_runtime::write_runtime_bundle(app, &model_id, &bundle, &manifest)?;
     write_complete_cached_bundle_digests(&bundle_dir, &stored.0)?;
     remember_complete_cached_bundle(&bundle_dir, &content_hash, &stored);
@@ -1254,6 +1327,8 @@ fn build_direct_occt_manifest_with_program_provenance(
             status: EnrichmentStatus::None,
             proposals: Vec::new(),
         },
+
+        assembly_tree: Vec::new(),
     })
 }
 
@@ -1592,6 +1667,8 @@ pub(crate) fn build_direct_occt_bundle(
         callout_anchors: Vec::new(),
         measurement_guides: Vec::new(),
         export_artifacts: direct_occt_step_export_artifacts(step_path)?,
+
+        production_pending: false,
     })
 }
 

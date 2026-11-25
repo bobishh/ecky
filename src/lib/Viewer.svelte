@@ -71,6 +71,11 @@
     searchQuery = '',
     outlineEnabled = true,
     selectedPartId = null,
+    isolatedPartId = null,
+    hiddenPartIds = [],
+    ghostIsolatedSiblings = true,
+    onExitIsolation,
+    onToggleGhostIsolatedSiblings,
     overlayPartLabel = null,
     overlayPartEditable = false,
     overlayPreviewOnly = false,
@@ -143,6 +148,11 @@
     searchQuery?: string;
     outlineEnabled?: boolean;
     selectedPartId?: string | null;
+    isolatedPartId?: string | null;
+    hiddenPartIds?: string[];
+    ghostIsolatedSiblings?: boolean;
+    onExitIsolation?: () => void;
+    onToggleGhostIsolatedSiblings?: () => void;
     overlayPartLabel?: string | null;
     overlayPartEditable?: boolean;
     overlayPreviewOnly?: boolean;
@@ -1104,8 +1114,25 @@
   });
 
   $effect(() => {
+    void isolatedPartId;
+    void hiddenPartIds;
+    void ghostIsolatedSiblings;
     applySelectionStyles();
     updateOverlayAnchor();
+  });
+
+  let lastFramedIsolatedPartId: string | null = null;
+  $effect(() => {
+    const nextIsolated = isolatedPartId;
+    if (!nextIsolated) {
+      lastFramedIsolatedPartId = null;
+      return;
+    }
+    if (nextIsolated === lastFramedIsolatedPartId) return;
+    lastFramedIsolatedPartId = nextIsolated;
+    untrack(() => {
+      framePartById(nextIsolated);
+    });
   });
 
   $effect(() => {
@@ -2049,6 +2076,30 @@
     controls.update();
   }
 
+  function framePartById(partId: string) {
+    if (!scene || !camera || !controls) return;
+    const matching = runtimeMeshes.filter((entry) => entry.partId === partId);
+    if (matching.length === 0) return;
+    const box = new THREE.Box3();
+    for (const entry of matching) {
+      entry.mesh.updateMatrixWorld(true);
+      box.expandByObject(entry.mesh);
+    }
+    if (box.isEmpty()) return;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 1);
+    const currentDir = camera.position.clone().sub(controls.target);
+    const direction =
+      currentDir.lengthSq() > 1e-6
+        ? currentDir.normalize()
+        : new THREE.Vector3(1.3, 1.1, 1.3).normalize();
+    camera.position.copy(center).add(direction.multiplyScalar(maxDim * 2.1));
+    controls.target.copy(center);
+    updateCameraClipPlanes();
+    controls.update();
+  }
+
   function createMaterial(tone: ViewerTone, isSelected: boolean) {
     return new THREE.MeshStandardMaterial({
       color: isSelected ? 0xe5ca88 : tone.color,
@@ -2245,41 +2296,66 @@
   function applySelectionStyles() {
     const measurementPartIds = new Set(activeMeasurementCallout?.partIds || []);
     const measurementTargetIds = new Set(activeMeasurementCallout?.targetIds || []);
+    const hiddenSet = new Set(hiddenPartIds || []);
+    const hasIsolation = Boolean(isolatedPartId);
 
     for (const entry of runtimeMeshes) {
+      const isHidden = Boolean(entry.partId && hiddenSet.has(entry.partId));
+      const isGhostSibling =
+        hasIsolation && Boolean(entry.partId) && entry.partId !== isolatedPartId;
+      const shouldHide = isHidden || (isGhostSibling && !ghostIsolatedSiblings);
+
+      entry.mesh.visible = !shouldHide;
+      const nextTransparent = isGhostSibling && ghostIsolatedSiblings && !isHidden;
+      const nextOpacity = nextTransparent ? 0.14 : 1;
+      const nextDepthWrite = !nextTransparent;
+      if (
+        entry.mesh.material.transparent !== nextTransparent ||
+        entry.mesh.material.opacity !== nextOpacity ||
+        entry.mesh.material.depthWrite !== nextDepthWrite
+      ) {
+        entry.mesh.material.transparent = nextTransparent;
+        entry.mesh.material.opacity = nextOpacity;
+        entry.mesh.material.depthWrite = nextDepthWrite;
+        entry.mesh.material.needsUpdate = true;
+      }
+
       const isSelected = !!selectedPartId && entry.partId === selectedPartId;
       const isInspected = !isSelected && !selectedPartId && !!entry.partId && inspectedPartId === entry.partId;
-      const isActive = isSelected || isInspected;
-      const isHovered = !isSelected && !!hoveredPartId && entry.partId === hoveredPartId;
+      const isActive = !isGhostSibling && (isSelected || isInspected);
+      const isHovered = !isGhostSibling && !isSelected && !!hoveredPartId && entry.partId === hoveredPartId;
       const isMeasured =
-        !isSelected && !isHovered && !!entry.partId && measurementPartIds.has(entry.partId);
+        !isGhostSibling && !isSelected && !isHovered && !!entry.partId && measurementPartIds.has(entry.partId);
       entry.mesh.material.color.setHex(
         isActive ? 0xe5ca88 : isHovered ? entry.tone.hoverColor : isMeasured ? entry.tone.measuredColor : entry.tone.color,
       );
       entry.mesh.material.emissive.setHex(
         isActive ? entry.tone.emissive : isHovered ? entry.tone.hoverEmissive : isMeasured ? entry.tone.measuredEmissive : 0x000000,
       );
-      entry.mesh.material.emissiveIntensity = isSelected ? 0.38 : isInspected ? 0.2 : isHovered ? 0.24 : isMeasured ? 0.18 : 0;
+      entry.mesh.material.emissiveIntensity = isSelected && !isGhostSibling ? 0.38 : isInspected && !isGhostSibling ? 0.2 : isHovered ? 0.24 : isMeasured ? 0.18 : 0;
       if (entry.outline) {
-        entry.outline.visible = outlineEnabled || topologyMode === 'feature' || isInspected;
+        entry.outline.visible =
+          !shouldHide && (outlineEnabled || topologyMode === 'feature' || isInspected || nextTransparent);
         entry.outline.material.color.setHex(
           isActive || (topologyMode === 'feature' && isHovered) ? 0xe5ca88 : entry.tone.edge,
         );
         entry.outline.material.opacity = !entry.outline.visible
           ? 0
-          : isActive
-            ? 0.95
-            : topologyMode === 'feature' && isHovered
-              ? 0.72
-              : isHovered
-                ? 0.4
-                : isMeasured
-                  ? 0.34
-                  : 0.26;
+          : nextTransparent
+            ? 0.16
+            : isActive
+              ? 0.95
+              : topologyMode === 'feature' && isHovered
+                ? 0.72
+                : isHovered
+                  ? 0.4
+                  : isMeasured
+                    ? 0.34
+                    : 0.26;
       }
       if (entry.topology) {
         const topologyActive = isActive || isHovered || isMeasured;
-        entry.topology.visible = meshTopologyVisible(topologyMode, topologyActive);
+        entry.topology.visible = !shouldHide && !nextTransparent && meshTopologyVisible(topologyMode, topologyActive);
         entry.topology.material.opacity = meshTopologyOpacity(topologyMode, topologyActive);
       }
     }
@@ -2874,15 +2950,23 @@
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
 
+    const hiddenSet = new Set(hiddenPartIds || []);
+    const pickableMeshes = runtimeMeshes.filter((entry) => {
+      if (!entry.mesh.visible) return false;
+      if (entry.partId && hiddenSet.has(entry.partId)) return false;
+      if (isolatedPartId && entry.partId && entry.partId !== isolatedPartId) return false;
+      return true;
+    });
+
     const meshHit = raycaster
-      .intersectObjects(runtimeMeshes.map((entry) => entry.mesh), true)
+      .intersectObjects(pickableMeshes.map((entry) => entry.mesh), true)
       .find((entry) => typeof entry.object.userData.partId === 'string');
     const hitPartId = (meshHit?.object.userData.partId as string | undefined) ?? null;
     if (hitPartId) return hitPartId;
 
     let nearestPartId: string | null = null;
     let nearestDistance = Number.POSITIVE_INFINITY;
-    for (const entry of runtimeMeshes) {
+    for (const entry of pickableMeshes) {
       if (!entry.partId) continue;
       const frame = projectMeshFrame(entry.mesh);
       if (frame) {
@@ -3547,12 +3631,82 @@
     </div>
   {/if}
 
+  {#if isolatedPartId && !hideModelWhileBusy}
+    {@const isolatedLabel = manifestParts.find((part) => part.partId === isolatedPartId)?.label || isolatedPartId}
+    <div class="viewer-isolation-bar" role="status" aria-label="Part isolation active">
+      <span class="viewer-isolation-bar__label">SOLO: {isolatedLabel}</span>
+      <button
+        type="button"
+        class="viewer-isolation-bar__btn"
+        onclick={() => onToggleGhostIsolatedSiblings?.()}
+      >
+        {ghostIsolatedSiblings ? 'GHOST ON' : 'GHOST OFF'}
+      </button>
+      <button
+        type="button"
+        class="viewer-isolation-bar__btn viewer-isolation-bar__exit"
+        onclick={() => onExitIsolation?.()}
+      >
+        EXIT (ESC)
+      </button>
+    </div>
+  {/if}
+
   {#if hideModelWhileBusy}
     <ViewportTransmutation phase={busyPhase} text={busyText} />
   {/if}
 </div>
 
+<svelte:window
+  onkeydown={(event) => {
+    if (event.key === 'Escape' && isolatedPartId) {
+      onExitIsolation?.();
+    }
+  }}
+/>
+
 <style>
+  .viewer-isolation-bar {
+    position: absolute;
+    left: 14px;
+    top: 14px;
+    z-index: 14;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border: 1px solid var(--primary);
+    background: color-mix(in srgb, var(--bg-100) 92%, transparent);
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .viewer-isolation-bar__label {
+    color: var(--primary);
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .viewer-isolation-bar__btn {
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-200);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .viewer-isolation-bar__btn:hover {
+    border-color: var(--secondary);
+  }
+
+  .viewer-isolation-bar__exit {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
   .viewer-host {
     position: relative;
     width: 100%;

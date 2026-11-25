@@ -101,6 +101,21 @@ test('buildExportChooserOptions shows multipart options first for multipart mode
   assert.match(options[2]?.subtitle ?? '', /Flattened single-mesh export/);
 });
 
+test('buildExportChooserOptions enables STEP for display-tier pending production bundles', () => {
+  const bundle = sampleBundle(1);
+  bundle.sourceLanguage = 'ecky';
+  bundle.geometryBackend = 'mesh';
+  bundle.productionPending = true;
+
+  const options = buildExportChooserOptions(bundle, capabilities(true, 'Direct OCCT ready'));
+  const step = options.find((option) => option.id === 'step');
+  const stl = options.find((option) => option.id === 'stl');
+
+  assert.equal(step?.disabled, false);
+  assert.match(step?.subtitle ?? '', /on demand/i);
+  assert.match(stl?.subtitle ?? '', /production STL on demand/i);
+});
+
 test('buildExportChooserOptions enables STEP when a STEP artifact exists', () => {
   const bundle = sampleBundle(1);
   bundle.exportArtifacts = [

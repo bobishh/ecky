@@ -707,6 +707,8 @@ mod tests {
                 status: crate::contracts::EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
+
+            assembly_tree: Vec::new(),
         }
     }
 

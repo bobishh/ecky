@@ -161,6 +161,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::render::get_runtime_capabilities,
         crate::commands::render::render_stl,
         crate::commands::render::render_model,
+        crate::commands::render::materialize_production_bundle,
         crate::commands::semantic_manifest::apply_semantic_manifest_edit,
         crate::commands::semantic_manifest::apply_semantic_control_value,
         crate::commands::render::get_mess_stl_path,

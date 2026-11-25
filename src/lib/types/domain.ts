@@ -377,6 +377,7 @@ export type LithophaneAttachment = Contract.LithophaneAttachment;
 export type ManifestBounds = Contract.ManifestBounds;
 export type DocumentMetadata = Contract.DocumentMetadata;
 export type PartBinding = Contract.PartBinding;
+export type AssemblyNode = Contract.AssemblyNode;
 export type ParameterGroup = Contract.ParameterGroup;
 export type SelectionTarget = Contract.SelectionTarget;
 export type EnrichmentProposal = Contract.EnrichmentProposal;
@@ -1497,6 +1498,7 @@ export function normalizeArtifactBundle(
     exportArtifacts: Array.isArray(bundle.exportArtifacts)
       ? [...bundle.exportArtifacts]
       : [],
+    productionPending: Boolean((bundle as Partial<ArtifactBundle>).productionPending),
   };
 }
 
@@ -1511,6 +1513,9 @@ export function normalizeModelManifest(
     geometryBackend:
       normalizeGeometryBackendValue(manifest.geometryBackend, manifest.engineKind) ?? "freecad",
     parts: Array.isArray(manifest.parts) ? [...manifest.parts] : [],
+    assemblyTree: Array.isArray((manifest as Partial<ModelManifest>).assemblyTree)
+      ? [...((manifest as Partial<ModelManifest>).assemblyTree || [])]
+      : [],
     parameterGroups: Array.isArray(manifest.parameterGroups)
       ? [...manifest.parameterGroups]
       : [],

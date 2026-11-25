@@ -306,6 +306,7 @@ fn post_processing_asset_identities(
     identities
 }
 
+#[cfg(test)]
 fn render_flight_key(
     macro_code: &str,
     parameters: &DesignParams,
@@ -315,6 +316,31 @@ fn render_flight_key(
     previous_manifest: Option<&ModelManifest>,
     config: &RenderConfigSnapshot,
     app: &dyn PathResolver,
+) -> AppResult<String> {
+    render_flight_key_for_tier(
+        macro_code,
+        parameters,
+        macro_dialect,
+        geometry_backend,
+        post_processing,
+        previous_manifest,
+        config,
+        app,
+        crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier::Production,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_flight_key_for_tier(
+    macro_code: &str,
+    parameters: &DesignParams,
+    macro_dialect: Option<&MacroDialect>,
+    geometry_backend: Option<GeometryBackend>,
+    post_processing: Option<&crate::contracts::PostProcessingSpec>,
+    previous_manifest: Option<&ModelManifest>,
+    config: &RenderConfigSnapshot,
+    app: &dyn PathResolver,
+    tier: crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier,
 ) -> AppResult<String> {
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -332,6 +358,7 @@ fn render_flight_key(
     #[serde(rename_all = "camelCase")]
     struct RenderFlightIdentity<'a> {
         schema_version: u32,
+        render_tier: &'a str,
         macro_code: &'a str,
         parameters: &'a DesignParams,
         macro_dialect: Option<&'a MacroDialect>,
@@ -359,8 +386,13 @@ fn render_flight_key(
     let dependency_identities = render_dependency_identities(macro_code, parameters, app);
     let post_processing_asset_identities =
         post_processing_asset_identities(parameters, post_processing);
+    let render_tier = match tier {
+        crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier::Production => "production",
+        crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier::Display => "display",
+    };
     let identity = RenderFlightIdentity {
         schema_version: 1,
+        render_tier,
         macro_code,
         parameters,
         macro_dialect,
@@ -1278,6 +1310,7 @@ fn resolve_dispatch_backend(
     Ok(requested_backend)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_render_direct_occt_ecky_ir(
     macro_code: &str,
     parameters: &DesignParams,
@@ -1286,6 +1319,7 @@ fn try_render_direct_occt_ecky_ir(
     config: &RenderConfigSnapshot,
     app: &dyn PathResolver,
     cancellation: Option<Arc<AtomicBool>>,
+    tier: crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier,
 ) -> AppResult<Option<ArtifactBundle>> {
     if *effective_dialect != MacroDialect::EckyIrV0 {
         return Ok(None);
@@ -1312,13 +1346,14 @@ fn try_render_direct_occt_ecky_ir(
                 };
             let layout = crate::ecky_cad_host::direct_occt_sdk::inspect_occt_runtime(&runtime_root);
             let (bundle, _manifest) =
-                crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle_with_font_path(
+                crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle_with_tier(
                     &program,
                     &macro_code,
                     &parameters,
                     &layout,
                     &app,
                     cad_text_font_path.as_deref(),
+                    tier,
                 )?;
             Ok(Some(bundle))
         })
@@ -1732,6 +1767,7 @@ pub fn render_cli_ecky_with_component_lock(
         &config,
         app,
         None,
+        crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier::Production,
     )?;
     match compilation {
         Some(compiled) => finish_component_render(app, source, &compiled, bundle),
@@ -1799,10 +1835,153 @@ pub async fn render_model_with_previous_manifest(
         post_processing,
         previous_manifest,
         false,
+        crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier::Production,
         state,
         app,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn render_model_display_with_previous_manifest(
+    macro_code: &str,
+    parameters: &DesignParams,
+    macro_dialect: Option<MacroDialect>,
+    geometry_backend: Option<GeometryBackend>,
+    post_processing: Option<&crate::contracts::PostProcessingSpec>,
+    previous_manifest: Option<&ModelManifest>,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
+    let tier = if post_processing.is_none() {
+        crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier::Display
+    } else {
+        crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier::Production
+    };
+    render_model_with_previous_manifest_internal(
+        macro_code,
+        parameters,
+        macro_dialect,
+        geometry_backend,
+        post_processing,
+        previous_manifest,
+        false,
+        tier,
+        state,
+        app,
+    )
+    .await
+}
+
+/// Lazily materializes exact production artifacts (STEP BRep, fine STL,
+/// per-part viewer assets, and topology metadata) for a version committed with
+/// display-tier geometry.
+pub async fn materialize_production_bundle(
+    thread_id: String,
+    message_id: String,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<crate::contracts::VersionPreviewRuntime> {
+    let message = {
+        let conn = state.db.lock().await;
+        crate::db::get_thread_message_version(&conn, &thread_id, &message_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+            .ok_or_else(|| {
+                AppError::not_found(format!(
+                    "Version '{}' not found in thread '{}'.",
+                    message_id, thread_id
+                ))
+            })?
+    };
+    let design = message.output.clone().ok_or_else(|| {
+        AppError::validation("Version has no design output to materialize production artifacts.")
+    })?;
+
+    if let (Some(existing_bundle), Some(existing_manifest)) = (
+        message.artifact_bundle.clone(),
+        message.model_manifest.clone(),
+    ) {
+        let artifacts_exist = !existing_bundle.production_pending
+            && std::path::Path::new(&existing_bundle.model_stl_path).is_file()
+            && existing_bundle
+                .export_artifacts
+                .iter()
+                .all(|artifact| std::path::Path::new(&artifact.path).is_file());
+        if artifacts_exist {
+            return Ok(crate::contracts::VersionPreviewRuntime {
+                artifact_bundle: existing_bundle,
+                model_manifest: existing_manifest,
+                lease_id: None,
+                ephemeral: false,
+            });
+        }
+    }
+
+    let previous_manifest = message.model_manifest.as_ref();
+    let artifact_bundle = render_model_with_previous_manifest(
+        &design.macro_code,
+        &design.initial_params,
+        Some(design.macro_dialect.clone()),
+        Some(design.geometry_backend),
+        design.post_processing.as_ref(),
+        previous_manifest,
+        state,
+        app,
+    )
+    .await?;
+    let generated_manifest =
+        crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id)?;
+    let model_manifest = crate::mcp::handlers::carry_forward_semantic_manifest(
+        previous_manifest,
+        generated_manifest,
+        &artifact_bundle,
+    );
+    let model_manifest = crate::model_runtime::write_model_manifest(
+        app,
+        &artifact_bundle.model_id,
+        &model_manifest,
+    )?;
+    let artifact_bundle =
+        crate::model_runtime::read_artifact_bundle(app, &artifact_bundle.model_id)?;
+    crate::contracts::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
+
+    {
+        let conn = state.db.lock().await;
+        crate::db::update_message_status_and_output(
+            &conn,
+            &message.id,
+            crate::db::MessageStatusUpdate {
+                status: &message.status,
+                output: Some(&design),
+                usage: message.usage.as_ref(),
+                artifact_bundle: Some(&artifact_bundle),
+                model_manifest: Some(&model_manifest),
+                structural_verification: message.structural_verification.as_ref(),
+                visual_kind: message.visual_kind.as_ref(),
+                content: Some(&message.content),
+            },
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    }
+
+    let snapshot = crate::services::session::build_saved_version_snapshot(
+        Some(design),
+        thread_id.clone(),
+        message.id.clone(),
+        Some(artifact_bundle.clone()),
+        Some(model_manifest.clone()),
+        None,
+    );
+    *state.last_snapshot.lock().unwrap() = Some(snapshot.clone());
+    crate::services::session::write_last_snapshot(app, Some(&snapshot));
+    state.emit_history_changed(Some(thread_id), Some(message.id), "productionMaterialized");
+
+    Ok(crate::contracts::VersionPreviewRuntime {
+        artifact_bundle,
+        model_manifest,
+        lease_id: None,
+        ephemeral: false,
+    })
 }
 
 pub async fn render_model_with_previous_manifest_silent(
@@ -1823,6 +2002,7 @@ pub async fn render_model_with_previous_manifest_silent(
         post_processing,
         previous_manifest,
         true,
+        crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier::Production,
         state,
         app,
     )
@@ -1838,6 +2018,7 @@ async fn render_model_with_previous_manifest_internal(
     post_processing: Option<&crate::contracts::PostProcessingSpec>,
     previous_manifest: Option<&ModelManifest>,
     silent: bool,
+    tier: crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier,
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
@@ -1856,6 +2037,7 @@ async fn render_model_with_previous_manifest_internal(
                 .as_ref()
                 .and_then(|bundle| bundle.component_dependency_lock.as_ref()),
             silent,
+            tier,
             state,
             app,
         )
@@ -1869,6 +2051,7 @@ async fn render_model_with_previous_manifest_internal(
         post_processing,
         previous_manifest,
         silent,
+        tier,
         state,
         app,
     )
@@ -1899,6 +2082,7 @@ pub async fn render_model_with_component_lock(
         previous_manifest,
         expected_lock,
         false,
+        crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier::Production,
         state,
         app,
     )
@@ -1915,6 +2099,7 @@ async fn render_model_with_component_lock_internal(
     previous_manifest: Option<&ModelManifest>,
     expected_lock: Option<&crate::contracts::ComponentDependencyLock>,
     silent: bool,
+    tier: crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier,
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
@@ -1938,6 +2123,7 @@ async fn render_model_with_component_lock_internal(
         post_processing,
         previous_manifest,
         silent,
+        tier,
         state,
         app,
     )
@@ -2024,11 +2210,12 @@ async fn render_model_with_previous_manifest_resolved(
     post_processing: Option<&crate::contracts::PostProcessingSpec>,
     previous_manifest: Option<&ModelManifest>,
     silent: bool,
+    tier: crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier,
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
     let config = RenderConfigSnapshot::from_state(state);
-    let flight_key = render_flight_key(
+    let flight_key = render_flight_key_for_tier(
         macro_code,
         parameters,
         macro_dialect.as_ref(),
@@ -2037,6 +2224,7 @@ async fn render_model_with_previous_manifest_resolved(
         previous_manifest,
         &config,
         app,
+        tier,
     )?;
     let owner = match acquire_render_flight(&flight_key) {
         RenderFlightRole::Waiter(flight) => return wait_for_render_flight(flight).await,
@@ -2068,6 +2256,7 @@ async fn render_model_with_previous_manifest_resolved(
         &config,
         app,
         source_cancellation.clone(),
+        tier,
     );
     let result = match first_attempt {
         Ok(bundle) => Ok(bundle),
@@ -2086,6 +2275,7 @@ async fn render_model_with_previous_manifest_resolved(
                 &config,
                 app,
                 source_cancellation,
+                tier,
             )?;
             append_tagged_selector_rebind_warning(app, &bundle);
             Ok(bundle)
@@ -2098,6 +2288,7 @@ async fn render_model_with_previous_manifest_resolved(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_model_unlocked(
     macro_code: &str,
     parameters: &DesignParams,
@@ -2108,6 +2299,7 @@ fn render_model_unlocked(
     config: &RenderConfigSnapshot,
     app: &dyn PathResolver,
     source_cancellation: Option<Arc<AtomicBool>>,
+    tier: crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier,
 ) -> AppResult<ArtifactBundle> {
     let configured_dialect = match config.default_source_language {
         crate::contracts::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
@@ -2224,6 +2416,7 @@ fn render_model_unlocked(
                     config,
                     app,
                     source_cancellation.clone(),
+                    tier,
                 )
             } else {
                 Ok(None)
@@ -2491,6 +2684,7 @@ fn render_model_source_unlocked(
                 &config,
                 app,
                 None,
+                crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier::Production,
             );
         }
         Some(other) => {
@@ -2679,6 +2873,8 @@ mod tests {
             callout_anchors: vec![],
             measurement_guides: vec![],
             export_artifacts: vec![],
+
+            production_pending: false,
         };
 
         write_post_processing_marker(&bundle, "sha256:input").expect("marker");
@@ -3479,6 +3675,8 @@ endsolid sample
             callout_anchors: vec![],
             measurement_guides: vec![],
             export_artifacts: vec![],
+
+            production_pending: false,
         };
 
         let error = apply_requested_post_processing(
@@ -3671,6 +3869,8 @@ endsolid sample
                 path: "/tmp/model.step".to_string(),
                 role: "primary".to_string(),
             }],
+
+            production_pending: false,
         };
 
         apply_requested_post_processing(
@@ -3729,6 +3929,8 @@ endsolid sample
             callout_anchors: vec![],
             measurement_guides: vec![],
             export_artifacts: vec![],
+
+            production_pending: false,
         };
 
         let error = apply_requested_post_processing(
@@ -3846,6 +4048,8 @@ endsolid sample
                     status: crate::contracts::EnrichmentStatus::None,
                     proposals: vec![],
                 },
+
+                assembly_tree: Vec::new(),
             })
             .unwrap(),
         )
@@ -3880,6 +4084,8 @@ endsolid sample
             callout_anchors: vec![],
             measurement_guides: vec![],
             export_artifacts: vec![],
+
+            production_pending: false,
         };
 
         let error = apply_requested_post_processing(

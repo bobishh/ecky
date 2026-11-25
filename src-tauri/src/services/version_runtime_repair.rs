@@ -359,6 +359,8 @@ mod tests {
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
             component_placement_evidence: Vec::new(),
+
+            production_pending: false,
         }
     }
 
@@ -401,6 +403,8 @@ mod tests {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
             component_placement_evidence: Vec::new(),
+
+            assembly_tree: Vec::new(),
         }
     }
 

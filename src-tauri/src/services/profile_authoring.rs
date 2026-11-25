@@ -3044,6 +3044,8 @@ mod tests {
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
             component_placement_evidence: Vec::new(),
+
+            production_pending: false,
         };
         let base_message_id = crate::services::design::add_manual_version(
             crate::services::design::AddManualVersionRequest {
@@ -3501,6 +3503,8 @@ mod tests {
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
             component_placement_evidence: Vec::new(),
+
+            production_pending: false,
         };
 
         let cases = [

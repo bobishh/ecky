@@ -42,6 +42,12 @@
   import ParamPanelOwnershipSections from './components/ParamPanelOwnershipSections.svelte';
   import { buildOwnershipSections } from './modelRuntime/ownershipSections';
   import ParamPanelViewsTab from './components/ParamPanelViewsTab.svelte';
+  import AssemblyTree from './components/AssemblyTree.svelte';
+  import {
+    collectScopedParameterKeys,
+    findAssemblyNodeByPartId,
+    resolveAssemblyTree,
+  } from './assemblyTree';
   import { pendingImageGeometry, pendingImageGeometryStatus } from './imageGeometryPending';
   import { session } from './stores/sessionStore';
   import type {
@@ -126,6 +132,13 @@
     activeControlViewId = null,
     selectedTarget = null,
     selectedPartId = null,
+    isolatedPartId = null,
+    hiddenPartIds = [],
+    ghostIsolatedSiblings = true,
+    onToggleIsolatePart,
+    onToggleHidePart,
+    onToggleGhostIsolatedSiblings,
+    onResetPartVisibility,
     searchQuery = $bindable(''),
     onSelectControlView,
     onSelectPart,
@@ -162,6 +175,13 @@
     activeControlViewId?: string | null;
     selectedTarget?: ContextSelectionTarget | null;
     selectedPartId?: string | null;
+    isolatedPartId?: string | null;
+    hiddenPartIds?: string[];
+    ghostIsolatedSiblings?: boolean;
+    onToggleIsolatePart?: (partId: string) => void;
+    onToggleHidePart?: (partIds: string[]) => void;
+    onToggleGhostIsolatedSiblings?: () => void;
+    onResetPartVisibility?: () => void;
     searchQuery?: string;
     onSelectControlView?: (viewId: string | null) => void;
     onSelectPart?: (partId: string | null) => void;
@@ -699,9 +719,29 @@
 
   let reading = $state(false);
   let applying = $state(false);
+  let showAllParamsWhileIsolated = $state(false);
+
+  $effect(() => {
+    void isolatedPartId;
+    showAllParamsWhileIsolated = false;
+  });
+
+  const assemblyNodes = $derived.by(() => resolveAssemblyTree(modelManifest));
+  const isolatedNode = $derived.by(() => findAssemblyNodeByPartId(assemblyNodes, isolatedPartId));
+  const isolatedParamKeys = $derived.by(() =>
+    isolatedPartId ? collectScopedParameterKeys(modelManifest, [isolatedPartId]) : new Set<string>(),
+  );
+  const isolatedParamScopeActive = $derived(
+    Boolean(isolatedPartId) && !showAllParamsWhileIsolated && isolatedParamKeys.size > 0,
+  );
+  const scopedMergedFields = $derived.by(() =>
+    isolatedParamScopeActive
+      ? mergedFields.filter((field) => isolatedParamKeys.has(field.key))
+      : mergedFields,
+  );
 
   const filteredFields = $derived.by(() => {
-    return filterFieldsBySearch(mergedFields, searchQuery);
+    return filterFieldsBySearch(scopedMergedFields, searchQuery);
   });
 
   const usesAstOwnershipSections = $derived(
@@ -718,7 +758,7 @@
   const ownershipSections = $derived.by(() =>
     buildOwnershipSections({
       manifest: modelManifest,
-      fields: mergedFields,
+      fields: scopedMergedFields,
       selectedTarget,
       searchQuery,
     }),
@@ -2093,23 +2133,35 @@
       />
     {/if}
 
-    {#if activeTab === 'params' && modelManifest?.parts?.length && (partCount > 1 || modelManifest?.sourceKind === 'importedFcstd')}
-      <div class="part-strip" aria-label="Part parameters">
-        <div class="section-label">PART PARAMETERS</div>
-        <div class="part-strip-list">
-          {#each modelManifest.parts as part}
-            <button
-              class="part-chip"
-              class:part-chip-active={part.partId === localSelectedPartId}
-              class:part-chip-readonly={!part.editable}
-              aria-label={part.label}
-              onclick={() => selectPart(part.partId)}
-              title={part.editable ? 'Show this part parameters' : 'Inspect-only part'}
-            >
-              {part.label.toLowerCase()}
-            </button>
-          {/each}
-        </div>
+    {#if activeTab === 'params' && assemblyNodes.length > 0 && (partCount > 1 || modelManifest?.sourceKind === 'importedFcstd' || Boolean(isolatedPartId))}
+      <AssemblyTree
+        nodes={assemblyNodes}
+        selectedPartId={localSelectedPartId}
+        {isolatedPartId}
+        {hiddenPartIds}
+        {ghostIsolatedSiblings}
+        onSelectPart={(partId) => selectPart(partId)}
+        {onToggleIsolatePart}
+        {onToggleHidePart}
+        {onToggleGhostIsolatedSiblings}
+        onResetVisibility={onResetPartVisibility}
+      />
+    {/if}
+
+    {#if activeTab === 'params' && isolatedPartId && isolatedParamKeys.size > 0}
+      <div class="isolated-scope-bar">
+        <span>
+          {isolatedParamScopeActive
+            ? `SCOPED: ${(isolatedNode?.name ?? isolatedPartId).toLowerCase()} (${scopedMergedFields.length}/${mergedFields.length})`
+            : `ALL PARAMS (${mergedFields.length})`}
+        </span>
+        <button
+          type="button"
+          class="isolated-scope-btn"
+          onclick={() => { showAllParamsWhileIsolated = !showAllParamsWhileIsolated; }}
+        >
+          {isolatedParamScopeActive ? 'SHOW ALL' : 'SCOPE TO PART'}
+        </button>
       </div>
     {/if}
 
@@ -2526,54 +2578,34 @@
     line-height: 1.4;
   }
 
-  .part-strip {
+  .isolated-scope-bar {
     display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 8px;
-    border: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg-200) 88%, var(--bg-100));
-    overflow: hidden;
-  }
-
-  .part-strip-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .part-chip {
-    padding: 4px 8px;
-    border: 1px solid var(--bg-300);
-    background: var(--bg-200);
-    color: var(--text-dim);
-    font-size: 0.64rem;
-    font-weight: 700;
-    cursor: pointer;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: clip;
-    white-space: normal;
-    overflow-wrap: anywhere;
-    text-align: left;
-  }
-
-  .part-chip-active {
-    border-color: var(--secondary);
-    background: color-mix(in srgb, var(--secondary) 14%, var(--bg-200));
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 8px;
+    border: 1px solid var(--secondary);
+    background: color-mix(in srgb, var(--secondary) 10%, var(--bg-200));
     color: var(--text);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
   }
 
-  .part-chip-readonly {
-    opacity: 0.8;
-  }
-
-  .section-label {
+  .isolated-scope-btn {
+    padding: 2px 6px;
+    border: 1px solid var(--secondary);
+    background: var(--bg-200);
     color: var(--secondary);
     font-size: 0.58rem;
-    font-weight: bold;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .isolated-scope-btn:hover {
+    background: color-mix(in srgb, var(--secondary) 16%, var(--bg-200));
   }
 
 </style>
