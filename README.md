@@ -51,10 +51,11 @@ For a concrete example, the repository contains a [closed hex bottle holder](sit
 
 Select **Agy (Antigravity)** in Settings and choose **Voice** in Dialogue.
 Sign in with Google in `agy` 1.5.0 or later. Ecky waits for the current text
-turn, then opens the same conversation in its terminal. Complete any sign-in,
-workspace trust, or microphone prompts there. Spoken turns and their transcript
-stay in the Antigravity conversation. Antigravity sends microphone audio to
-Google for its [built-in voice mode](https://antigravity.google/docs/voice-mode).
+turn, opens the same conversation in its terminal, and starts `/voice live`
+when the prompt is ready. Complete any sign-in, workspace trust, or microphone
+prompts there. Spoken turns and their transcript stay in the Antigravity
+conversation. Antigravity sends microphone audio to Google for its
+[built-in voice mode](https://antigravity.google/docs/voice-mode).
 
 **Hang up** ends the call and leaves Antigravity's work running in the terminal.
 Exit the CLI to return to Dialogue's text controls and release queued messages

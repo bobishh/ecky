@@ -1,5 +1,5 @@
 //! Antigravity owns audio and its conversation transcript. Ecky owns the PTY handoff.
-//! The idle title handshake and voice shortcuts follow Repo City 306cb3d.
+//! The idle title handshake follows Repo City 306cb3d.
 use std::io::{Read, Write};
 use std::num::NonZeroU16;
 use std::sync::{mpsc, Arc, Mutex};
@@ -18,7 +18,7 @@ use crate::services::{agy_provider, codex_takeover, provider_executable};
 const TITLE_TOKEN: &str = "ECKY_AGY_VOICE_TITLE_TOKEN";
 const TITLE_EXE: &str = "ECKY_AGY_VOICE_TITLE_EXE";
 const TITLE_ENTRY: &str = "--ecky-agy-terminal-title";
-const F6: &[u8] = b"\x1b[17~";
+const START_VOICE: &[u8] = b"/voice live\r";
 const F7: &[u8] = b"\x1b[18~";
 const ROWS: u16 = 30;
 const COLS: u16 = 100;
@@ -235,6 +235,16 @@ impl VoiceTerminal {
             .take(6)
             .any(|row| live_voice_row(&row))
     }
+
+    fn at_empty_prompt(&self) -> bool {
+        let screen = self.0.screen();
+        let (row, _) = screen.cursor_position();
+        let (_, cols) = screen.size();
+        screen
+            .rows(0, cols.get())
+            .nth(usize::from(row))
+            .is_some_and(|line| line.trim() == ">")
+    }
 }
 
 fn live_voice_row(row: &str) -> bool {
@@ -258,9 +268,9 @@ fn live_voice_row(row: &str) -> bool {
         )
 }
 
-fn voice_shortcut(requested: bool, sent: bool, ready: bool) -> Option<&'static [u8]> {
+fn voice_input(requested: bool, sent: bool, ready: bool) -> Option<&'static [u8]> {
     match (requested, sent, ready) {
-        (true, false, true) => Some(F6),
+        (true, false, true) => Some(START_VOICE),
         (false, true, _) => Some(F7),
         _ => None,
     }
@@ -431,7 +441,7 @@ fn run_pty(
         );
         session.snapshot.terminal_id = Some(terminal_id.clone());
         session.set_status(state, Phase::Starting, Some(
-            "Waiting for Antigravity. Complete any sign-in or workspace trust prompts in the terminal.".into(),
+            "Complete any sign-in or workspace trust prompts, then leave the Antigravity prompt empty for voice.".into(),
         ));
         child
     };
@@ -514,14 +524,14 @@ impl Call {
             self.sent = true;
         }
         self.live = live;
-        if let Some(key) = voice_shortcut(session.requested, self.sent, ready && !self.mismatch) {
+        if let Some(input) = voice_input(session.requested, self.sent, ready && !self.mismatch) {
             let mut writer = writer.lock().unwrap();
             writer
-                .write_all(key)
+                .write_all(input)
                 .and_then(|_| writer.flush())
                 .map_err(pty_error)?;
-            self.canceled_dial = key == F7 && !live;
-            self.sent = key == F6;
+            self.canceled_dial = input == F7 && !live;
+            self.sent = input == START_VOICE;
         }
         if !self.mismatch {
             let (phase, detail) = if live {
@@ -604,7 +614,14 @@ fn supervise_pty(
         else {
             break;
         };
-        call.update(state, session, &terminal.writer, ready, live)?;
+        // The CLI can report idle while the editor still contains an unsent draft.
+        call.update(
+            state,
+            session,
+            &terminal.writer,
+            ready && term.at_empty_prompt(),
+            live,
+        )?;
     }
     Ok(())
 }
@@ -670,16 +687,16 @@ mod tests {
         assert!(!term.connected());
         term.process("● Live 01:53 · speaking · f6 mute · esc hang up".as_bytes());
         assert!(term.connected());
-        assert_eq!(voice_shortcut(false, true, false), Some(F7));
+        assert_eq!(voice_input(false, true, false), Some(F7));
         term.process(b"\r\x1b[2K");
         assert!(!term.connected());
-        assert_eq!(voice_shortcut(true, false, true), Some(F6));
-        assert_eq!(voice_shortcut(true, false, false), None);
+        assert_eq!(voice_input(true, false, true), Some(START_VOICE));
+        assert_eq!(voice_input(true, false, false), None);
     }
 
     #[cfg(unix)]
     #[test]
-    fn hangup_sends_f7_and_leaves_the_native_pty_interactive() {
+    fn ready_pty_submits_voice_live_after_draft_is_cleared_and_hangup_keeps_it_interactive() {
         let state = AppState::new(
             serde_json::from_value(serde_json::json!({"engines": [], "selectedEngineId": ""}))
                 .unwrap(),
@@ -711,9 +728,11 @@ def read(length):
     return result
 
 tty.setraw(0)
-os.write(1, f"\x1b]0;Ecky Agy {sys.argv[1]} ready saved\x07".encode())
-assert read(5) == b"\x1b[17~"
-os.write(1, "● Live 00:00 · listening".encode())
+os.write(1, f"\x1b]0;Ecky Agy {sys.argv[1]} ready saved\x07> unsent draft".encode())
+assert not select.select([0], [], [], 0.3)[0], "Voice must wait for an empty prompt"
+os.write(1, b"\r\x1b[2K> ")
+assert read(len(b"/voice live\r")) == b"/voice live\r"
+os.write(1, "\r\x1b[2K● Live 00:00 · listening".encode())
 assert read(5) == b"\x1b[18~"
 os.write(1, b"\r\x1b[2KWork continued")
 assert read(4) == b"exit"
