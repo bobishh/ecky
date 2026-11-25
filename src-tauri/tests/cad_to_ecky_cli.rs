@@ -398,7 +398,7 @@ fn dump_prompt_emits_assembled_system_and_user_with_no_api_call() {
 
     // System section = the shared language reference for the default backend.
     assert!(
-        stdout.contains("===== SYSTEM (Build123d) ====="),
+        stdout.contains("===== SYSTEM (EckyRust) ====="),
         "default backend header missing\n{stdout}"
     );
     assert!(
@@ -517,7 +517,7 @@ fn dump_prompt_respects_backend_flag() {
     write_file(&input, SOURCE);
 
     // The serde aliases accepted on the CLI map to these Debug labels in the
-    // SYSTEM header. Default (no flag) is Build123d — pinned by the dump test.
+    // SYSTEM header. Default (no flag) is EckyRust — pinned by the dump test.
     for (flag, label) in [
         ("mesh", "EckyRust"),
         ("freecad", "Freecad"),

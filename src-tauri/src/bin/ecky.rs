@@ -546,7 +546,7 @@ mod tests {
             "sourceKind": "generated",
             "engineKind": "ecky",
             "sourceLanguage": "ecky",
-            "geometryBackend": "build123d",
+            "geometryBackend": "mesh",
             "contentHash": "hash",
             "artifactVersion": 1,
             "fcstdPath": "",
@@ -560,7 +560,7 @@ mod tests {
     fn render_args(input: &Path, extra: &[&str]) -> Vec<String> {
         let mut args = vec![
             "--backend".to_string(),
-            "build123d".to_string(),
+            "native".to_string(),
             input.display().to_string(),
         ];
         args.extend(extra.iter().map(|value| (*value).to_string()));
