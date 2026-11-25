@@ -1540,11 +1540,31 @@ fn replace_agent_terminal_session(
     writer: crate::models::AgentTerminalWriter,
 ) {
     let provider_kind = provider_kind_for_agent(agent);
+    register_pty_terminal(
+        state,
+        &agent.id,
+        &agent.label,
+        provider_kind.as_str(),
+        None,
+        pty,
+        writer,
+    );
+}
+
+pub(crate) fn register_pty_terminal(
+    state: &AppState,
+    agent_id: &str,
+    agent_label: &str,
+    provider: &str,
+    session_id: Option<String>,
+    pty: crate::models::AgentTerminalPty,
+    writer: crate::models::AgentTerminalWriter,
+) {
     let snapshot = AgentTerminalSnapshot {
-        agent_id: agent.id.clone(),
-        agent_label: agent.label.clone(),
-        session_id: None,
-        provider_kind: Some(provider_kind.as_str().to_string()),
+        agent_id: agent_id.to_string(),
+        agent_label: agent_label.to_string(),
+        session_id,
+        provider_kind: Some(provider.to_string()),
         session_nonce: next_terminal_session_nonce(),
         screen_text: String::new(),
         vt_stream: String::new(),
@@ -1562,7 +1582,7 @@ fn replace_agent_terminal_session(
     {
         let mut terminals = state.agent_terminals.lock().unwrap();
         terminals.insert(
-            agent.id.clone(),
+            agent_id.to_string(),
             crate::models::AgentTerminalRuntime {
                 snapshot: snapshot.clone(),
                 writer,
@@ -1575,6 +1595,46 @@ fn replace_agent_terminal_session(
     }
 
     state.emit_agent_terminal_update(&snapshot);
+}
+
+fn capture_pty_bytes(runtime: &mut crate::models::AgentTerminalRuntime, bytes: &[u8]) -> String {
+    let raw = decode_terminal_text(&mut runtime.pending_utf8, bytes);
+    runtime.snapshot.vt_stream.push_str(&raw);
+    trim_output_tail(&mut runtime.snapshot.vt_stream, TERMINAL_VT_STREAM_LIMIT);
+    apply_terminal_text(
+        &mut runtime.snapshot.screen_text,
+        &mut runtime.pending_escape,
+        &raw,
+    );
+    trim_output_tail(
+        &mut runtime.snapshot.screen_text,
+        TERMINAL_SCREEN_TEXT_LIMIT,
+    );
+    raw
+}
+
+pub(crate) fn append_interactive_pty_output(state: &AppState, agent_id: &str, bytes: &[u8]) {
+    let snapshot = {
+        let mut terminals = state.agent_terminals.lock().unwrap();
+        let Some(runtime) = terminals.get_mut(agent_id) else {
+            return;
+        };
+        let delta = capture_pty_bytes(runtime, bytes);
+        if delta.is_empty() {
+            return;
+        }
+        runtime.snapshot.updated_at = now_secs();
+        let mut snapshot = runtime.snapshot.clone();
+        snapshot.screen_text.clear();
+        snapshot.vt_stream.clear();
+        snapshot.vt_delta = Some(delta);
+        snapshot
+    };
+    state.emit_agent_terminal_update(&snapshot);
+}
+
+pub(crate) fn close_interactive_pty(state: &AppState, agent_id: &str) {
+    update_agent_terminal_snapshot(state, agent_id, |snapshot| snapshot.active = false);
 }
 
 #[cfg(unix)]
@@ -1903,21 +1963,7 @@ fn append_agent_terminal_output(
         let Some(runtime) = terminals.get_mut(agent_id) else {
             return;
         };
-        let raw = decode_terminal_text(&mut runtime.pending_utf8, bytes);
-        // `vt_stream` is the authoritative replay source for live xterm rendering.
-        runtime.snapshot.vt_stream.push_str(&raw);
-        trim_output_tail(&mut runtime.snapshot.vt_stream, TERMINAL_VT_STREAM_LIMIT);
-        // `screen_text` remains as a degraded readable fallback for inactive snapshots
-        // and terminal-attention copy; it is not a live TUI model.
-        apply_terminal_text(
-            &mut runtime.snapshot.screen_text,
-            &mut runtime.pending_escape,
-            &raw,
-        );
-        trim_output_tail(
-            &mut runtime.snapshot.screen_text,
-            TERMINAL_SCREEN_TEXT_LIMIT,
-        );
+        let raw = capture_pty_bytes(runtime, bytes);
         let next_attention_required = attention_required && runtime.snapshot.active;
         let summary_changed = runtime.snapshot.summary.as_deref() != summary.as_deref();
         let activity_changed = runtime.snapshot.activity_label.as_deref()

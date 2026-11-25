@@ -6,13 +6,14 @@ use tauri::{Emitter, State};
 
 use crate::contracts::{
     AgyMessagePage, AgyMessagePageInput, AgyPromptInput, AgyProviderBinding, AgyProviderSnapshot,
-    AgyStopInput, AppError, AppResult, Attachment, ProviderCapabilities,
+    AgyStopInput, AgyVoiceSnapshot, AppError, AppResult, Attachment, ProviderCapabilities,
 };
 use crate::models::{AppState, PathResolver};
-use crate::provider_turn::ProviderTurnIntent;
-use crate::services::{agy_provider, codex_takeover};
+use crate::provider_turn::{ProviderTurnIntent, ProviderTurnPolicy};
+use crate::services::{agy_provider, agy_voice, codex_takeover};
 
 static AGY_BINDING_CREATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static AGY_ADMISSION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static AGY_QUEUE_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 const AGY_QUEUE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -29,7 +30,7 @@ fn require_agy_provider_mode(state: &AppState) -> AppResult<()> {
         return Ok(());
     }
     Err(AppError::validation(format!(
-        "Agy provider send requires Settings connectionType provider:agy; current value is {}.",
+        "Antigravity requires Settings connectionType provider:agy; current value is {}.",
         configured.as_deref().unwrap_or("unset")
     )))
 }
@@ -934,6 +935,9 @@ fn spawn_turn_finalizer<R: tauri::Runtime>(
         } else {
             None
         };
+        state
+            .clear_provider_turn_policy(&binding.ecky_thread_id)
+            .await;
         {
             let conn = state.db.lock().await;
             let answer_result = outcome.as_ref().ok().or(recovered_failure.as_ref());
@@ -1041,9 +1045,6 @@ fn spawn_turn_finalizer<R: tauri::Runtime>(
             Err(error) => state.push_log(format!("[LLM EVAL] persistence failed: {error}")),
         }
         emit_provider_update(&app, &binding, "turn/terminal").await;
-        state
-            .clear_provider_turn_policy(&binding.ecky_thread_id)
-            .await;
         let _ = dispatch_queue_for(&app, &state, &binding).await;
         emit_provider_update(&app, &binding, "queue/dispatched").await;
         AGY_QUEUE_WAKE.notify_one();
@@ -1074,6 +1075,10 @@ async fn dispatch_queue_for_impl<R: tauri::Runtime>(
     binding: &AgyProviderBinding,
     classifier_override: Option<&dyn crate::jev_classifier::TurnClassifier>,
 ) -> AppResult<()> {
+    let admission = AGY_ADMISSION.lock().await;
+    if state.agy_voice.owns_thread(&binding.ecky_thread_id) {
+        return Ok(());
+    }
     let runtime = state
         .agy_provider
         .runtime(&binding.agy_conversation_id)
@@ -1164,6 +1169,7 @@ async fn dispatch_queue_for_impl<R: tauri::Runtime>(
     if !claimed {
         return Ok(());
     }
+    drop(admission);
     let config_snapshot = state.config.lock().unwrap().clone();
     let eval_run_id = uuid::Uuid::new_v4().to_string();
     let eval_started_at = now_seconds();
@@ -1723,18 +1729,141 @@ async fn dispatch_queue_for_impl<R: tauri::Runtime>(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn get_agy_voice(state: State<'_, AppState>) -> AppResult<Option<AgyVoiceSnapshot>> {
+    Ok(state.agy_voice.snapshot())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn start_agy_voice(
+    ecky_thread_id: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> AppResult<AgyVoiceSnapshot> {
+    require_agy_provider_mode(&state)?;
+    let title = project_title(&state, &ecky_thread_id).await?;
+    let creation = AGY_BINDING_CREATE_LOCK.lock().await;
+    let admission = AGY_ADMISSION.lock().await;
+    let (snapshot, lease) = agy_voice::AgyVoice::reserve(&state, &ecky_thread_id)?;
+    drop(admission);
+    drop(creation);
+    if let Some(lease) = lease {
+        let state = state.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            let outcome = handoff_to_voice(&state, &app, &ecky_thread_id, title, lease).await;
+            agy_voice::AgyVoice::finish(&state, lease, outcome);
+            AGY_QUEUE_WAKE.notify_one();
+        });
+    }
+    Ok(snapshot)
+}
+
+async fn handoff_to_voice(
+    state: &AppState,
+    app: &tauri::AppHandle,
+    thread_id: &str,
+    title: String,
+    lease: uuid::Uuid,
+) -> AppResult<()> {
+    let binding = loop {
+        if !state.agy_voice.is_requested(lease) {
+            return Ok(());
+        }
+        let (binding, sending) = {
+            let conn = state.db.lock().await;
+            (
+                agy_provider::get_binding(&conn, thread_id)?,
+                agy_provider::queue_head(&conn, thread_id)?
+                    .is_some_and(|head| head.status == "sending"),
+            )
+        };
+        if !sending {
+            if let Some(binding) = &binding {
+                let runtime = state
+                    .agy_provider
+                    .runtime(&binding.agy_conversation_id)
+                    .await;
+                if runtime.active_turn_id.is_none() && runtime.phase != "stopping" {
+                    break Some(binding.clone());
+                }
+            } else {
+                break None;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+
+    require_agy_provider_mode(state)?;
+    agy_voice::AgyVoice::starting(state, lease);
+    let endpoint = require_mcp_endpoint(state)?;
+    let (cwd, conversation_id) = if let Some(binding) = binding {
+        state
+            .agy_provider
+            .discard_conversation_session(&binding.agy_conversation_id)
+            .await;
+        (binding.cwd, Some(binding.agy_conversation_id))
+    } else {
+        (
+            provider_project_cwd(app, state, thread_id, &title).await?,
+            None,
+        )
+    };
+    let policy = ProviderTurnPolicy::for_intent(ProviderTurnIntent::Modify);
+    materialize_agy_mcp_config_with_policy(&cwd, &endpoint, thread_id, policy)?;
+    let policy_lease = state.install_provider_turn_policy(thread_id, None, policy).await
+        .map_err(|_| AppError::conflict("Another provider is using this project. Finish its turn before starting Antigravity voice."))?;
+    let outcome = agy_voice::run(
+        state,
+        lease,
+        agy_voice::VoiceWorkspace {
+            thread_id: thread_id.to_string(),
+            label: title,
+            cwd,
+            conversation_id,
+            model: configured_agy_model(state),
+        },
+    )
+    .await;
+    state
+        .rollback_provider_turn_policy(thread_id, policy_lease)
+        .await;
+    outcome
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn stop_agy_voice(
+    ecky_thread_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<AgyVoiceSnapshot> {
+    agy_voice::AgyVoice::stop(&state, &ecky_thread_id)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn compact_agy_provider(
     ecky_thread_id: String,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> AppResult<AgyProviderSnapshot> {
     require_agy_provider_mode(&state)?;
+    let admission = AGY_ADMISSION.lock().await;
+    if state.agy_voice.owns_thread(&ecky_thread_id) {
+        return Err(AppError::conflict(
+            "Exit the Antigravity terminal before compacting its conversation.",
+        ));
+    }
     let binding = binding_for(&state, &ecky_thread_id).await?;
     let runtime = state
         .agy_provider
         .runtime(&binding.agy_conversation_id)
         .await;
-    if runtime.active_turn_id.is_some() || runtime.phase == "stopping" {
+    let sending = {
+        let conn = state.db.lock().await;
+        agy_provider::queue_head(&conn, &ecky_thread_id)?
+            .is_some_and(|head| head.status == "sending")
+    };
+    if sending || runtime.active_turn_id.is_some() || runtime.phase == "stopping" {
         return Err(AppError::conflict(
             "Cannot compact while a turn is active or stopping.",
         ));
@@ -1765,6 +1894,7 @@ pub async fn compact_agy_provider(
         )?;
         b
     };
+    drop(admission);
     emit_provider_update(&app, &updated_binding, "binding/compacted").await;
     emit_provider_update(&app, &updated_binding, "queue/dispatched").await;
     snapshot_for(&state, updated_binding, None).await
@@ -1836,6 +1966,11 @@ pub async fn send_agy_provider_prompt(
     } {
         drop(_creation);
         return send_existing(input, app, state, binding).await;
+    }
+    if state.agy_voice.owns_thread(&input.ecky_thread_id) {
+        return Err(AppError::conflict(
+            "Antigravity is opening this conversation. Use its terminal or wait until it connects.",
+        ));
     }
     let config_snapshot = state.config.lock().unwrap().clone();
     let eval_run_id = uuid::Uuid::new_v4().to_string();
@@ -2603,6 +2738,23 @@ print(json.dumps({"event":"result","result":{"conversation_id":"agy-session-1","
             crate::services::agy_provider::enqueue_prompt(&conn, "ecky-1", "legacy turn", 2)
                 .unwrap();
         }
+        let (_, voice_lease) =
+            crate::services::agy_voice::AgyVoice::reserve(&state, "ecky-1").unwrap();
+        dispatch_queue_for_with_classifier(app.handle(), &state, &binding, &disabled)
+            .await
+            .unwrap();
+        {
+            let conn = state.db.lock().await;
+            assert_eq!(
+                crate::services::agy_provider::queue_head(&conn, "ecky-1")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "queued",
+            );
+        }
+        assert!(!start_log.exists());
+        crate::services::agy_voice::AgyVoice::finish(&state, voice_lease.unwrap(), Ok(()));
         dispatch_queue_for_with_classifier(app.handle(), &state, &binding, &disabled)
             .await
             .unwrap();

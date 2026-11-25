@@ -66,6 +66,19 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
     w.__AGY_BINDING__ = initiallyBound ? structuredClone(agyBinding) : null;
     w.__AGY_SNAPSHOT__ = structuredClone(initialAgySnapshot);
     w.__EVENT_HANDLERS__ = {};
+    w.__AGY_VOICE_SNAPSHOT__ = null;
+    w.__PUBLISH_AGY_VOICE__ = (threadId: string, phase: string, detail: string | null, terminal = true) => {
+      const terminalId = terminal ? `agy-voice:${threadId}` : null;
+      w.__AGY_VOICE_SNAPSHOT__ = { eckyThreadId: threadId, phase, detail, terminalId };
+      if (terminalId) {
+        w.__EVENT_HANDLERS__['agent-terminal-updated']?.({ payload: {
+          agentId: terminalId, agentLabel: 'Agy Voice', sessionId: threadId, providerKind: 'agy',
+          sessionNonce: 1, screenText: '', vtStream: 'Agy terminal ready', attentionRequired: phase === 'error',
+          summary: null, active: phase !== 'closed', updatedAt: Date.now() / 1000,
+        } });
+      }
+      w.__EVENT_HANDLERS__['agy-voice-updated']?.({ payload: w.__AGY_VOICE_SNAPSHOT__ });
+    };
     w.__START_FAILURES__ = 0;
     w.__PROVIDER_WRITER_ACTIVATION_ERROR__ = null;
     w.__PROJECT_SOURCE_ERROR__ = null;
@@ -163,6 +176,16 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
         return answer;
       }
       if (cmd === 'stop_codex_voice') return null;
+      if (cmd === 'get_agy_voice') return w.__AGY_VOICE_SNAPSHOT__;
+      if (cmd === 'start_agy_voice' || cmd === 'stop_agy_voice') {
+        const threadId = String(args?.eckyThreadId);
+        if (cmd === 'start_agy_voice') {
+          w.__PUBLISH_AGY_VOICE__(threadId, 'waiting', 'Waiting for Agy to become available.', false);
+        } else {
+          w.__PUBLISH_AGY_VOICE__(threadId, 'idle', null, Boolean(w.__AGY_VOICE_SNAPSHOT__?.terminalId));
+        }
+        return structuredClone(w.__AGY_VOICE_SNAPSHOT__);
+      }
       if (cmd === 'plugin:event|listen') {
         const event = String(args?.event ?? ''); const handler = Number(args?.handler ?? -1);
         w.__EVENT_HANDLERS__[event] = w[`_${handler}`]; return 1;
@@ -374,6 +397,127 @@ async function bootProviderDialogue(page: Page) {
   await page.goto('/'); await selectCodexProvider(page); await openDialogue(page);
   await expect(page.getByRole('button', { name: 'TAKE OVER CODEX' })).toHaveCount(0);
 }
+
+async function bootAgyDialogue(page: Page, initiallyBound = true) {
+  await installProviderMocks(page, 'happy', initiallyBound);
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const settings = page.locator('[data-window-id="settings"]');
+  await settings.getByRole('button', { name: 'PROVIDER', exact: true }).click();
+  await settings.getByRole('button', { name: 'AGY', exact: true }).click();
+  await settings.getByRole('button', { name: 'SAVE REGISTRY' }).click();
+  await openDialogue(page);
+}
+
+test('Given Agy voice is requested When its PTY appears Then the terminal handles input and stays open after hanging up', async ({ page }) => {
+  await bootAgyDialogue(page);
+  const terminal = page.locator('[data-window-id="terminal"]');
+  const launcher = page.getByRole('button', { name: 'Agent terminal', exact: true });
+  const start = page.getByRole('button', { name: 'Start Agy voice conversation', exact: true });
+  await page.evaluate(() => (window as any).__PUBLISH_AGY_VOICE__('some-other-thread', 'connected', null));
+  await expect(start).toBeVisible();
+  await expect(terminal).toBeHidden();
+  await expect(launcher).toHaveCount(0);
+
+  await start.click();
+  await expect(page.getByRole('button', { name: 'Cancel Agy voice startup', exact: true })).toBeVisible();
+  await expect(terminal).toBeHidden();
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__ECKY_SPEECH_CANCELLATIONS__ = 0;
+    Object.defineProperty(window, 'speechSynthesis', {
+      configurable: true,
+      value: { cancel: () => { w.__ECKY_SPEECH_CANCELLATIONS__ += 1; } },
+    });
+  });
+  await page.evaluate((id) => (window as any).__PUBLISH_AGY_VOICE__(id, 'connected', 'Listening.'), eckyThread.id);
+  await expect(terminal).toBeVisible();
+  await expect(terminal).toContainText('CONNECTED');
+  await expect.poll(() => page.evaluate(() => (window as any).__ECKY_SPEECH_CANCELLATIONS__)).toBe(1);
+  await terminal.locator('.agent-terminal-window__input').fill('terminal input');
+  await terminal.getByRole('button', { name: 'SEND', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__CODEX_CALLS__.findLast(
+    (call: { cmd: string }) => call.cmd === 'send_agent_terminal_input',
+  )?.args?.input)).toMatchObject({ agentId: `agy-voice:${eckyThread.id}`, text: 'terminal input' });
+
+  await terminal.getByRole('button', { name: 'Hang up Agy voice', exact: true }).click();
+  await expect(terminal).toContainText('IDLE');
+  await expect(terminal).toContainText('LIVE PTY');
+  await terminal.locator('.window-close').click();
+  await expect(terminal).toBeHidden();
+  await expect(start).toBeEnabled();
+  await launcher.click();
+  await expect(terminal).toBeVisible();
+  const calls = await page.evaluate(() => (window as any).__CODEX_CALLS__.filter(
+    (call: { cmd: string }) => ['start_agy_voice', 'stop_agy_voice', 'stop_agy_provider'].includes(call.cmd),
+  ));
+  expect(calls).toEqual([
+    { cmd: 'start_agy_voice', args: { eckyThreadId: eckyThread.id } },
+    { cmd: 'stop_agy_voice', args: { eckyThreadId: eckyThread.id } },
+  ]);
+});
+
+test('Given an unbound Agy project When voice creates a binding Then Dialogue refreshes and a generic terminal stays available', async ({ page }) => {
+  await bootAgyDialogue(page, false);
+  const terminal = page.locator('[data-window-id="terminal"]');
+  const providerReads = () => page.evaluate(() => (window as any).__CODEX_CALLS__.filter(
+    (call: { cmd: string }) => call.cmd === 'get_agy_provider',
+  ).length);
+  await expect.poll(providerReads).toBeGreaterThan(0);
+  const initialReads = await providerReads();
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__EVENT_HANDLERS__['agent-terminal-updated']?.({ payload: {
+      agentId: 'model-agent', agentLabel: 'Model agent', sessionNonce: 1,
+      screenText: '', vtStream: 'Generic agent terminal ready', attentionRequired: false,
+      active: true, updatedAt: Date.now() / 1000,
+    } });
+    w.__AGY_BINDING__ = w.__AGY_SNAPSHOT__.binding;
+    w.__EVENT_HANDLERS__['agy-provider-updated']?.({ payload: {
+      eckyThreadId: 'some-other-project', conversationId: w.__AGY_BINDING__.agyConversationId, method: 'binding/voice',
+    } });
+  });
+  await page.getByRole('button', { name: 'Agent terminal', exact: true }).click();
+  await expect(terminal.getByLabel('Model agent terminal')).toBeVisible();
+  await expect(terminal.getByRole('button', { name: 'Hang up Agy voice' })).toHaveCount(0);
+  await terminal.locator('.window-close').click();
+  expect(await providerReads()).toBe(initialReads);
+
+  await page.evaluate((id) => {
+    const w = window as any;
+    w.__EVENT_HANDLERS__['agy-provider-updated']?.({ payload: {
+      eckyThreadId: id, conversationId: w.__AGY_BINDING__.agyConversationId, method: 'binding/voice',
+    } });
+  }, eckyThread.id);
+  await expect(page.locator('.trail-assistant').filter({ hasText: 'Constraints inspected through Ecky MCP.' })).toBeVisible();
+  expect(await providerReads()).toBe(initialReads + 1);
+  await expect(page.getByRole('button', { name: 'Agent terminal', exact: true })).toBeVisible();
+});
+
+test('Given Agy voice needs terminal input When the PTY reports a startup error Then it opens only for the Agy project', async ({ page }) => {
+  await bootAgyDialogue(page);
+  const terminal = page.locator('[data-window-id="terminal"]');
+  await page.getByRole('button', { name: 'Start Agy voice conversation', exact: true }).click();
+  await page.evaluate((id) => (window as any).__PUBLISH_AGY_VOICE__(
+    id, 'error', 'Review the workspace trust prompt in the terminal.',
+  ), eckyThread.id);
+  await expect(terminal).toBeVisible();
+  await expect(terminal).toContainText('Review the workspace trust prompt in the terminal.');
+  await terminal.locator('.window-close').click();
+  await page.getByRole('button', { name: 'Open Agy voice terminal', exact: true }).click();
+  await expect(terminal).toBeVisible();
+
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const settings = page.locator('[data-window-id="settings"]');
+  await settings.getByRole('button', { name: 'PROVIDER', exact: true }).click();
+  await settings.getByRole('button', { name: 'CODEX', exact: true }).click();
+  await settings.getByRole('button', { name: 'SAVE REGISTRY' }).click();
+  await expect(terminal).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Start Codex voice conversation', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open Agy voice terminal', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Agent terminal', exact: true })).toHaveCount(0);
+});
 
 async function drawViewportAnnotation(page: Page, offset = 0) {
   if (!await page.locator('.draw-toolbar').isVisible()) await page.locator('[data-dock-id="draw"]').click();

@@ -2,6 +2,7 @@ pub mod agent_activity;
 pub mod agent_dialogue;
 pub mod agent_versions;
 pub mod agy_provider;
+pub mod agy_voice;
 pub(crate) mod author_verification_foundation;
 pub mod authoring_graph;
 pub mod boot_projection;

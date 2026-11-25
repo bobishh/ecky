@@ -483,6 +483,7 @@ pub struct AppState {
     pub mcp_status: Arc<Mutex<McpServerStatus>>,
     pub codex_app_server: Arc<crate::services::codex_app_server::CodexAppServerSupervisor>,
     pub agy_provider: Arc<crate::services::agy_provider::AgyProviderSupervisor>,
+    pub agy_voice: crate::services::agy_voice::AgyVoice,
     pub grok_provider: Arc<crate::services::grok_provider::GrokProviderSupervisor>,
     pub mcp_session_registry: McpSessionRegistry,
     /// Current provider capability policy keyed by canonical Ecky thread.
@@ -749,6 +750,7 @@ impl AppState {
                 crate::services::codex_app_server::CodexAppServerSupervisor::new(),
             ),
             agy_provider: Arc::new(crate::services::agy_provider::AgyProviderSupervisor::new()),
+            agy_voice: Default::default(),
             grok_provider: Arc::new(crate::services::grok_provider::GrokProviderSupervisor::new()),
             mcp_session_registry: McpSessionRegistry {
                 sessions: mcp_session_map,

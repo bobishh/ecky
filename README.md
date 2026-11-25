@@ -47,6 +47,19 @@ are left untouched and reported in app logs.
 
 For a concrete example, the repository contains a [closed hex bottle holder](sites/landing/src/models/bicycle-bottle-holder.ecky). Its source names the bottle, the hex web, the ramped dovetail, and the printed thread on the handlebar clamp. These are modeling examples; the file alone does not establish physical fit.
 
+## Talk to Antigravity
+
+Select **Agy (Antigravity)** in Settings and choose **Voice** in Dialogue.
+Sign in with Google in `agy` 1.5.0 or later. Ecky waits for the current text
+turn, then opens the same conversation in its terminal. Complete any sign-in,
+workspace trust, or microphone prompts there. Spoken turns and their transcript
+stay in the Antigravity conversation. Antigravity sends microphone audio to
+Google for its [built-in voice mode](https://antigravity.google/docs/voice-mode).
+
+**Hang up** ends the call and leaves Antigravity's work running in the terminal.
+Exit the CLI to return to Dialogue's text controls and release queued messages
+for that project.
+
 ## Live paper sketch
 
 In the expanded **SKETCH** workspace, choose **Camera** and assign FRONT, TOP,

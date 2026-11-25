@@ -80,6 +80,7 @@ import {
   type AgyPromptInput,
   type AgyProviderSnapshot,
   type AgyStopInput,
+  type AgyVoiceSnapshot,
   type GrokMessagePage,
   type GrokMessagePageInput,
   type GrokPromptInput,
@@ -193,6 +194,7 @@ export type {
   CodexTakeoverSnapshot,
   AgyMessagePage,
   AgyProviderSnapshot,
+  AgyVoiceSnapshot,
   GrokMessagePage,
   GrokProviderSnapshot,
 };
@@ -207,6 +209,18 @@ export async function getAgyProvider(
   eckyThreadId: string,
 ): Promise<AgyProviderSnapshot | null> {
   return invokeCommand(commands.getAgyProvider(eckyThreadId));
+}
+
+export async function getAgyVoice(): Promise<AgyVoiceSnapshot | null> {
+  return invokeCommand(commands.getAgyVoice());
+}
+
+export async function startAgyVoice(eckyThreadId: string): Promise<AgyVoiceSnapshot> {
+  return invokeCommand(commands.startAgyVoice(eckyThreadId));
+}
+
+export async function stopAgyVoice(eckyThreadId: string): Promise<AgyVoiceSnapshot> {
+  return invokeCommand(commands.stopAgyVoice(eckyThreadId));
 }
 
 export async function getAgyProviderMessages(

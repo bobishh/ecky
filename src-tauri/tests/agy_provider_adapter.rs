@@ -8,6 +8,38 @@ use serde_json::json;
 
 static AGY_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[test]
+fn native_title_command_reports_fresh_and_resumed_idle_conversations() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let lease = uuid::Uuid::nil().to_string();
+    let title = |conversation_id: Option<&str>, agent_state: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ecky_cad"))
+            .arg("--ecky-agy-terminal-title")
+            .env("ECKY_AGY_VOICE_TITLE_TOKEN", &lease)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        write!(
+            child.stdin.take().unwrap(),
+            "{}",
+            json!({ "conversation_id": conversation_id, "agent_state": agent_state }),
+        )
+        .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(title(None, "idle"), format!("Ecky Agy {lease} fresh"));
+    assert_eq!(
+        title(Some("saved"), "idle"),
+        format!("Ecky Agy {lease} ready saved")
+    );
+    assert_eq!(title(Some("saved"), "working"), "Ecky Antigravity");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn answer_turn_runs_agy_without_edit_or_auto_approval_mode() {

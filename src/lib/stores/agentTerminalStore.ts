@@ -95,9 +95,12 @@ export function resetAgentTerminalStore() {
 }
 
 const snapshotList = derived(snapshotMap, ($snapshotMap) => Object.values($snapshotMap));
+const isAgyVoiceTerminal = (snapshot: AgentTerminalSnapshot) => snapshot.agentId.startsWith('agy-voice:');
+const agentTerminals = derived(snapshotList, (snapshots) => snapshots.filter((snapshot) => !isAgyVoiceTerminal(snapshot)));
+export const agyVoiceTerminals = derived(snapshotList, (snapshots) => snapshots.filter(isAgyVoiceTerminal));
 
 export const visibleAgentTerminalStore = derived(
-  [snapshotList, selection],
+  [agentTerminals, selection],
   ([$snapshotList, $selection]) =>
     pickVisibleAgentTerminal(
       $snapshotList,
@@ -107,7 +110,7 @@ export const visibleAgentTerminalStore = derived(
 );
 
 export const agentTerminalAttentionStore = derived(
-  [snapshotList, selection],
+  [agentTerminals, selection],
   ([$snapshotList, $selection]) =>
     pickAgentTerminalAttention(
       $snapshotList,

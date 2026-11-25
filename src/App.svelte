@@ -49,7 +49,6 @@
     loadAppWindowLayout,
     showWindow,
     bringToFront,
-    toggleWindow,
     fitVisibleWindowsToViewport,
     setWindowSafeInsets,
     closeWindow as closeWindowStore,
@@ -183,6 +182,7 @@ import {
   import {
     agentTerminalAttentionStore,
     enqueueAgentTerminalSnapshot,
+    agyVoiceTerminals,
     replaceAgentTerminalSnapshots,
     resetAgentTerminalStore,
     setAgentTerminalSelection,
@@ -282,6 +282,7 @@ import {
     formatBackendError,
     getAgyProvider,
     getAgyProviderMessages,
+    getAgyVoice,
     getGrokProvider,
     getGrokProviderMessages,
     getCodexTakeover,
@@ -351,6 +352,8 @@ import {
     steerCodexTakeover,
     stopExplorationRun,
     stopAgyProvider,
+    startAgyVoice,
+    stopAgyVoice,
     stopCodexTakeover,
     stopGrokProvider,
     repairVersionRuntime,
@@ -363,6 +366,7 @@ import {
   import { listen } from '@tauri-apps/api/event';
   import type { ClassificationResult } from './lib/tauri/contracts';
   import type {
+    AgyVoiceSnapshot,
     CaptureCropBounds,
     CaptureGuideResultProvenance,
     CaptureGuideEditIntent,
@@ -947,6 +951,10 @@ import {
       void openVersionCodeModal();
       return;
     }
+    if (id === 'terminal') {
+      openCurrentTerminal();
+      return;
+    }
     showWindow(id);
   }
 
@@ -1088,8 +1096,89 @@ import {
   const primaryAgentLabel = $derived.by<string | null>(() =>
     $config.mcp.autoAgents.find((agent) => agent.id === primaryAgentId)?.label ?? null,
   );
-  const visibleAgentTerminal = $derived($visibleAgentTerminalStore);
-  const activeAgentTerminalAttention = $derived($agentTerminalAttentionStore);
+  let agyVoiceSnapshot = $state.raw<AgyVoiceSnapshot | null>(null);
+  let agyVoiceRevision = 0;
+  let agyVoiceCommandThreadId = $state<string | null>(null);
+  let agyVoiceCommandError = $state<{ threadId: string; detail: string } | null>(null);
+  let agyVoiceOpenRequest = $state.raw<{ threadId: string; previousTerminalKey: string; revision: number } | null>(null);
+  let agyVoiceWindowThreadId = $state<string | null>(null);
+  const agyVoiceScope = $derived($config.connectionType === 'provider:agy' && hasTauriIpc() ? $activeThreadId : null);
+  const activeAgyVoice = $derived(agyVoiceSnapshot?.eckyThreadId === agyVoiceScope ? agyVoiceSnapshot : null);
+  const agyVoiceConnected = $derived(agyVoiceSnapshot?.phase === 'connected');
+  const activeAgyVoiceTerminal = $derived.by(() => {
+    if (!activeAgyVoice?.terminalId) return null;
+    const matching = $agyVoiceTerminals.filter((terminal) => terminal.agentId === activeAgyVoice.terminalId);
+    return matching.reduce<AgentTerminalSnapshot | null>((latest, terminal) =>
+      !latest || terminal.sessionNonce > latest.sessionNonce ? terminal : latest, null);
+  });
+  const agyVoiceConnecting = $derived(
+    activeAgyVoice?.phase === 'waiting' || activeAgyVoice?.phase === 'starting' || activeAgyVoice?.phase === 'connecting',
+  );
+  const agyVoiceCanHangUp = $derived(agyVoiceConnecting || activeAgyVoice?.phase === 'connected');
+  const agyVoiceInvoking = $derived(Boolean(agyVoiceCommandThreadId));
+  const agyVoiceError = $derived(
+    agyVoiceCommandError && agyVoiceCommandError.threadId === agyVoiceScope ? agyVoiceCommandError.detail :
+      activeAgyVoice?.phase === 'error' && !activeAgyVoice.terminalId ? activeAgyVoice.detail : null,
+  );
+  const agyVoiceControl = $derived.by(() => {
+    if (!agyVoiceScope) return null;
+    const canOpen = Boolean(activeAgyVoiceTerminal && (agyVoiceCanHangUp || activeAgyVoice?.phase === 'error'));
+    const cancelVoice = !canOpen && agyVoiceCanHangUp;
+    let label = 'Start Agy voice conversation';
+    if (canOpen) label = 'Open Agy voice terminal';
+    else if (cancelVoice) label = agyVoiceConnecting ? 'Cancel Agy voice startup' : 'Hang up Agy voice';
+    return {
+      label,
+      text: canOpen ? 'VOICE PTY' : cancelVoice ? '⏹ CANCEL' : '🎙 VOICE',
+      title: activeAgyVoice?.detail ?? 'Talk with Agy in its terminal',
+      active: activeAgyVoice?.phase === 'connected',
+      busy: agyVoiceConnecting || agyVoiceInvoking,
+      disabled: !canOpen && agyVoiceInvoking,
+      onclick: canOpen ? openCurrentTerminal : () => void invokeAgyVoice(cancelVoice ? 'stop' : 'start'),
+    };
+  });
+  const visibleAgentTerminal = $derived(activeAgyVoiceTerminal ?? $visibleAgentTerminalStore);
+  const visibleAgyVoice = $derived(activeAgyVoiceTerminal ? activeAgyVoice : null);
+  const activeAgentTerminalAttention = $derived(
+    activeAgyVoiceTerminal
+      ? activeAgyVoiceTerminal.attentionRequired ? activeAgyVoiceTerminal : null
+      : $agentTerminalAttentionStore,
+  );
+
+  function projectAgyVoice(next: AgyVoiceSnapshot | null) {
+    agyVoiceRevision += 1;
+    agyVoiceSnapshot = next;
+  }
+
+  function openCurrentTerminal() {
+    agyVoiceWindowThreadId = visibleAgyVoice?.eckyThreadId ?? null;
+    showWindow('terminal');
+  }
+
+  async function invokeAgyVoice(action: 'start' | 'stop') {
+    const threadId = agyVoiceScope;
+    if (!threadId || agyVoiceCommandThreadId) return;
+    const revision = agyVoiceRevision;
+    agyVoiceCommandThreadId = threadId;
+    agyVoiceCommandError = null;
+    if (action === 'start') {
+      if (activeAgyVoiceTerminal?.active) openCurrentTerminal();
+      else agyVoiceOpenRequest = {
+        threadId, revision, previousTerminalKey: agentTerminalSessionKey(activeAgyVoiceTerminal),
+      };
+    } else {
+      agyVoiceOpenRequest = null;
+    }
+    try {
+      const next = await (action === 'start' ? startAgyVoice(threadId) : stopAgyVoice(threadId));
+      if (agyVoiceRevision === revision) projectAgyVoice(next);
+    } catch (error) {
+      if (agyVoiceOpenRequest?.threadId === threadId) agyVoiceOpenRequest = null;
+      if (agyVoiceScope === threadId) agyVoiceCommandError = { threadId, detail: formatBackendError(error) };
+    } finally {
+      agyVoiceCommandThreadId = null;
+    }
+  }
   const activeThread = $derived($history.find((t) => t.id === $activeThreadId));
   let classificationResults = $state<ClassificationResult[]>([]);
   async function refreshClassificationResults(threadId: string) {
@@ -1275,11 +1364,11 @@ import {
     reduceAgyProvider({ type: 'loadStarted', token });
     try {
       const snapshot = await getAgyProvider(threadId);
-      if (token !== agyProviderLoadToken || get(activeThreadId) !== threadId) return;
+      if (token !== agyProviderLoadToken || get(activeThreadId) !== threadId || get(config).connectionType !== 'provider:agy') return;
       if (snapshot) applyAgyProviderSnapshot(snapshot, preserveLoadedPages);
       else reduceAgyProvider({ type: 'snapshot', snapshot: null, preserveLoadedPages: false, token });
     } catch (error) {
-      if (token === agyProviderLoadToken && get(activeThreadId) === threadId) {
+      if (token === agyProviderLoadToken && get(activeThreadId) === threadId && get(config).connectionType === 'provider:agy') {
         reduceAgyProvider({ type: 'error', error: formatBackendError(error) });
       }
     } finally {
@@ -1516,11 +1605,18 @@ import {
 
   function scheduleAgyProviderRefresh(event: {
     conversationId?: string | null;
+    eckyThreadId?: string | null;
     method: string;
     liveMessages?: AgyProviderSnapshot['liveMessages'];
     turnTraces?: AgyProviderSnapshot['turnTraces'];
     runtime?: AgyProviderSnapshot['runtime'];
   }) {
+    if (get(config).connectionType !== 'provider:agy') return;
+    if (event.method === 'binding/voice') {
+      const threadId = event.eckyThreadId;
+      if (threadId && threadId === get(activeThreadId)) void loadAgyProvider(threadId, true);
+      return;
+    }
     const snapshot = agyProviderSnapshot;
     if (!snapshot || event.conversationId !== snapshot.binding.agyConversationId) return;
     const terminalEvent = event.method === 'turn/result' || event.method === 'turn/terminal';
@@ -4709,6 +4805,16 @@ import {
     const unlistenTerminal = canListenToTauri ? listen<AgentTerminalSnapshot>('agent-terminal-updated', (event) => {
       enqueueAgentTerminalSnapshot(event.payload);
     }) : noopUnlisten;
+    const unlistenAgyVoice = canListenToTauri ? listen<AgyVoiceSnapshot>('agy-voice-updated', (event) => {
+      projectAgyVoice(event.payload);
+    }) : noopUnlisten;
+    if (canListenToTauri) {
+      void unlistenAgyVoice.then(async () => {
+        const revision = agyVoiceRevision;
+        const snapshot = await getAgyVoice();
+        if (agyVoiceRevision === revision && !agyVoiceCommandThreadId) projectAgyVoice(snapshot);
+      }).catch(() => {});
+    }
     const unlistenWorkingVersion = canListenToTauri ? listen<AgentWorkingVersionCreatedEvent>(
       'agent-working-version-created',
       (event) => {
@@ -4731,6 +4837,7 @@ import {
     ) : noopUnlisten;
     const unlistenAgyProvider = canListenToTauri ? listen<{
       conversationId?: string | null;
+      eckyThreadId?: string | null;
       method: string;
       liveMessages?: AgyProviderSnapshot['liveMessages'];
       turnTraces?: AgyProviderSnapshot['turnTraces'];
@@ -4785,6 +4892,7 @@ import {
       void unlistenDraftPreviewChanged.then(fn => fn());
       void unlistenSessions.then(fn => fn());
       void unlistenTerminal.then(fn => fn());
+      void unlistenAgyVoice.then(fn => fn());
       void unlistenWorkingVersion.then(fn => fn());
       void unlistenCodexTakeover.then(fn => fn());
       void unlistenJevClassification.then(fn => fn());
@@ -5196,6 +5304,10 @@ import {
   }
 
   $effect(() => {
+    if (agyVoiceConnected) stopEckySpeech();
+  });
+
+  $effect(() => {
     const speechCue = resolveGenieSpeechCue({
       latestAssistantMessage,
       assistantFresh,
@@ -5206,7 +5318,7 @@ import {
     if (!speechCue || isAudioMuted || dismissedBubbleText === speechCue.text) return;
     if (speechCue.key === lastSpokenAssistantKey) return;
     lastSpokenAssistantKey = speechCue.key;
-    speakEckyText(speechCue.text, { muted: isAudioMuted });
+    if (!agyVoiceConnected) speakEckyText(speechCue.text, { muted: isAudioMuted });
   });
 
   // Reset dismiss state and waking message when a new agent prompt arrives
@@ -5256,7 +5368,7 @@ import {
         {
           label: 'OPEN TERMINAL',
           onclick: () => {
-            if (!terminalWindowState.visible) toggleWindow('terminal');
+            if (!terminalWindowState.visible) openCurrentTerminal();
           },
         },
       ];
@@ -5269,7 +5381,7 @@ import {
         actions.push({
           label: 'OPEN TERMINAL',
           onclick: () => {
-            if (!terminalWindowState.visible) toggleWindow('terminal');
+            if (!terminalWindowState.visible) openCurrentTerminal();
           },
         });
       }
@@ -5278,7 +5390,7 @@ import {
           label: 'WAKE AGENT',
           onclick: () => {
             if (visibleAgentTerminal?.active) return;
-            if (!terminalWindowState.visible) toggleWindow('terminal');
+            if (!terminalWindowState.visible) openCurrentTerminal();
           },
         });
       } else {
@@ -5501,8 +5613,27 @@ import {
   });
 
   $effect(() => {
-    if (terminalWindowState.visible && !visibleAgentTerminal) {
+    if (!terminalWindowState.visible) {
+      agyVoiceWindowThreadId = null;
+    } else if (!visibleAgentTerminal || agyVoiceWindowThreadId !== (visibleAgyVoice?.eckyThreadId ?? null)) {
       closeWindowStore('terminal');
+    }
+  });
+
+  $effect(() => {
+    const request = agyVoiceOpenRequest;
+    if (!request) return;
+    if (request.threadId !== agyVoiceScope) {
+      agyVoiceOpenRequest = null;
+      return;
+    }
+    const terminal = activeAgyVoiceTerminal;
+    if (terminal && (terminal.active || agentTerminalSessionKey(terminal) !== request.previousTerminalKey)) {
+      agyVoiceOpenRequest = null;
+      openCurrentTerminal();
+    } else if (activeAgyVoice && agyVoiceRevision !== request.revision && !activeAgyVoice.terminalId &&
+      (activeAgyVoice.phase === 'closed' || activeAgyVoice.phase === 'error')) {
+      agyVoiceOpenRequest = null;
     }
   });
 
@@ -6564,7 +6695,8 @@ ${detail}`,
           imageAttachmentUnavailableReason: imageInputUnavailableReason,
           dialogueState,
           codexTakeover: activeProviderSnapshot,
-          codexTakeoverError,
+          codexTakeoverError: agyVoiceError ?? codexTakeoverError,
+          agyVoiceControl,
           onLoadEarlierCodexMessages: handleLoadEarlierCodexMessages,
           onSteerCodexTakeover: handleCodexSteer,
           onStopCodexTakeover: handleStopCodexTakeover,
@@ -6626,9 +6758,25 @@ ${detail}`,
         <div class="agent-terminal-window">
           <div class="agent-terminal-window__meta">
             <div class="agent-terminal-window__status">{visibleAgentTerminal.active ? 'LIVE PTY' : 'LAST SESSION'}</div>
-            {#if activeAgentTerminalMetaSummary}<div class="agent-terminal-window__summary">{activeAgentTerminalMetaSummary}</div>{/if}
+            {#if visibleAgyVoice}
+              <div class="agent-terminal-window__voice">
+                <span class="agent-terminal-window__status">AGY VOICE · {visibleAgyVoice.phase.toUpperCase()}</span>
+                <button
+                  class="btn btn-xs btn-secondary"
+                  type="button"
+                  aria-label="Hang up Agy voice"
+                  disabled={!agyVoiceCanHangUp || agyVoiceInvoking}
+                  onclick={() => void invokeAgyVoice('stop')}
+                >HANG UP</button>
+              </div>
+              <div class="agent-terminal-window__summary agent-terminal-window__voice-detail" role="status">
+                {agyVoiceError ?? visibleAgyVoice.detail ?? ''}
+              </div>
+            {:else if activeAgentTerminalMetaSummary}
+              <div class="agent-terminal-window__summary">{activeAgentTerminalMetaSummary}</div>
+            {/if}
           </div>
-          {#if projectedThreadAgentState.sessionId}
+          {#if !visibleAgyVoice && projectedThreadAgentState.sessionId}
             <div class="agent-terminal-window__trace-meta">
               <span>SESSION {shortSessionId(projectedThreadAgentState.sessionId)}</span>
               <span>THREAD {activeThread?.title ?? 'UNKNOWN'}</span>
@@ -6986,6 +7134,8 @@ ${detail}`,
   .boot-overlay__status { color: var(--text-dim); font-size: 0.7rem; }
   .agent-terminal-window { display: flex; flex-direction: column; height: 100%; background: linear-gradient(180deg, color-mix(in srgb, var(--bg-100) 92%, #071019 8%), var(--bg)); overflow: hidden; }
   .agent-terminal-window__meta { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--bg-300); background: color-mix(in srgb, var(--bg-200) 88%, transparent); }
+  .agent-terminal-window__voice { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .agent-terminal-window__voice-detail { block-size: 2.6em; overflow: auto; overflow-wrap: anywhere; }
   .agent-terminal-window__status { font-family: var(--font-mono); font-size: 0.65rem; letter-spacing: 0.14em; color: var(--secondary); text-transform: uppercase; }
   .agent-terminal-window__summary { font-size: 0.76rem; color: var(--text-dim); }
   .agent-terminal-window__trace-meta { display: flex; flex-wrap: wrap; gap: 8px 14px; padding: 8px 12px; border-bottom: 1px solid var(--bg-300); background: color-mix(in srgb, var(--bg-200) 80%, transparent); font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); }

@@ -2,7 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 
 type SpeechMockMessageMode = 'agentDraft' | 'llmReply' | 'error';
 
-async function installSpeechPolicyMocks(page: Page, mode: SpeechMockMessageMode) {
+async function installSpeechPolicyMocks(page: Page, mode: SpeechMockMessageMode, voiceConnected = false) {
   await page.route(/\/mock\/.*\.stl(\?.*)?$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -19,7 +19,7 @@ endsolid speech-policy`,
     });
   });
 
-  await page.addInitScript((mockMode) => {
+  await page.addInitScript(({ mockMode, voiceConnected }) => {
     const mockWindow = window as any;
     const nowSeconds = () => Math.floor(Date.now() / 1000);
     const bundle = {
@@ -106,6 +106,7 @@ endsolid speech-policy`,
     };
 
     mockWindow.__SPOKEN_TEXT__ = [];
+    mockWindow.__SPEECH_CANCEL_COUNT__ = 0;
     class MockSpeechSynthesisUtterance {
       text: string;
       rate = 1;
@@ -121,7 +122,7 @@ endsolid speech-policy`,
     });
     Object.defineProperty(window, 'speechSynthesis', {
       value: {
-        cancel: () => undefined,
+        cancel: () => { mockWindow.__SPEECH_CANCEL_COUNT__ += 1; },
         speak: (utterance: MockSpeechSynthesisUtterance) => {
           mockWindow.__SPOKEN_TEXT__.push(utterance.text);
         },
@@ -130,7 +131,28 @@ endsolid speech-policy`,
     });
 
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+    let nextHandler = 0;
+    const handlers = new Map<string, number>();
+    window.__TAURI_INTERNALS__.transformCallback = (callback: unknown) => {
+      const id = ++nextHandler;
+      mockWindow[`_${id}`] = callback;
+      return id;
+    };
+    const voice = {
+      eckyThreadId: 'another-voice-project', phase: 'connected', detail: null, terminalId: 'agy-voice:another-voice-project',
+    };
+    mockWindow.__END_AGY_VOICE__ = () => {
+      const handler = handlers.get('agy-voice-updated');
+      mockWindow[`_${handler}`]?.({ payload: { ...voice, phase: 'idle' } });
+    };
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === 'plugin:event|listen') {
+        const handler = Number(args?.handler);
+        handlers.set(String(args?.event), handler);
+        return handler;
+      }
+      if (cmd === 'get_agy_voice') return voiceConnected ? voice : null;
+      if (cmd === 'get_agent_activity') return { events: [], latestCursor: 0 };
       if (cmd === 'get_config') {
         return {
           engines: [
@@ -216,14 +238,14 @@ endsolid speech-policy`,
       if (cmd === 'update_version_preview') return null;
       return null;
     };
-  }, mode);
+  }, { mockMode: mode, voiceConnected });
 }
 
 test.describe('Audio controls', () => {
   test('Given idle workbench, audio mute toggle remains visible', async ({ page }) => {
     await page.goto('/');
     await page.getByRole('button', { name: 'Settings' }).click();
-    await page.getByRole('button', { name: 'APP' }).click();
+    await page.getByRole('button', { name: 'APP', exact: true }).click();
 
     await expect(page.locator('.microwave-unit')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'AUDIO ON' })).toBeVisible();
@@ -232,7 +254,7 @@ test.describe('Audio controls', () => {
   test('Given audio toggle, muting keeps control available for unmute', async ({ page }) => {
     await page.goto('/');
     await page.getByRole('button', { name: 'Settings' }).click();
-    await page.getByRole('button', { name: 'APP' }).click();
+    await page.getByRole('button', { name: 'APP', exact: true }).click();
 
     const toggle = page.getByRole('button', { name: 'AUDIO ON' });
     await expect(toggle).toBeVisible();
@@ -241,42 +263,61 @@ test.describe('Audio controls', () => {
     await expect(page.getByRole('button', { name: 'AUDIO OFF' })).toBeVisible();
   });
 
-  test('Given MCP draft update is latest bubble When thread opens Then speech stays silent', async ({ page }) => {
+  test('Given the latest reply is an MCP draft update When the project opens Then speech stays silent', async ({ page }) => {
     await installSpeechPolicyMocks(page, 'agentDraft');
 
     await page.goto('/');
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
 
-    await expect(page.locator('.genie-bubble')).toContainText('Draft update via macro replacement');
+    await expect(page.getByRole('region', { name: 'Agent notifications' })).toContainText('Draft update via macro replacement');
     await page.waitForTimeout(750);
 
     await expect.poll(() => page.evaluate(() => (window as any).__SPOKEN_TEXT__)).toEqual([]);
   });
 
-  test('Given LLM reply is latest bubble When thread opens Then speech reads reply', async ({ page }) => {
+  test('Given the latest reply is an LLM reply When the project opens Then Ecky reads it', async ({ page }) => {
     await installSpeechPolicyMocks(page, 'llmReply');
 
     await page.goto('/');
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
 
-    await expect(page.locator('.genie-bubble')).toContainText('Final LLM reply.');
+    await expect(page.getByRole('region', { name: 'Agent notifications' })).toContainText('Final LLM reply.');
     await expect.poll(() => page.evaluate(() => (window as any).__SPOKEN_TEXT__)).toEqual([
       'Final LLM reply.',
     ]);
   });
 
-  test('Given error bubble is latest reply When thread opens Then speech reads raw error', async ({ page }) => {
+  test('Given the latest reply is an error When the project opens Then Ecky reads the raw error', async ({ page }) => {
     await installSpeechPolicyMocks(page, 'error');
 
     await page.goto('/');
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
 
-    await expect(page.locator('.genie-bubble')).toContainText('Render Error: FreeCAD failed with exit code 1.');
+    await expect(page.getByRole('region', { name: 'Agent notifications' })).toContainText('Render Error: FreeCAD failed with exit code 1.');
     await expect.poll(() => page.evaluate(() => (window as any).__SPOKEN_TEXT__)).toEqual([
       'Render Error: FreeCAD failed with exit code 1.',
     ]);
+  });
+
+  test('Given voice is connected in another project When a model reply appears Then Ecky stays silent and keeps audio enabled', async ({ page }) => {
+    await installSpeechPolicyMocks(page, 'llmReply', true);
+    await page.goto('/');
+    await expect.poll(() => page.evaluate(() => (window as any).__SPEECH_CANCEL_COUNT__)).toBeGreaterThan(0);
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await expect(page.getByRole('region', { name: 'Agent notifications' })).toContainText('Final LLM reply.');
+    await expect(page.evaluate(() => (window as any).__SPOKEN_TEXT__)).resolves.toEqual([]);
+
+    await page.evaluate(async () => {
+      (window as any).__END_AGY_VOICE__();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
+    await expect(page.evaluate(() => (window as any).__SPOKEN_TEXT__)).resolves.toEqual([]);
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('button', { name: 'APP', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'AUDIO ON' })).toBeVisible();
   });
 });

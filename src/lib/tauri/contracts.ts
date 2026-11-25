@@ -101,6 +101,30 @@ async compactAgyProvider(eckyThreadId: string) : Promise<Result<AgyProviderSnaps
     else return { status: "error", error: e  as any };
 }
 },
+async getAgyVoice() : Promise<Result<AgyVoiceSnapshot | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_agy_voice") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async startAgyVoice(eckyThreadId: string) : Promise<Result<AgyVoiceSnapshot, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_agy_voice", { eckyThreadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async stopAgyVoice(eckyThreadId: string) : Promise<Result<AgyVoiceSnapshot, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("stop_agy_voice", { eckyThreadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getGrokProvider(eckyThreadId: string) : Promise<Result<GrokProviderSnapshot | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_grok_provider", { eckyThreadId }) };
@@ -1867,6 +1891,8 @@ export type AgyPromptInput = { eckyThreadId: string; promptText: string; attachm
 export type AgyProviderBinding = { eckyThreadId: string; agyConversationId: string; label: string; cwd: string; bootstrapVersion: number; createdAt: number; updatedAt: number }
 export type AgyProviderSnapshot = { binding: AgyProviderBinding; messages: CodexDialogueMessage[]; liveMessages: CodexDialogueMessage[]; turnTraces: ProviderTurnTrace[]; nextCursor: string | null; backwardsCursor: string | null; runtime: CodexTakeoverRuntime; queue: CodexQueuedPrompt[]; capabilities: ProviderCapabilities }
 export type AgyStopInput = { eckyThreadId: string; turnId: string }
+export type AgyVoicePhase = "waiting" | "starting" | "connecting" | "connected" | "idle" | "closed" | "error"
+export type AgyVoiceSnapshot = { eckyThreadId: string; phase: AgyVoicePhase; detail: string | null; terminalId: string | null }
 export type AnalysisDeclarationBinding = { analysisId: string; kind: string; partId: string; elementKind: string; sourceStart?: number | null; sourceEnd?: number | null }
 export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null; diagnosticContext?: DiagnosticContext | null; layer?: ErrorLayer | null; fix?: ErrorFix | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"

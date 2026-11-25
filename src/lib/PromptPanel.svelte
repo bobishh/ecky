@@ -88,6 +88,7 @@
     dialogueState = { mode: 'generate' } as DialogueState,
     codexTakeover = null,
     codexTakeoverError = null,
+    agyVoiceControl = null,
     onLoadEarlierCodexMessages,
     onSteerCodexTakeover,
     onStopCodexTakeover,
@@ -124,6 +125,15 @@
     dialogueState?: DialogueState;
     codexTakeover?: CodexTakeoverSnapshot | AgyProviderSnapshot | GrokProviderSnapshot | null;
     codexTakeoverError?: string | null;
+    agyVoiceControl?: {
+      label: string;
+      text: string;
+      title: string;
+      active: boolean;
+      busy: boolean;
+      disabled: boolean;
+      onclick: () => void;
+    } | null;
     onLoadEarlierCodexMessages?: () => Promise<void>;
     onSteerCodexTakeover?: (prompt: string, attachments: Attachment[]) => Promise<void>;
     onStopCodexTakeover?: () => Promise<void>;
@@ -1633,6 +1643,17 @@
             disabled={!activeThreadId}
             onclick={toggleCodexVoice}
           >{codexVoice ? '⏹ END VOICE' : '🎙 VOICE'}</button>
+        {:else if agyVoiceControl}
+          <button
+            class="btn btn-xs btn-ghost voice-btn"
+            class:voice-btn--active={agyVoiceControl.active}
+            class:voice-btn--busy={agyVoiceControl.busy}
+            type="button"
+            aria-label={agyVoiceControl.label}
+            title={agyVoiceControl.title}
+            disabled={agyVoiceControl.disabled}
+            onclick={agyVoiceControl.onclick}
+          >{agyVoiceControl.text}</button>
         {:else if voiceInputAvailable}
           <button
             class="btn btn-xs btn-ghost voice-btn"

@@ -4,6 +4,27 @@ use specta::Type;
 use super::Attachment;
 use super::{CodexDialogueMessage, CodexQueuedPrompt, CodexTakeoverRuntime, ProviderTurnTrace};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgyVoicePhase {
+    Waiting,
+    Starting,
+    Connecting,
+    Connected,
+    Idle,
+    Closed,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgyVoiceSnapshot {
+    pub ecky_thread_id: String,
+    pub phase: AgyVoicePhase,
+    pub detail: Option<String>,
+    pub terminal_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgyProviderBinding {

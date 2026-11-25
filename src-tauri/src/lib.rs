@@ -909,6 +909,7 @@ pub fn run() {
             return;
         }
         let state = app_handle.state::<AppState>();
+        state.agy_voice.shutdown();
         tauri::async_runtime::block_on(async {
             state.agy_provider.shutdown_all().await;
             state.grok_provider.shutdown_all().await;

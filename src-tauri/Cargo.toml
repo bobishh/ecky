@@ -60,6 +60,7 @@ fontdb = "0.16.2"
 rustybuzz = "0.12.1"
 ttf-parser = "0.20.0"
 portable-pty = "0.9.0"
+vt100 = "0.18.1"
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 lexpr = "0.2.7"
 jev-sdk = "=0.1.0"

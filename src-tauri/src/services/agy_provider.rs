@@ -1149,7 +1149,7 @@ fn kill_owned_process_group(pid: u32) {
 #[cfg(not(unix))]
 fn kill_owned_process_group(_pid: u32) {}
 
-fn now_seconds() -> i64 {
+pub(super) fn now_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
