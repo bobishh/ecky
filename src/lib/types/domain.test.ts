@@ -65,6 +65,27 @@ test("toContractDesignOutput preserves authoring context fields", () => {
   assert.equal(contract.geometryBackend, "mesh");
 });
 
+test("normalizeMessage preserves parentMessageId when present and defaults to null", () => {
+  const child = normalizeMessage({
+    id: "m-child",
+    parentMessageId: "m-parent",
+    role: "assistant",
+    content: "Child version.",
+    status: "success",
+    timestamp: 2,
+  } as any);
+  const root = normalizeMessage({
+    id: "m-root",
+    role: "assistant",
+    content: "Root version.",
+    status: "success",
+    timestamp: 1,
+  } as any);
+
+  assert.equal(child.parentMessageId, "m-parent");
+  assert.equal(root.parentMessageId, null);
+});
+
 test("normalizeMessage migrates build123d runtime bundle to native", () => {
   const message = normalizeMessage({
     id: "m1",

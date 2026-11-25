@@ -17,6 +17,7 @@ import type { Message } from './types/domain';
 function sampleMessage(overrides: Partial<Message>): Message {
   return {
     id: overrides.id ?? 'msg-1',
+    parentMessageId: overrides.parentMessageId ?? null,
     role: overrides.role ?? 'user',
     content: overrides.content ?? '',
     status: overrides.status ?? 'success',

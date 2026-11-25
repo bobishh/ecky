@@ -140,6 +140,7 @@ export interface DesignOutput {
 
 export interface Message {
   id: string;
+  parentMessageId?: string | null;
   role: MessageRole;
   content: string;
   status: MessageStatus;
@@ -1064,6 +1065,7 @@ export function normalizeMessage(
   );
   return {
     id: raw.id ?? '',
+    parentMessageId: raw.parentMessageId ?? null,
     role: raw.role ?? 'assistant',
     content: raw.content ?? '',
     status: raw.status ?? 'success',

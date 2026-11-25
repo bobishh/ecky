@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 fn version(id: &str, timestamp: u64, version_name: &str) -> Message {
     Message {
         id: id.to_string(),
+        parent_message_id: None,
         role: MessageRole::Assistant,
         content: version_name.to_string(),
         status: MessageStatus::Success,

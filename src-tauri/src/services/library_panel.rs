@@ -543,6 +543,7 @@ mod tests {
                     "thread-backfill",
                     &crate::contracts::Message {
                         id: id.to_string(),
+                        parent_message_id: None,
                         role: crate::contracts::MessageRole::Assistant,
                         content: String::new(),
                         status,
@@ -628,6 +629,7 @@ mod tests {
             "thread-backfill",
             &crate::contracts::Message {
                 id: newer_id.to_string(),
+                parent_message_id: None,
                 role: crate::contracts::MessageRole::Assistant,
                 content: String::new(),
                 status: crate::contracts::MessageStatus::Success,

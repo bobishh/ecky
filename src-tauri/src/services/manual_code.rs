@@ -379,11 +379,15 @@ mod tests {
 
 fn version_request(
     thread_id: &str,
+    parent_message_id: Option<String>,
     design: &DesignOutput,
+    artifact_bundle: Option<ArtifactBundle>,
+    model_manifest: Option<ModelManifest>,
     status: MessageStatus,
 ) -> AddManualVersionRequest {
     AddManualVersionRequest {
         thread_id: thread_id.to_string(),
+        parent_message_id,
         title: design.title.clone(),
         version_name: design.version_name.clone(),
         macro_code: design.macro_code.clone(),
@@ -392,8 +396,8 @@ fn version_request(
         parameters: design.initial_params.clone(),
         ui_spec: design.ui_spec.clone(),
         post_processing: design.post_processing.clone(),
-        artifact_bundle: None,
-        model_manifest: None,
+        artifact_bundle,
+        model_manifest,
         response_text: Some(design.response.clone()),
         agent_origin: None,
         status: Some(status),
@@ -530,70 +534,6 @@ async fn successful_no_op(
     }))
 }
 
-async fn attach_outcome(
-    request: &ManualCodeApplyRequest,
-    message_id: &str,
-    design: &DesignOutput,
-    status: MessageStatus,
-    artifact_bundle: Option<&ArtifactBundle>,
-    model_manifest: Option<&ModelManifest>,
-    content: &str,
-    state: &AppState,
-    app: &dyn PathResolver,
-) -> AppResult<()> {
-    let configured_root = state.config.lock().unwrap().projects_root.clone();
-    let conn = state.db.lock().await;
-    let owner_thread_id = crate::db::get_message_thread_id(&conn, message_id)
-        .map_err(|error| AppError::persistence(error.to_string()))?
-        .ok_or_else(|| AppError::persistence("Manual code version disappeared."))?;
-    if owner_thread_id != request.thread_id {
-        return Err(AppError::conflict(format!(
-            "Manual code version '{}' belongs to thread '{}', not '{}'.",
-            message_id, owner_thread_id, request.thread_id
-        )));
-    }
-    crate::db::update_message_status_and_output(
-        &conn,
-        message_id,
-        crate::db::MessageStatusUpdate {
-            status: &status,
-            output: Some(design),
-            usage: None,
-            artifact_bundle,
-            model_manifest,
-            structural_verification: None,
-            visual_kind: None,
-            content: Some(content),
-        },
-    )
-    .map_err(|error| AppError::persistence(error.to_string()))?;
-    crate::thread_source_binding::refresh_on_version_append(
-        app,
-        &conn,
-        configured_root.as_deref(),
-        &request.thread_id,
-        &design.title,
-        &design.macro_code,
-        message_id,
-        artifact_bundle.map(|bundle| bundle.model_id.as_str()),
-        Some(message_id),
-    )?;
-    if status == MessageStatus::Success && artifact_bundle.is_some() {
-        if let Err(error) = crate::services::library_panel::schedule_component_recovery(app, state)
-        {
-            state.push_log(format!(
-                "Component capture failed for version {message_id}: {error}"
-            ));
-        }
-    }
-    drop(conn);
-    state
-        .authoring_actor_registry
-        .invalidate_authoring_actors_for_thread(&request.thread_id)
-        .await;
-    Ok(())
-}
-
 fn write_snapshot(
     request: &ManualCodeApplyRequest,
     message_id: Option<&str>,
@@ -621,36 +561,17 @@ fn write_snapshot(
     write_last_snapshot(app, Some(&snapshot));
 }
 
-async fn fail_version(
+fn fail_version(
     request: &ManualCodeApplyRequest,
-    message_id: Option<String>,
     mut design: DesignOutput,
     parser_matched: bool,
     error: AppError,
-    state: &AppState,
-    app: &dyn PathResolver,
 ) -> AppResult<ManualCodeApplyResponse> {
     design.response = "Manual code draft failed.".to_string();
-    let content = error.to_string();
-    if let Some(message_id) = message_id.as_deref() {
-        attach_outcome(
-            request,
-            message_id,
-            &design,
-            MessageStatus::Error,
-            None,
-            None,
-            &content,
-            state,
-            app,
-        )
-        .await?;
-        write_snapshot(request, Some(message_id), &design, None, None, state, app);
-    }
     Ok(ManualCodeApplyResponse {
         thread_id: request.thread_id.clone(),
         base_message_id: request.base_message_id.clone(),
-        message_id,
+        message_id: None,
         status: MessageStatus::Error,
         design_output: design,
         artifact_bundle: None,
@@ -706,10 +627,107 @@ async fn apply_manual_code_inner(
         {
             return Ok(response);
         }
+        if let Some((expected_head_id, expected_source)) = head_guard.as_ref() {
+            let conn = state.db.lock().await;
+            let current_head = crate::db::get_thread_latest_version(&conn, &request.thread_id)
+                .map_err(|error| AppError::persistence(error.to_string()))?;
+            let actual_head_id = current_head.as_ref().map(|message| message.id.as_str());
+            let actual_source = current_head
+                .as_ref()
+                .and_then(|message| message.output.as_ref())
+                .map(|output| output.macro_code.as_str())
+                .unwrap_or_default();
+            if actual_head_id != expected_head_id.as_deref() || actual_source != expected_source {
+                return Err(AppError::conflict(
+                    "Manual code target changed before the version was appended.",
+                ));
+            }
+        }
     }
 
+    if let Err(error) = validate_design_output(&design) {
+        return fail_version(&request, design, parser_matched, error);
+    }
+
+    let previous_manifest = previous_manifest(request.base_message_id.as_deref(), state).await?;
+    let render_result = crate::services::render::render_model_with_previous_manifest(
+        &design.macro_code,
+        &design.initial_params,
+        Some(design.macro_dialect.clone()),
+        Some(design.geometry_backend),
+        design.post_processing.as_ref(),
+        previous_manifest.as_ref(),
+        state,
+        app,
+    )
+    .await;
+    let artifact_bundle = match render_result {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            return fail_version(&request, design, parser_matched, error);
+        }
+    };
+    let generated_manifest =
+        match crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                return fail_version(&request, design, parser_matched, error);
+            }
+        };
+    let model_manifest = crate::mcp::handlers::carry_forward_semantic_manifest(
+        previous_manifest.as_ref(),
+        generated_manifest,
+        &artifact_bundle,
+    );
+    let model_manifest = match crate::model_runtime::write_model_manifest(
+        app,
+        &artifact_bundle.model_id,
+        &model_manifest,
+    ) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return fail_version(&request, design, parser_matched, error);
+        }
+    };
+    let artifact_bundle =
+        match crate::model_runtime::read_artifact_bundle(app, &artifact_bundle.model_id) {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                return fail_version(&request, design, parser_matched, error);
+            }
+        };
+    if let Err(error) = validate_model_runtime_bundle(&model_manifest, &artifact_bundle) {
+        return fail_version(&request, design, parser_matched, error);
+    }
+
+    let snapshot_id = match build_render_snapshot(RenderSnapshotInput {
+        design: &design,
+        effective_params: &design.initial_params,
+        artifact_bundle: &artifact_bundle,
+        model_manifest: &model_manifest,
+    }) {
+        Ok(snapshot) => snapshot.snapshot_id,
+        Err(error) => {
+            return fail_version(&request, design, parser_matched, error);
+        }
+    };
+
+    design.response = if request.persist {
+        "Manual edit appended as new version."
+    } else {
+        "Code draft applied."
+    }
+    .to_string();
+
     let message_id = if request.persist {
-        let version = version_request(&request.thread_id, &design, MessageStatus::Working);
+        let version = version_request(
+            &request.thread_id,
+            request.base_message_id.clone(),
+            &design,
+            Some(artifact_bundle.clone()),
+            Some(model_manifest.clone()),
+            MessageStatus::Success,
+        );
         let id = match head_guard {
             Some((expected_head_id, expected_source)) => {
                 crate::services::design::add_manual_version_guarded(
@@ -728,170 +746,10 @@ async fn apply_manual_code_inner(
         None
     };
 
-    if let Err(error) = validate_design_output(&design) {
-        return fail_version(
-            &request,
-            message_id,
-            design,
-            parser_matched,
-            error,
-            state,
-            app,
-        )
-        .await;
-    }
-
-    let previous_manifest = previous_manifest(request.base_message_id.as_deref(), state).await?;
-    let render_result = crate::services::render::render_model_with_previous_manifest(
-        &design.macro_code,
-        &design.initial_params,
-        Some(design.macro_dialect.clone()),
-        Some(design.geometry_backend),
-        design.post_processing.as_ref(),
-        previous_manifest.as_ref(),
-        state,
-        app,
-    )
-    .await;
-    let artifact_bundle = match render_result {
-        Ok(bundle) => bundle,
-        Err(error) => {
-            return fail_version(
-                &request,
-                message_id,
-                design,
-                parser_matched,
-                error,
-                state,
-                app,
-            )
-            .await;
-        }
-    };
-    let generated_manifest =
-        match crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id) {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                return fail_version(
-                    &request,
-                    message_id,
-                    design,
-                    parser_matched,
-                    error,
-                    state,
-                    app,
-                )
-                .await;
-            }
-        };
-    let model_manifest = crate::mcp::handlers::carry_forward_semantic_manifest(
-        previous_manifest.as_ref(),
-        generated_manifest,
-        &artifact_bundle,
-    );
-    let model_manifest = match crate::model_runtime::write_model_manifest(
-        app,
-        &artifact_bundle.model_id,
-        &model_manifest,
-    ) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            return fail_version(
-                &request,
-                message_id,
-                design,
-                parser_matched,
-                error,
-                state,
-                app,
-            )
-            .await;
-        }
-    };
-    let artifact_bundle =
-        match crate::model_runtime::read_artifact_bundle(app, &artifact_bundle.model_id) {
-            Ok(bundle) => bundle,
-            Err(error) => {
-                return fail_version(
-                    &request,
-                    message_id,
-                    design,
-                    parser_matched,
-                    error,
-                    state,
-                    app,
-                )
-                .await;
-            }
-        };
-    if let Err(error) = validate_model_runtime_bundle(&model_manifest, &artifact_bundle) {
-        return fail_version(
-            &request,
-            message_id,
-            design,
-            parser_matched,
-            error,
-            state,
-            app,
-        )
-        .await;
-    }
-
-    let snapshot_id = match build_render_snapshot(RenderSnapshotInput {
-        design: &design,
-        effective_params: &design.initial_params,
-        artifact_bundle: &artifact_bundle,
-        model_manifest: &model_manifest,
-    }) {
-        Ok(snapshot) => snapshot.snapshot_id,
-        Err(error) => {
-            return fail_version(
-                &request,
-                message_id,
-                design,
-                parser_matched,
-                error,
-                state,
-                app,
-            )
-            .await;
-        }
-    };
-
     if let Err(error) = write_bound_source(&request, state, app).await {
-        return fail_version(
-            &request,
-            message_id,
-            design,
-            parser_matched,
-            error,
-            state,
-            app,
-        )
-        .await;
+        return fail_version(&request, design, parser_matched, error);
     }
 
-    design.response = if request.persist {
-        "Manual edit appended as new version."
-    } else {
-        "Code draft applied."
-    }
-    .to_string();
-    let content = design.response.clone();
-    if let Some(message_id) = message_id.as_deref() {
-        attach_outcome(
-            &request,
-            message_id,
-            &design,
-            MessageStatus::Success,
-            Some(&artifact_bundle),
-            Some(&model_manifest),
-            &content,
-            state,
-            app,
-        )
-        .await?;
-    }
     write_snapshot(
         &request,
         message_id.as_deref(),

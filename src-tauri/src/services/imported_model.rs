@@ -292,9 +292,13 @@ pub async fn persist_imported_runtime(
         materialize_imported_cad_source(Path::new(&binding.folder_path), Path::new(source_path))?;
     }
 
+    let parent_message_id = db::get_thread_head_version_id(&db, &thread_id)
+        .ok()
+        .flatten();
     let message_id = Uuid::new_v4().to_string();
     let message = Message {
         id: message_id.clone(),
+        parent_message_id,
         role: MessageRole::Assistant,
         content: design_output.response.clone(),
         status: MessageStatus::Success,

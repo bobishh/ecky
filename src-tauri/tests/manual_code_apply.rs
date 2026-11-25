@@ -60,6 +60,7 @@ async fn fixture() -> (PathBuf, TestResolver, AppState, String) {
     let base_message_id = add_manual_version(
         AddManualVersionRequest {
             thread_id: "thread-1".to_string(),
+            parent_message_id: None,
             title: "Cube".to_string(),
             version_name: "V1".to_string(),
             macro_code: "(model (part body (box 10 10 10)))".to_string(),
@@ -131,6 +132,10 @@ async fn changed_code_appends_then_renders_one_success_version_and_snapshot() {
         .expect("latest query")
         .expect("latest version");
     assert_eq!(Some(head.id.as_str()), response.message_id.as_deref());
+    assert_eq!(
+        head.parent_message_id.as_deref(),
+        Some(base_message_id.as_str())
+    );
     assert_eq!(head.status, MessageStatus::Success);
     assert_eq!(head.output.expect("design").macro_code, source);
     let binding = ecky_cad_lib::thread_source_binding::get_binding(&conn, "thread-1")
@@ -176,15 +181,20 @@ async fn changed_code_appends_then_renders_one_success_version_and_snapshot() {
 }
 
 #[tokio::test]
-async fn invalid_code_is_already_head_then_records_raw_render_error_without_second_version() {
+async fn invalid_code_returns_raw_render_error_without_committing_broken_version() {
     let (root, resolver, state, base_message_id) = fixture().await;
     let invalid_source = "(model (part body (box 12 13";
 
-    let response = apply_manual_code(request(base_message_id, invalid_source), &state, &resolver)
-        .await
-        .expect("domain failure response");
+    let response = apply_manual_code(
+        request(base_message_id.clone(), invalid_source),
+        &state,
+        &resolver,
+    )
+    .await
+    .expect("domain failure response");
 
     assert_eq!(response.status, MessageStatus::Error);
+    assert!(response.message_id.is_none());
     assert!(response.artifact_bundle.is_none());
     assert!(response.model_manifest.is_none());
     let raw_error = response.error.as_ref().expect("raw backend error");
@@ -193,14 +203,13 @@ async fn invalid_code_is_already_head_then_records_raw_render_error_without_seco
     let conn = state.db.lock().await;
     let head = ecky_cad_lib::db::get_thread_latest_version(&conn, "thread-1")
         .expect("latest query")
-        .expect("failed version");
-    assert_eq!(Some(head.id.as_str()), response.message_id.as_deref());
-    assert_eq!(head.status, MessageStatus::Error);
+        .expect("base version remains head");
+    assert_eq!(head.id, base_message_id);
+    assert_eq!(head.status, MessageStatus::Success);
     assert_eq!(
-        head.output.expect("attempted source").macro_code,
-        invalid_source
+        head.output.expect("base source").macro_code,
+        "(model (part body (box 10 10 10)))"
     );
-    assert_eq!(head.content, raw_error.to_string());
     let version_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM messages WHERE thread_id = 'thread-1' AND role = 'assistant'",
@@ -208,23 +217,12 @@ async fn invalid_code_is_already_head_then_records_raw_render_error_without_seco
             |row| row.get(0),
         )
         .expect("count versions");
-    assert_eq!(version_count, 2, "base + one failed immutable version");
+    assert_eq!(
+        version_count, 1,
+        "failed code apply must not commit broken version"
+    );
     drop(conn);
 
-    let snapshot = state
-        .last_snapshot
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("failed snapshot");
-    assert_eq!(
-        snapshot.message_id.as_deref(),
-        response.message_id.as_deref()
-    );
-    assert_eq!(
-        snapshot.design.expect("attempted snapshot").macro_code,
-        invalid_source
-    );
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         state.component_index_worker.wait_idle(),

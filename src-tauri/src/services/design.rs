@@ -87,6 +87,7 @@ pub fn auto_heal_legacy_params(
 
 pub struct AddManualVersionRequest {
     pub thread_id: String,
+    pub parent_message_id: Option<String>,
     pub title: String,
     pub version_name: String,
     pub macro_code: String,
@@ -210,6 +211,7 @@ async fn add_manual_version_with_guard(
 ) -> AppResult<String> {
     let AddManualVersionRequest {
         thread_id,
+        parent_message_id,
         title,
         version_name,
         macro_code,
@@ -381,9 +383,15 @@ async fn add_manual_version_with_guard(
         return Ok(existing.id);
     }
 
+    let resolved_parent_message_id = parent_message_id.or_else(|| {
+        db::get_thread_head_version_id(&db, &thread_id)
+            .ok()
+            .flatten()
+    });
     let msg_id = Uuid::new_v4().to_string();
     let msg = Message {
         id: msg_id.clone(),
+        parent_message_id: resolved_parent_message_id,
         role: MessageRole::Assistant,
         content,
         status,
@@ -594,6 +602,7 @@ params = {
     fn manual_request(thread_id: &str, title: &str, source: &str) -> AddManualVersionRequest {
         AddManualVersionRequest {
             thread_id: thread_id.to_string(),
+            parent_message_id: None,
             title: title.to_string(),
             version_name: "V1".to_string(),
             macro_code: source.to_string(),

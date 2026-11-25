@@ -1,8 +1,8 @@
 use crate::contracts::{
     normalize_design_output, upgraded_or_default_genie_traits, AgentDraft, AppError,
     ArtifactBundle, DeletedMessage, DeletedThreadSummary, DeletedThreadsPage, DesignOutput,
-    DesignParams, GenieTraits, Message, MessageRole, MessageStatus, ModelManifest, TargetLeaseInfo,
-    Thread, ThreadMessagesPage, ThreadReference, ThreadStatus, UiSpec,
+    GenieTraits, Message, MessageRole, MessageStatus, ModelManifest, TargetLeaseInfo, Thread,
+    ThreadMessagesPage, ThreadReference, ThreadStatus,
 };
 use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -1517,6 +1517,7 @@ fn init_db_with_payload_mode(
             attachment_images TEXT,
             version_input_digest TEXT,
             runtime_cache_key TEXT,
+            parent_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
             deleted_at INTEGER,
             trash_hidden_at INTEGER,
             FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
@@ -1740,6 +1741,14 @@ fn init_db_with_payload_mode(
         [],
     );
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN runtime_cache_key TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE messages ADD COLUMN parent_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL",
+        [],
+    );
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_parent_message_id ON messages(parent_message_id)",
+        [],
+    )?;
     match payload_mode {
         PayloadInitializationMode::RequireReady => require_binary_cad_payloads(&conn)?,
         PayloadInitializationMode::MigrateLegacy => migrate_legacy_cad_payloads(&conn)?,
@@ -2725,7 +2734,7 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
     conn.execute_batch("SAVEPOINT add_message_payload")?;
     let write_result = (|| {
         conn.execute(
-        "INSERT INTO messages (id, thread_id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, version_input_digest, runtime_cache_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT INTO messages (id, thread_id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, version_input_digest, runtime_cache_key, parent_message_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             msg.id,
             thread_id,
@@ -2744,6 +2753,7 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
             attachment_images_str,
             version_input_digest,
             runtime_cache_key,
+            msg.parent_message_id.as_deref(),
         ],
     )?;
         store_payload_sidecars_from_structs(
@@ -2947,7 +2957,7 @@ fn core_version_columns() -> &'static str {
      artifact_bundle,
      model_manifest,
      structural_verification, agent_origin, timestamp, NULL, visual_kind, NULL,
-     deleted_at, version_input_digest, runtime_cache_key"
+     deleted_at, version_input_digest, runtime_cache_key, parent_message_id"
 }
 
 fn get_thread_message_version_core_row(
@@ -3366,7 +3376,8 @@ pub fn get_thread_messages_page_filtered(
            ),
            image_data IS NOT NULL,
            CASE WHEN json_valid(attachment_images) THEN json_array_length(attachment_images) ELSE 0 END,
-           visual_kind
+           visual_kind,
+           parent_message_id
          FROM messages
          LEFT JOIN payload_projections
            ON payload_projections.owner_kind = 'message'
@@ -3418,6 +3429,7 @@ pub fn get_thread_messages_page_filtered(
         let agent_origin_raw: Option<String> = row.get(6)?;
         projected.push(ThreadTimelineRow {
             id: row.get(0)?,
+            parent_message_id: row.get(19)?,
             role: row.get(1)?,
             content: row.get(2)?,
             content_truncated: row.get(3)?,
@@ -3629,12 +3641,12 @@ fn load_thread_message_rows(
     include_deleted: bool,
 ) -> SqlResult<Vec<ThreadMessageRow>> {
     let sql = if include_deleted {
-        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at, version_input_digest, runtime_cache_key
+        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at, version_input_digest, runtime_cache_key, parent_message_id
          FROM messages
          WHERE thread_id = ?1 AND status != 'discarded'
          ORDER BY timestamp ASC, rowid ASC"
     } else {
-        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at, version_input_digest, runtime_cache_key
+        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at, version_input_digest, runtime_cache_key, parent_message_id
          FROM messages
          WHERE thread_id = ?1 AND status != 'discarded' AND deleted_at IS NULL
          ORDER BY timestamp ASC, rowid ASC"
@@ -3691,11 +3703,12 @@ fn load_thread_message_rows_with_clause_and_projection(
          NULL,
          deleted_at,
          version_input_digest,
-         runtime_cache_key"
+         runtime_cache_key,
+         parent_message_id"
     } else {
         "id, role, content, status, output, usage, artifact_bundle, model_manifest,
          structural_verification, agent_origin, timestamp, image_data, visual_kind,
-         attachment_images, deleted_at, version_input_digest, runtime_cache_key"
+         attachment_images, deleted_at, version_input_digest, runtime_cache_key, parent_message_id"
     };
     let mut sql = format!(
         "SELECT {}
@@ -3778,9 +3791,12 @@ fn load_thread_message_rows_from_stmt(
             }
         }
 
+        let parent_message_id: Option<String> = row.get(17)?;
+
         Ok(ThreadMessageRow {
             message: Message {
                 id: message_id,
+                parent_message_id,
                 role: row.get(1)?,
                 content: row.get(2)?,
                 status: row.get(3)?,
@@ -4359,60 +4375,6 @@ pub fn hide_deleted_message(conn: &Connection, id: &str) -> SqlResult<bool> {
         params![now, id],
     )?;
     Ok(changed > 0)
-}
-
-pub fn update_message_ui_spec(
-    conn: &Connection,
-    message_id: &str,
-    ui_spec: &UiSpec,
-) -> SqlResult<()> {
-    let output_str: Option<String> = conn.query_row(
-        "SELECT output FROM messages WHERE id = ?1",
-        [message_id],
-        |row| row.get(0),
-    )?;
-
-    if let Some(json_str) = output_str {
-        let parsed: DesignOutput = serde_json::from_str(&json_str)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        let mut output: DesignOutput = normalize_design_output(parsed);
-        output.ui_spec = ui_spec.clone();
-        let updated = serde_json::to_string(&output)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        let (version_input_digest, _) = version_runtime_binding(message_id, Some(&output), None)?;
-        conn.execute(
-            "UPDATE messages SET output = ?1, version_input_digest = ?2, runtime_cache_key = NULL WHERE id = ?3",
-            params![updated, version_input_digest, message_id],
-        )?;
-    }
-    Ok(())
-}
-
-pub fn update_message_parameters(
-    conn: &Connection,
-    message_id: &str,
-    parameters: &DesignParams,
-) -> SqlResult<()> {
-    let output_str: Option<String> = conn.query_row(
-        "SELECT output FROM messages WHERE id = ?1",
-        [message_id],
-        |row| row.get(0),
-    )?;
-
-    if let Some(json_str) = output_str {
-        let parsed: DesignOutput = serde_json::from_str(&json_str)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        let mut output: DesignOutput = normalize_design_output(parsed);
-        output.initial_params = parameters.clone();
-        let updated = serde_json::to_string(&output)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        let (version_input_digest, _) = version_runtime_binding(message_id, Some(&output), None)?;
-        conn.execute(
-            "UPDATE messages SET output = ?1, version_input_digest = ?2, runtime_cache_key = NULL WHERE id = ?3",
-            params![updated, version_input_digest, message_id],
-        )?;
-    }
-    Ok(())
 }
 
 pub fn update_message_model_manifest(
@@ -5492,7 +5454,7 @@ mod tests {
     use crate::contracts::{
         ComponentDependencyLock, ComponentDependencyLockComponent, ComponentDependencyLockEntry,
         ComponentPayloadKind, DesignParams, InteractionMode, MessageRole, MessageStatus,
-        ParamValue, UiField, UiSpec,
+        ParamValue, UiSpec,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -5529,10 +5491,16 @@ mod tests {
                 attachment_images TEXT,
                 version_input_digest TEXT,
                 runtime_cache_key TEXT,
+                parent_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
                 deleted_at INTEGER,
                 trash_hidden_at INTEGER,
                 FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
             )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_parent_message_id
+             ON messages(parent_message_id)",
             [],
         )?;
         conn.execute(
@@ -5735,6 +5703,7 @@ mod tests {
     fn legacy_error_row_remains_valid_without_version_payload() {
         let message = Message {
             id: "legacy-error".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "provider failed".to_string(),
             status: MessageStatus::Error,
@@ -5756,6 +5725,7 @@ mod tests {
     fn atomic_payload_adapter_accepts_conversation_and_complete_version() {
         let conversation = Message {
             id: "conversation".to_string(),
+            parent_message_id: None,
             role: MessageRole::User,
             content: "hello".to_string(),
             status: MessageStatus::Success,
@@ -5792,6 +5762,7 @@ mod tests {
     fn sample_version_message(id: &str, timestamp: u64, bundle: ArtifactBundle) -> Message {
         Message {
             id: id.to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: String::new(),
             status: MessageStatus::Success,
@@ -5902,6 +5873,7 @@ mod tests {
                 "upgrade-thread",
                 &Message {
                     id: id.to_string(),
+                    parent_message_id: None,
                     role: MessageRole::Assistant,
                     content: String::new(),
                     status: MessageStatus::Success,
@@ -5953,20 +5925,20 @@ mod tests {
     }
 
     #[test]
-    fn test_update_ui_spec_and_params() {
+    fn test_parent_message_id_persistence_and_delete_set_null() {
         let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         init_db_internal(&conn).unwrap();
 
-        let thread_id = "test-thread";
-        let msg_id = "test-msg";
+        let thread_id = "test-thread-parent";
         let now = 123456789;
-
         create_or_update_thread(&conn, thread_id, "Test Thread", now, None).unwrap();
 
-        let msg = Message {
-            id: msg_id.to_string(),
+        let root_msg = Message {
+            id: "msg-root".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
-            content: "Hello".to_string(),
+            content: "Root".to_string(),
             status: MessageStatus::Success,
             output: Some(sample_output()),
             usage: None,
@@ -5979,38 +5951,46 @@ mod tests {
             visual_kind: None,
             attachment_images: Vec::new(),
         };
+        add_message(&conn, thread_id, &root_msg).unwrap();
 
-        add_message(&conn, thread_id, &msg).unwrap();
-
-        // Update UI Spec
-        let new_spec = UiSpec {
-            fields: vec![UiField::Number {
-                key: "y".to_string(),
-                label: "Y".to_string(),
-                min: None,
-                max: None,
-                step: None,
-                min_from: None,
-                max_from: None,
-                frozen: false,
-            }],
+        let child_msg = Message {
+            id: "msg-child".to_string(),
+            parent_message_id: Some("msg-root".to_string()),
+            role: MessageRole::Assistant,
+            content: "Child".to_string(),
+            status: MessageStatus::Success,
+            output: Some(sample_output()),
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            structural_verification: None,
+            agent_origin: None,
+            timestamp: now + 1,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
         };
-        update_message_ui_spec(&conn, msg_id, &new_spec).unwrap();
+        add_message(&conn, thread_id, &child_msg).unwrap();
 
-        // Update Params
-        let new_params = DesignParams::from([
-            ("x".to_string(), ParamValue::Number(20.0)),
-            ("y".to_string(), ParamValue::Number(5.0)),
-        ]);
-        update_message_parameters(&conn, msg_id, &new_params).unwrap();
+        let loaded = get_thread_messages(&conn, thread_id).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].parent_message_id, None);
+        assert_eq!(loaded[1].parent_message_id.as_deref(), Some("msg-root"));
 
-        // Verify
-        let (output, tid) = get_message_output_and_thread(&conn, msg_id)
-            .unwrap()
+        let page = get_thread_messages_page(&conn, thread_id, None, 10, false).unwrap();
+        assert_eq!(page.messages.len(), 2);
+        assert_eq!(page.messages[0].parent_message_id, None);
+        assert_eq!(
+            page.messages[1].parent_message_id.as_deref(),
+            Some("msg-root")
+        );
+
+        conn.execute("DELETE FROM messages WHERE id = 'msg-root'", [])
             .unwrap();
-        assert_eq!(tid, thread_id);
-        assert_eq!(output.ui_spec, new_spec);
-        assert_eq!(output.initial_params, new_params);
+        let remaining = get_thread_messages(&conn, thread_id).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "msg-child");
+        assert_eq!(remaining[0].parent_message_id, None);
     }
 
     #[test]
@@ -6020,6 +6000,7 @@ mod tests {
         create_or_update_thread(&conn, "runtime-thread", "Runtime", 1, None).unwrap();
         let message = Message {
             id: "runtime-version".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Rendered".to_string(),
             status: MessageStatus::Success,
@@ -6065,6 +6046,7 @@ mod tests {
         create_or_update_thread(&conn, "legacy-thread", "Legacy", 1, None).unwrap();
         let message = Message {
             id: "legacy-version".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Rendered".to_string(),
             status: MessageStatus::Success,
@@ -6102,6 +6084,7 @@ mod tests {
 
         let user_msg = Message {
             id: "user-1".to_string(),
+            parent_message_id: None,
             role: MessageRole::User,
             content: "Make a box".to_string(),
             status: MessageStatus::Success,
@@ -6118,6 +6101,7 @@ mod tests {
         };
         let assistant_msg = Message {
             id: "assistant-1".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Box created".to_string(),
             status: MessageStatus::Success,
@@ -6184,6 +6168,7 @@ mod tests {
 
         let assistant_msg = Message {
             id: "assistant-manual".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Manual version".to_string(),
             status: MessageStatus::Success,
@@ -6219,6 +6204,7 @@ mod tests {
 
         let older_msg = Message {
             id: "assistant-older".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Older version".to_string(),
             status: MessageStatus::Success,
@@ -6235,6 +6221,7 @@ mod tests {
         };
         let newer_msg = Message {
             id: "assistant-newer".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Newer version".to_string(),
             status: MessageStatus::Success,
@@ -6281,6 +6268,7 @@ mod tests {
 
         let assistant_msg = Message {
             id: "assistant-trash".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Trash candidate".to_string(),
             status: MessageStatus::Success,
@@ -6327,6 +6315,7 @@ mod tests {
                 thread_id,
                 &Message {
                     id: id.to_string(),
+                    parent_message_id: None,
                     role: MessageRole::Assistant,
                     content: "Version".to_string(),
                     status: MessageStatus::Success,
@@ -6375,6 +6364,7 @@ mod tests {
                 id,
                 &Message {
                     id: format!("{id}-version"),
+                    parent_message_id: None,
                     role: MessageRole::Assistant,
                     content: title.to_string(),
                     status: MessageStatus::Success,
@@ -6431,6 +6421,7 @@ mod tests {
 
         let msg = Message {
             id: "user-images".to_string(),
+            parent_message_id: None,
             role: MessageRole::User,
             content: "See references".to_string(),
             status: MessageStatus::Success,
@@ -6480,6 +6471,7 @@ mod tests {
 
         let msg = Message {
             id: "assistant-preview".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Rendered".to_string(),
             status: MessageStatus::Success,
@@ -6521,6 +6513,7 @@ mod tests {
 
         let output_only = Message {
             id: "assistant-output-only".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Draft only".to_string(),
             status: MessageStatus::Success,
@@ -6537,6 +6530,7 @@ mod tests {
         };
         let rendered = Message {
             id: "assistant-rendered".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Rendered".to_string(),
             status: MessageStatus::Success,
@@ -6579,6 +6573,7 @@ mod tests {
             "older-thread",
             &Message {
                 id: "older-msg".to_string(),
+                parent_message_id: None,
                 role: MessageRole::User,
                 content: "older".to_string(),
                 status: MessageStatus::Success,
@@ -6601,6 +6596,7 @@ mod tests {
             "newer-thread",
             &Message {
                 id: "newer-msg".to_string(),
+                parent_message_id: None,
                 role: MessageRole::User,
                 content: "newer".to_string(),
                 status: MessageStatus::Success,
@@ -6638,6 +6634,7 @@ mod tests {
             "pending-thread",
             &Message {
                 id: "pending-assistant".to_string(),
+                parent_message_id: None,
                 role: MessageRole::Assistant,
                 content: "Generating...".to_string(),
                 status: MessageStatus::Pending,
@@ -6678,6 +6675,7 @@ mod tests {
             "thread-order",
             &Message {
                 id: "msg-a".to_string(),
+                parent_message_id: None,
                 role: MessageRole::User,
                 content: "first".to_string(),
                 status: MessageStatus::Success,
@@ -6700,6 +6698,7 @@ mod tests {
             "thread-order",
             &Message {
                 id: "msg-b".to_string(),
+                parent_message_id: None,
                 role: MessageRole::Assistant,
                 content: "second".to_string(),
                 status: MessageStatus::Success,
@@ -6735,6 +6734,7 @@ mod tests {
         create_or_update_thread(&conn, "thread-agent-errors", "Thread", 100, None).unwrap();
         let visible_user = Message {
             id: "user-visible".to_string(),
+            parent_message_id: None,
             role: MessageRole::User,
             content: "make roof pins".to_string(),
             status: MessageStatus::Success,
@@ -6751,6 +6751,7 @@ mod tests {
         };
         let agent_error = Message {
             id: "agent-error".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Expected a symbolic head for runtime list expression.".to_string(),
             status: MessageStatus::Error,
@@ -6775,6 +6776,7 @@ mod tests {
         };
         let generation_error = Message {
             id: "generation-error".to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Generation failed.".to_string(),
             status: MessageStatus::Error,
@@ -6876,6 +6878,7 @@ mod tests {
                 thread_id,
                 &Message {
                     id: format!("msg-{}", index),
+                    parent_message_id: None,
                     role: if index % 2 == 0 {
                         MessageRole::User
                     } else {
@@ -7592,6 +7595,7 @@ mod tests {
                 "context-thread",
                 &Message {
                     id: format!("message-{index}"),
+                    parent_message_id: None,
                     role: if index % 2 == 0 {
                         MessageRole::User
                     } else {

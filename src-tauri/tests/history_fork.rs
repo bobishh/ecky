@@ -67,6 +67,7 @@ async fn fixture() -> (PathBuf, TestResolver, AppState, String, String) {
     let older_id = add_manual_version(
         AddManualVersionRequest {
             thread_id: "source-thread".to_string(),
+            parent_message_id: None,
             title: "Bracket".to_string(),
             version_name: "V1".to_string(),
             macro_code: source.to_string(),
@@ -90,6 +91,7 @@ async fn fixture() -> (PathBuf, TestResolver, AppState, String, String) {
     let newer_id = add_manual_version(
         AddManualVersionRequest {
             thread_id: "source-thread".to_string(),
+            parent_message_id: None,
             title: "Bracket".to_string(),
             version_name: "V2".to_string(),
             macro_code: "(model (part body (box 40 50 60)))".to_string(),
@@ -488,6 +490,7 @@ fn runtime_only_message(id: &str) -> Message {
     };
     Message {
         id: id.to_string(),
+        parent_message_id: None,
         role: MessageRole::Assistant,
         content: "Runtime model".to_string(),
         status: MessageStatus::Success,

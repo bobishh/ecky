@@ -3048,6 +3048,7 @@ mod tests {
         let base_message_id = crate::services::design::add_manual_version(
             crate::services::design::AddManualVersionRequest {
                 thread_id: "profile-apply".into(),
+                parent_message_id: None,
                 title: "Ring".into(),
                 version_name: "V1".into(),
                 macro_code: base_source.into(),
@@ -3524,6 +3525,7 @@ mod tests {
             let base_message_id = crate::services::design::add_manual_version(
                 crate::services::design::AddManualVersionRequest {
                     thread_id: thread_id.clone(),
+                    parent_message_id: None,
                     title: "Asymmetric block".into(),
                     version_name: "V1".into(),
                     macro_code: base_source.into(),

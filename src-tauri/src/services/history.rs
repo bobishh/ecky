@@ -425,6 +425,7 @@ pub async fn fork_design(
         crate::services::design::add_manual_version(
             crate::services::design::AddManualVersionRequest {
                 thread_id: new_thread_id.clone(),
+                parent_message_id: Some(source.id.clone()),
                 title: title.clone(),
                 version_name,
                 macro_code: output.macro_code.clone(),
@@ -982,6 +983,7 @@ mod tests {
     fn sample_message(id: &str, timestamp: u64, version_name: &str) -> Message {
         Message {
             id: id.to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: format!("Version {}", version_name),
             status: MessageStatus::Success,
@@ -1070,6 +1072,7 @@ mod tests {
             "thread-queued",
             &Message {
                 id: "user-pending".to_string(),
+                parent_message_id: None,
                 role: MessageRole::User,
                 content: "Queued".to_string(),
                 status: MessageStatus::Pending,
@@ -1092,6 +1095,7 @@ mod tests {
             "thread-queued",
             &Message {
                 id: "user-working".to_string(),
+                parent_message_id: None,
                 role: MessageRole::User,
                 content: "Claimed".to_string(),
                 status: MessageStatus::Working,
@@ -1114,6 +1118,7 @@ mod tests {
             "thread-queued",
             &Message {
                 id: "assistant-pending".to_string(),
+                parent_message_id: None,
                 role: MessageRole::Assistant,
                 content: "Pending".to_string(),
                 status: MessageStatus::Pending,
@@ -1596,6 +1601,7 @@ mod tests {
             "thread-a",
             &Message {
                 id: "user-old".into(),
+                parent_message_id: None,
                 role: MessageRole::User,
                 content: "user".into(),
                 status: MessageStatus::Success,

@@ -222,6 +222,7 @@ mod tests {
     fn version(id: &str, timestamp: u64) -> Message {
         Message {
             id: id.to_string(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: id.to_string(),
             status: MessageStatus::Success,

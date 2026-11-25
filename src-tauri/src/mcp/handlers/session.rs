@@ -170,6 +170,7 @@ pub async fn handle_request_user_prompt(
             &target.thread_id,
             &crate::contracts::Message {
                 id: Uuid::new_v4().to_string(),
+                parent_message_id: None,
                 role: crate::contracts::MessageRole::Assistant,
                 content: prompt_content.clone(),
                 status: crate::contracts::MessageStatus::Success,
@@ -562,6 +563,7 @@ pub async fn handle_session_answer_save(
         &target.thread_id,
         &crate::contracts::Message {
             id: message_id.clone(),
+            parent_message_id: None,
             role: crate::contracts::MessageRole::Assistant,
             content: body.to_string(),
             status: crate::contracts::MessageStatus::Success,
@@ -643,6 +645,7 @@ pub async fn handle_session_reply_save(
         &target.thread_id,
         &crate::contracts::Message {
             id: message_id.clone(),
+            parent_message_id: None,
             role: crate::contracts::MessageRole::Assistant,
             content: body.to_string(),
             status: if req.fatal {
@@ -839,6 +842,7 @@ pub async fn handle_concept_preview_save(
         &target.thread_id,
         &crate::contracts::Message {
             id: message_id.clone(),
+            parent_message_id: None,
             role: crate::contracts::MessageRole::Assistant,
             content: caption.clone(),
             status: crate::contracts::MessageStatus::Success,

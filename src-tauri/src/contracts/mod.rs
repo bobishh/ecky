@@ -1149,6 +1149,8 @@ impl FromSql for MessageVisualKind {
 #[serde(rename_all = "camelCase")]
 pub struct Message {
     pub id: String,
+    #[serde(default, alias = "parent_message_id")]
+    pub parent_message_id: Option<String>,
     pub role: MessageRole,
     pub content: String,
     pub status: MessageStatus,
@@ -1324,6 +1326,8 @@ pub struct ThreadTimelineVersionSummary {
 #[serde(rename_all = "camelCase")]
 pub struct ThreadTimelineRow {
     pub id: String,
+    #[serde(default, alias = "parent_message_id")]
+    pub parent_message_id: Option<String>,
     pub role: MessageRole,
     pub content: String,
     pub content_truncated: bool,

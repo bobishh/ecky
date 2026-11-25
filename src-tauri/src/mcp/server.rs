@@ -8886,6 +8886,7 @@ mod tests {
                 "thread-1",
                 &Message {
                     id: "msg-1".to_string(),
+                    parent_message_id: None,
                     role: MessageRole::Assistant,
                     content: "Base version".to_string(),
                     status: MessageStatus::Success,
@@ -9057,6 +9058,7 @@ mod tests {
                 "thread-empty",
                 &Message {
                     id: "component-search-source".to_string(),
+                    parent_message_id: None,
                     role: MessageRole::Assistant,
                     content: "Saved model".to_string(),
                     status: MessageStatus::Success,
@@ -9242,6 +9244,7 @@ mod tests {
                 "thread-1",
                 &crate::contracts::Message {
                     id: "user-answer-first".into(),
+                    parent_message_id: None,
                     role: crate::contracts::MessageRole::User,
                     content: "Explain the rib, then change its height.".into(),
                     status: crate::contracts::MessageStatus::Working,
@@ -10644,6 +10647,7 @@ mod tests {
                 "thread-1",
                 &crate::contracts::Message {
                     id: "user-1".to_string(),
+                    parent_message_id: None,
                     role: crate::contracts::MessageRole::User,
                     content: "make a thing".to_string(),
                     status: crate::contracts::MessageStatus::Working,

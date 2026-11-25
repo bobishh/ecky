@@ -17,6 +17,8 @@ use crate::services::session::{build_saved_version_snapshot, write_last_snapshot
 #[serde(rename_all = "camelCase")]
 pub struct AddManualVersionInput {
     pub thread_id: String,
+    #[serde(default)]
+    pub parent_message_id: Option<String>,
     pub title: String,
     pub version_name: String,
     pub macro_code: String,
@@ -964,6 +966,7 @@ pub async fn add_manual_version(
     design_service::add_manual_version(
         design_service::AddManualVersionRequest {
             thread_id: input.thread_id,
+            parent_message_id: input.parent_message_id,
             title: input.title,
             version_name: input.version_name,
             macro_code: input.macro_code,
@@ -1014,30 +1017,7 @@ pub async fn apply_manual_parameters(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<crate::services::manual_parameters::ManualParameterApplyResponse> {
-    if !input.persist {
-        return crate::services::manual_parameters::apply_manual_parameters(input, &state, &app)
-            .await;
-    }
-    let (accepted, pending) =
-        crate::services::manual_parameters::begin_manual_parameter_apply(input, &state, &app)
-            .await?;
-    let background_state = state.inner().clone();
-    let background_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = crate::services::manual_parameters::finish_manual_parameter_apply(
-            pending,
-            &background_state,
-            &background_app,
-        )
-        .await
-        {
-            background_state.push_log(format!(
-                "[PARAMS] background version build failed: {}",
-                error
-            ));
-        }
-    });
-    Ok(accepted)
+    crate::services::manual_parameters::apply_manual_parameters(input, &state, &app).await
 }
 
 #[tauri::command]
@@ -1099,58 +1079,78 @@ pub async fn persist_control_defaults(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<PersistControlDefaultsResult> {
-    let (updated_output, updated_thread_id, artifact_bundle, model_manifest, resolved) = {
+    let (current_output, updated_thread_id, artifact_bundle, model_manifest) = {
         let db = state.db.lock().await;
-        let transaction = db
-            .unchecked_transaction()
-            .map_err(|error| AppError::persistence(error.to_string()))?;
-        let (mut current_output, current_thread_id) =
-            db::get_message_output_and_thread(&transaction, &input.message_id)
+        let (current_output, current_thread_id) =
+            db::get_message_output_and_thread(&db, &input.message_id)
                 .map_err(|error| AppError::persistence(error.to_string()))?
                 .ok_or_else(|| {
                     AppError::not_found("Message output not found for control defaults update.")
                 })?;
-        let resolved = resolve_control_defaults_mutation(
-            &current_output.macro_code,
-            &current_output.ui_spec,
-            &current_output.initial_params,
-            input.mutation,
-        )?;
-        current_output.ui_spec = resolved.ui_spec.clone();
-        current_output.initial_params = resolved.parameters.clone();
-        validate_design_output(&current_output)?;
-        db::update_message_ui_spec(&transaction, &input.message_id, &current_output.ui_spec)
-            .map_err(|error| AppError::persistence(error.to_string()))?;
-        db::update_message_parameters(
-            &transaction,
-            &input.message_id,
-            &current_output.initial_params,
-        )
-        .map_err(|error| AppError::persistence(error.to_string()))?;
         let (artifact_bundle, model_manifest, _) =
-            db::get_message_runtime_and_thread(&transaction, &input.message_id)
+            db::get_message_runtime_and_thread(&db, &input.message_id)
                 .map_err(|error| AppError::persistence(error.to_string()))?
                 .unwrap_or((None, None, current_thread_id.clone()));
-        transaction
-            .commit()
-            .map_err(|error| AppError::persistence(error.to_string()))?;
         (
             current_output,
             current_thread_id,
             artifact_bundle,
             model_manifest,
-            resolved,
         )
     };
-    state
-        .authoring_actor_registry
-        .invalidate_authoring_actors_for_thread(&updated_thread_id)
-        .await;
+
+    let resolved = resolve_control_defaults_mutation(
+        &current_output.macro_code,
+        &current_output.ui_spec,
+        &current_output.initial_params,
+        input.mutation,
+    )?;
+
+    let mut updated_output = current_output.clone();
+    updated_output.ui_spec = resolved.ui_spec.clone();
+    updated_output.initial_params = resolved.parameters.clone();
+    validate_design_output(&updated_output)?;
+
+    let target_message_id = if current_output.ui_spec == resolved.ui_spec
+        && current_output.initial_params == resolved.parameters
+    {
+        input.message_id.clone()
+    } else {
+        let new_message_id = design_service::add_manual_version(
+            design_service::AddManualVersionRequest {
+                thread_id: updated_thread_id.clone(),
+                parent_message_id: Some(input.message_id.clone()),
+                title: updated_output.title.clone(),
+                version_name: updated_output.version_name.clone(),
+                macro_code: updated_output.macro_code.clone(),
+                source_language: Some(updated_output.source_language),
+                geometry_backend: Some(updated_output.geometry_backend),
+                parameters: updated_output.initial_params.clone(),
+                ui_spec: updated_output.ui_spec.clone(),
+                post_processing: updated_output.post_processing.clone(),
+                artifact_bundle: artifact_bundle.clone(),
+                model_manifest: model_manifest.clone(),
+                response_text: Some("Control defaults saved as new version.".to_string()),
+                agent_origin: None,
+                status: Some(MessageStatus::Success),
+                error_message: None,
+            },
+            &state,
+            &app,
+        )
+        .await?;
+        state.emit_history_changed(
+            Some(updated_thread_id.clone()),
+            Some(new_message_id.clone()),
+            "controlDefaultsPersisted",
+        );
+        new_message_id
+    };
 
     let snapshot = build_saved_version_snapshot(
         Some(updated_output),
         updated_thread_id.clone(),
-        input.message_id.clone(),
+        target_message_id.clone(),
         artifact_bundle,
         model_manifest,
         None,
@@ -1166,7 +1166,7 @@ pub async fn persist_control_defaults(
         crate::services::history::get_workspace_projection(
             &db,
             &updated_thread_id,
-            Some(&input.message_id),
+            Some(&target_message_id),
             Some(20),
         )?
     };

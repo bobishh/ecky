@@ -344,11 +344,15 @@ pub async fn save_or_update_agent_version_for_session(
             } else {
                 response_text_created.clone()
             };
+            let parent_message_id = db::get_thread_head_version_id(&conn, &thread_id)
+                .ok()
+                .flatten();
             db::add_legacy_message(
                 &conn,
                 &thread_id,
                 &Message {
                     id: message_id.clone(),
+                    parent_message_id,
                     role: MessageRole::Assistant,
                     content: create_text,
                     status: MessageStatus::Success,
@@ -619,6 +623,7 @@ mod tests {
                 "thread-1",
                 &Message {
                     id: "base-1".to_string(),
+                    parent_message_id: None,
                     role: MessageRole::Assistant,
                     content: "Base version".to_string(),
                     status: MessageStatus::Success,
@@ -827,6 +832,7 @@ mod tests {
                 "thread-1",
                 &Message {
                     id: "base-1".to_string(),
+                    parent_message_id: None,
                     role: MessageRole::Assistant,
                     content: "Base version".to_string(),
                     status: MessageStatus::Success,
@@ -848,6 +854,7 @@ mod tests {
                 "thread-1",
                 &Message {
                     id: "agent-1".to_string(),
+                    parent_message_id: None,
                     role: MessageRole::Assistant,
                     content: "Claude created an MCP working version.".to_string(),
                     status: MessageStatus::Success,
@@ -966,6 +973,7 @@ mod tests {
                 "thread-1",
                 &Message {
                     id: "base-1".to_string(),
+                    parent_message_id: None,
                     role: MessageRole::Assistant,
                     content: "Base version".to_string(),
                     status: MessageStatus::Success,
@@ -987,6 +995,7 @@ mod tests {
                 "thread-1",
                 &Message {
                     id: "agent-1".to_string(),
+                    parent_message_id: None,
                     role: MessageRole::Assistant,
                     content: "Claude created an MCP working version.".to_string(),
                     status: MessageStatus::Success,

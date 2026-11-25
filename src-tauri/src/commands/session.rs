@@ -660,6 +660,7 @@ pub(crate) async fn queue_agent_prompt_impl(
             &thread_id,
             &crate::contracts::Message {
                 id: message_id.clone(),
+                parent_message_id: None,
                 role: crate::contracts::MessageRole::User,
                 content,
                 status: crate::contracts::MessageStatus::Pending,
@@ -1274,6 +1275,7 @@ async fn resolve_agent_prompt_with_classifier(
             &thread_id,
             &crate::contracts::Message {
                 id: message_id.clone(),
+                parent_message_id: None,
                 role: crate::contracts::MessageRole::User,
                 content: reply_content,
                 status: crate::contracts::MessageStatus::Working,
@@ -1376,6 +1378,7 @@ async fn auto_deliver_queued_prompt_batch_with_classifier(
                         thread_id,
                         &crate::contracts::Message {
                             id: uuid::Uuid::new_v4().to_string(),
+                            parent_message_id: None,
                             role: crate::contracts::MessageRole::Assistant,
                             content: error.message.clone(),
                             status: crate::contracts::MessageStatus::Error,

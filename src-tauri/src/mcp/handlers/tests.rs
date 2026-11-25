@@ -970,6 +970,7 @@ async fn seed_target_with_macro(
             "thread-1",
             &Message {
                 id: "msg-1".to_string(),
+                parent_message_id: None,
                 role: MessageRole::Assistant,
                 content: "Base version".to_string(),
                 status: MessageStatus::Success,
@@ -1934,6 +1935,7 @@ async fn thread_list_and_meta_surface_pending_inbox_anchor() {
             "thread-1",
             &Message {
                 id: "assistant-pending-1".to_string(),
+                parent_message_id: None,
                 role: MessageRole::Assistant,
                 content: "Working on it".to_string(),
                 status: MessageStatus::Pending,
@@ -1955,6 +1957,7 @@ async fn thread_list_and_meta_surface_pending_inbox_anchor() {
             "thread-1",
             &Message {
                 id: "user-pending-1".to_string(),
+                parent_message_id: None,
                 role: MessageRole::User,
                 content: "first".to_string(),
                 status: MessageStatus::Pending,
@@ -1976,6 +1979,7 @@ async fn thread_list_and_meta_surface_pending_inbox_anchor() {
             "thread-1",
             &Message {
                 id: "user-pending-2".to_string(),
+                parent_message_id: None,
                 role: MessageRole::User,
                 content: "second".to_string(),
                 status: MessageStatus::Pending,
@@ -2082,6 +2086,7 @@ async fn thread_messages_get_compacts_content_and_keeps_payload_flags() {
             "thread-1",
             &Message {
                 id: "msg-2".to_string(),
+                parent_message_id: None,
                 role: MessageRole::Assistant,
                 content: long_content.clone(),
                 status: MessageStatus::Success,
@@ -6197,6 +6202,7 @@ async fn artifact_manifest_get_rejects_bundle_manifest_mismatch() {
             "thread-1",
             &Message {
                 id: "msg-bad".to_string(),
+                parent_message_id: None,
                 role: MessageRole::Assistant,
                 content: "Bad version".to_string(),
                 status: MessageStatus::Success,
@@ -6278,6 +6284,7 @@ async fn artifact_feature_graph_get_reads_runtime_manifest_and_returns_backfille
             "thread-1",
             &Message {
                 id: "msg-feature-graph".to_string(),
+                parent_message_id: None,
                 role: MessageRole::Assistant,
                 content: "Feature graph version".to_string(),
                 status: MessageStatus::Success,
@@ -6394,6 +6401,7 @@ async fn artifact_feature_graph_get_preserves_feature_ports() {
             "thread-1",
             &Message {
                 id: "msg-feature-ports".to_string(),
+                parent_message_id: None,
                 role: MessageRole::Assistant,
                 content: "Feature ports version".to_string(),
                 status: MessageStatus::Success,
@@ -6634,6 +6642,7 @@ async fn artifact_feature_graph_get_reports_validation_when_runtime_manifest_mis
             "thread-1",
             &Message {
                 id: "msg-no-feature-manifest".to_string(),
+                parent_message_id: None,
                 role: MessageRole::Assistant,
                 content: "No manifest version".to_string(),
                 status: MessageStatus::Success,
@@ -8757,6 +8766,7 @@ async fn session_reply_save_persists_final_reply_to_thread_history_and_logs() {
             "thread-1",
             &Message {
                 id: "user-working-1".to_string(),
+                parent_message_id: None,
                 role: MessageRole::User,
                 content: "Please adjust the frame.".to_string(),
                 status: MessageStatus::Working,
@@ -8986,6 +8996,7 @@ async fn mark_as_read_drains_pending_thread_batch_and_sets_session_working() {
             "thread-1",
             &Message {
                 id: "user-pending-1".to_string(),
+                parent_message_id: None,
                 role: MessageRole::User,
                 content: "Please thin the lip.".to_string(),
                 status: MessageStatus::Pending,
@@ -9007,6 +9018,7 @@ async fn mark_as_read_drains_pending_thread_batch_and_sets_session_working() {
             "thread-1",
             &Message {
                 id: "user-pending-2".to_string(),
+                parent_message_id: None,
                 role: MessageRole::User,
                 content: "Also widen the top opening.".to_string(),
                 status: MessageStatus::Pending,
@@ -9437,6 +9449,7 @@ async fn project_folder_reexport_discards_bound_file_edit() {
             "thread-1",
             &Message {
                 id: "msg-2".to_string(),
+                parent_message_id: None,
                 role: MessageRole::Assistant,
                 content: "New head".to_string(),
                 status: MessageStatus::Success,

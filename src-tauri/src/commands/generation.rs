@@ -1223,9 +1223,13 @@ pub(crate) async fn init_generation_core(
             now,
         )?;
 
+        let parent_version_id = db::get_thread_head_version_id(&db, &thread_id)
+            .ok()
+            .flatten();
         let attachment_images = collect_attachment_images(attachments.as_ref());
         let user_msg = Message {
             id: user_message_id.clone(),
+            parent_message_id: None,
             role: MessageRole::User,
             content: prompt.clone(),
             status: MessageStatus::Success,
@@ -1270,6 +1274,7 @@ pub(crate) async fn init_generation_core(
 
         let assistant_msg = Message {
             id: assistant_message_id.clone(),
+            parent_message_id: parent_version_id,
             role: MessageRole::Assistant,
             content: "Generating...".to_string(),
             status: MessageStatus::Pending,
@@ -1425,6 +1430,7 @@ pub(crate) fn persist_generation_draft_in_db(
         .max(0) as u64;
     let message = Message {
         id: next_id.clone(),
+        parent_message_id: Some(message_id.clone()),
         role: MessageRole::Assistant,
         content: design.response.clone(),
         status: MessageStatus::Working,
@@ -2748,6 +2754,7 @@ mod agent_context_budget_outer_red {
         crate::db::create_or_update_thread(&conn, "thread-1", "Bracket", 1, None).unwrap();
         let pending = Message {
             id: "pending-1".into(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Generating...".into(),
             status: MessageStatus::Pending,
@@ -2803,6 +2810,7 @@ mod agent_context_budget_outer_red {
         let existing = legacy_design_output("(model (part body (box 1 1 1)))");
         let existing_message = Message {
             id: "version-a".into(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: existing.response.clone(),
             status: MessageStatus::Success,
@@ -2821,6 +2829,7 @@ mod agent_context_budget_outer_red {
 
         let pending = Message {
             id: "pending-1".into(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Generating...".into(),
             status: MessageStatus::Pending,

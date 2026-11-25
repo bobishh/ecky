@@ -429,6 +429,7 @@ mod tests {
             "thread-1",
             &Message {
                 id: "message-1".to_string(),
+                parent_message_id: None,
                 role: MessageRole::Assistant,
                 content: "Recovered".to_string(),
                 status: MessageStatus::Success,

@@ -13,6 +13,7 @@ fn version(id: &str, timestamp: u64, path: &Path) -> Message {
     .unwrap();
     Message {
         id: id.into(),
+        parent_message_id: None,
         role: MessageRole::Assistant,
         content: "rendered".into(),
         status: MessageStatus::Success,

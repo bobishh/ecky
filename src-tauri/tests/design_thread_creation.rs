@@ -166,7 +166,8 @@ async fn blank_thread_creation_atomically_binds_empty_source_without_version() {
 }
 
 #[tokio::test]
-async fn invalid_initial_macro_is_preserved_as_error_head_with_raw_detail() {
+async fn invalid_initial_macro_preserves_bound_source_and_returns_raw_detail_without_error_version()
+{
     let (root, resolver, state) = fixture();
     let invalid_source = "(model (part body (box 12 13";
 
@@ -182,28 +183,15 @@ async fn invalid_initial_macro_is_preserved_as_error_head_with_raw_detail() {
         &resolver,
     )
     .await
-    .expect("failed source remains a created version");
+    .expect("failed source keeps thread and bound draft");
 
-    let version = response
-        .workspace
-        .selected_version
-        .as_ref()
-        .expect("error version");
-    assert_eq!(version.status, MessageStatus::Error);
-    assert_eq!(
-        version
-            .output
-            .as_ref()
-            .expect("attempted source")
-            .macro_code,
-        invalid_source,
-    );
+    assert!(response.initial_version_id.is_none());
+    assert!(response.workspace.selected_version.is_none());
     let raw_error = response
         .initial_version_error
         .as_ref()
         .expect("raw initial error");
     assert!(!raw_error.message.trim().is_empty());
-    assert_eq!(version.content, raw_error.to_string());
     assert_eq!(response.source_document.source, invalid_source);
 
     std::fs::remove_dir_all(root).expect("cleanup");
@@ -253,11 +241,15 @@ async fn edited_source_fork_preserves_exact_base_authoring_context() {
     )
     .await
     .expect("base thread");
+    let image_path = root.join("base.png");
+    image::GrayImage::from_pixel(4, 4, image::Luma([128]))
+        .save(&image_path)
+        .expect("base displacement image");
     let mut parameters = DesignParams::new();
     parameters.insert("width".into(), ParamValue::Number(12.0));
     parameters.insert(
         "image".into(),
-        ParamValue::String("/missing/base.png".into()),
+        ParamValue::String(image_path.to_string_lossy().into_owned()),
     );
     let ui_spec = UiSpec {
         fields: vec![UiField::Number {

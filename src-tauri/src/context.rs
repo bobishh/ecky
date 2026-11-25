@@ -1022,6 +1022,7 @@ mod tests {
     fn mock_message(role: &str, content: &str, output: Option<DesignOutput>) -> Message {
         Message {
             id: "test-id".to_string(),
+            parent_message_id: None,
             role: role.parse().unwrap(),
             content: content.to_string(),
             status: MessageStatus::Success,

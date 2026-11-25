@@ -59,6 +59,7 @@ fn append_draft_version(
         thread_id,
         &Message {
             id: message_id.clone(),
+            parent_message_id: None,
             role: MessageRole::Assistant,
             content: "Draft update pending validation.".to_string(),
             status: MessageStatus::Working,

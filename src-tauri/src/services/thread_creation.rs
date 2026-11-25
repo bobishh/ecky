@@ -243,13 +243,13 @@ pub async fn create_design_thread(
     let mut binding =
         create_bound_thread(&thread_id, &title, projects_root.as_deref(), state, app).await?;
 
-    let initial = match source {
-        Some(source) => Some(
+    let initial = match source.as_deref() {
+        Some(source_text) => Some(
             apply_manual_code(
                 ManualCodeApplyRequest {
                     thread_id: thread_id.clone(),
                     base_message_id: None,
-                    source,
+                    source: source_text.to_string(),
                     persist: true,
                     title: Some(title.clone()),
                     version_name: Some("V1".to_string()),
@@ -267,7 +267,7 @@ pub async fn create_design_thread(
         None => None,
     };
 
-    if initial.is_some() {
+    if let Some(initial_response) = initial.as_ref() {
         let conn = state.db.lock().await;
         binding = crate::thread_source_binding::get_binding(&conn, &thread_id)
             .map_err(|error| AppError::persistence(error.to_string()))?
@@ -277,6 +277,15 @@ pub async fn create_design_thread(
                     thread_id
                 ))
             })?;
+        drop(conn);
+        if initial_response.message_id.is_none() {
+            if let Some(source_text) = source.as_deref() {
+                crate::project_mirror::write_bound_source(
+                    Path::new(&binding.source_path),
+                    source_text,
+                )?;
+            }
+        }
     }
     let source_document = source_document(&binding)?;
     let preferred_message_id = initial

@@ -161,6 +161,7 @@ async fn fixture(extra_part: &str) -> Fixture {
     let base_message_id = add_manual_version(
         AddManualVersionRequest {
             thread_id: "thread-1".to_string(),
+            parent_message_id: None,
             title: "External cube".to_string(),
             version_name: "V1".to_string(),
             macro_code: source.clone(),
@@ -371,7 +372,7 @@ async fn stale_source_digest_rejects_before_version_append() {
 }
 
 #[tokio::test]
-async fn render_failure_returns_raw_error_and_one_failed_immutable_version() {
+async fn render_failure_returns_raw_error_without_committing_broken_version() {
     let fixture = fixture("(part broken (sphere -1))").await;
     let result = apply_external_shape_edit(
         input(
@@ -390,6 +391,7 @@ async fn render_failure_returns_raw_error_and_one_failed_immutable_version() {
     .await
     .expect("domain failure result");
     assert_eq!(result.version.status, MessageStatus::Error);
+    assert!(result.version.message_id.is_none());
     assert!(!result
         .version
         .error
@@ -401,9 +403,9 @@ async fn render_failure_returns_raw_error_and_one_failed_immutable_version() {
     let conn = fixture.state.db.lock().await;
     let head = ecky_cad_lib::db::get_thread_latest_version(&conn, "thread-1")
         .expect("latest")
-        .expect("failed version");
-    assert_eq!(head.status, MessageStatus::Error);
-    assert_eq!(Some(head.id.as_str()), result.version.message_id.as_deref());
+        .expect("base version remains head");
+    assert_eq!(head.status, MessageStatus::Success);
+    assert_eq!(head.id, fixture.base_message_id);
     drop(conn);
     tokio::time::timeout(
         std::time::Duration::from_secs(10),

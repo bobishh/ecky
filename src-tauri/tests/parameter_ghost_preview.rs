@@ -69,6 +69,7 @@ async fn draft_renders_only_affected_geometry_at_the_saved_placement_and_apply_e
     let base = add_manual_version(
         AddManualVersionRequest {
             thread_id: "project".into(),
+            parent_message_id: None,
             title: "Assembly".into(),
             version_name: "Base".into(),
             macro_code: source.into(),

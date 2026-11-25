@@ -274,6 +274,7 @@ async function applyStoredTargetParameters(input: {
     if (input.persist && result.messageId) {
       rememberCommittedVersionMessage(input.threadId, result.designOutput.title, {
         id: result.messageId,
+        parentMessageId: result.baseMessageId ?? null,
         role: 'assistant',
         content: result.designOutput.response,
         status: result.status,

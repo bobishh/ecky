@@ -76,6 +76,7 @@ function sampleMessage(
 ): Message {
   return {
     id,
+    parentMessageId: null,
     role: 'assistant',
     content: 'Version',
     status: 'success',

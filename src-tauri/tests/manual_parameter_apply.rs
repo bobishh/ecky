@@ -67,6 +67,7 @@ async fn fixture() -> (PathBuf, TestResolver, AppState, String) {
     let base_message_id = add_manual_version(
         AddManualVersionRequest {
             thread_id: "thread-1".to_string(),
+            parent_message_id: None,
             title: "Parametric cube".to_string(),
             version_name: "V1".to_string(),
             macro_code: source().to_string(),
@@ -127,6 +128,10 @@ async fn persisted_parameter_apply_renders_manifest_and_appends_success_version_
         .expect("latest query")
         .expect("latest version");
     assert_eq!(Some(head.id.as_str()), response.message_id.as_deref());
+    assert_eq!(
+        head.parent_message_id.as_deref(),
+        Some(base_message_id.as_str())
+    );
     assert_eq!(head.status, MessageStatus::Success);
     assert_eq!(head.output.expect("design").initial_params, parameters);
     assert_eq!(
@@ -148,7 +153,7 @@ async fn persisted_parameter_apply_renders_manifest_and_appends_success_version_
 }
 
 #[tokio::test]
-async fn failed_persisted_parameter_apply_appends_error_version_with_raw_backend_error() {
+async fn failed_persisted_parameter_apply_returns_raw_error_without_committing_broken_version() {
     let (root, resolver, state, base_message_id) = fixture().await;
     let invalid = DesignParams::from([(
         "size".to_string(),
@@ -158,7 +163,7 @@ async fn failed_persisted_parameter_apply_appends_error_version_with_raw_backend
     let response = apply_manual_parameters(
         ManualParameterApplyRequest {
             thread_id: "thread-1".to_string(),
-            target_message_id: base_message_id,
+            target_message_id: base_message_id.clone(),
             parameters: invalid.clone(),
             persist: true,
             title: None,
@@ -168,9 +173,10 @@ async fn failed_persisted_parameter_apply_appends_error_version_with_raw_backend
         &resolver,
     )
     .await
-    .expect("domain failure is returned with durable version identity");
+    .expect("domain failure is returned without committing broken version");
 
     assert_eq!(response.status, MessageStatus::Error);
+    assert!(response.message_id.is_none());
     assert!(response.artifact_bundle.is_none());
     assert!(response.model_manifest.is_none());
     let error = response.error.expect("raw backend error");
@@ -180,11 +186,20 @@ async fn failed_persisted_parameter_apply_appends_error_version_with_raw_backend
     let conn = state.db.lock().await;
     let head = ecky_cad_lib::db::get_thread_latest_version(&conn, "thread-1")
         .expect("latest query")
-        .expect("failed version");
-    assert_eq!(Some(head.id.as_str()), response.message_id.as_deref());
-    assert_eq!(head.status, MessageStatus::Error);
-    assert_eq!(head.content, error.to_string());
-    assert_eq!(head.output.expect("failed design").initial_params, invalid);
+        .expect("base version remains head");
+    assert_eq!(head.id, base_message_id);
+    assert_eq!(head.status, MessageStatus::Success);
+    let version_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE thread_id = 'thread-1' AND role = 'assistant'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count versions");
+    assert_eq!(
+        version_count, 1,
+        "failed parameter apply must not commit broken version"
+    );
     drop(conn);
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
