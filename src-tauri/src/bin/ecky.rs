@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use ecky_cad_lib::contracts::{ArtifactBundle, DesignParams, GeometryBackend, ParamValue};
 use ecky_cad_lib::models::PathResolver;
 
-const USAGE: &str = "Usage:\n  ecky check <input>\n  ecky lower --backend freecad|build123d <input> [--out <path>]\n  ecky render --backend <freecad|native> <input> (--stl <path>|--bundle-dir <dir>) [--step <path>] [--param key=value]... [--params file.json] [--json]\n\nCommands:\n  cairn   Discover, package and install reusable components.\n  check   Validate Ecky source.\n  lower   Lower Ecky source without rendering.\n  render  Render Ecky source into requested artifacts.\n";
+const USAGE: &str = "Usage:\n  ecky check <input>\n  ecky lower --backend freecad <input> [--out <path>]\n  ecky render --backend <freecad|native> <input> (--stl <path>|--bundle-dir <dir>) [--step <path>] [--param key=value]... [--params file.json] [--json]\n\nCommands:\n  cairn   Discover, package and install reusable components.\n  check   Validate Ecky source.\n  lower   Lower Ecky source without rendering.\n  render  Render Ecky source into requested artifacts.\n";
 
 #[derive(Debug)]
 enum CliError {
@@ -152,7 +152,7 @@ fn lower(args: &[String]) -> Result<(), CliError> {
 
     let backend = backend.ok_or_else(|| usage_error("lower requires --backend"))?;
     let input = input.ok_or_else(|| usage_error("lower requires an input path"))?;
-    if !matches!(backend, "freecad" | "build123d") {
+    if backend != "freecad" {
         return Err(usage_error(format!("unsupported backend: {backend}")));
     }
     let source = read_source(input, CliError::Lower)?;
@@ -168,16 +168,8 @@ fn lower(args: &[String]) -> Result<(), CliError> {
     )
     .map_err(|error| CliError::Lower(error.to_string()))?;
     let source = resolved.compiler_source;
-    let lowered = match backend {
-        "freecad" => ecky_cad_lib::ecky_ir::lower_to_freecad(&source),
-        "build123d" => ecky_cad_lib::ecky_ir::lower_to_freecad(&source).map(|lowered| {
-            let mut output = String::from("from build123d import *\n");
-            output.push_str(&lowered);
-            output
-        }),
-        _ => unreachable!("validated backend"),
-    }
-    .map_err(|error| CliError::Lower(error.to_string()))?;
+    let lowered = ecky_cad_lib::ecky_ir::lower_to_freecad(&source)
+        .map_err(|error| CliError::Lower(error.to_string()))?;
 
     if let Some(path) = output {
         if let Some(parent) = path
@@ -331,7 +323,7 @@ fn parse_render(args: &[String]) -> Result<RenderArgs, CliError> {
     let backend_name = backend.ok_or_else(|| usage_error("render requires --backend"))?;
     let backend = match backend_name.as_str() {
         "freecad" => GeometryBackend::Freecad,
-        "native" | "direct-occt" | "build123d" => GeometryBackend::EckyRust,
+        "native" | "direct-occt" => GeometryBackend::EckyRust,
         _ => return Err(usage_error(format!("unsupported backend: {backend_name}"))),
     };
     if stl.is_none() && bundle_dir.is_none() {

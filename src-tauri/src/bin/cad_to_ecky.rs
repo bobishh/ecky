@@ -17,13 +17,13 @@ use ecky_cad_lib::llm::{extract_openai_message_content, send_openai_request};
 use ecky_cad_lib::steel_data::parse_steel_data;
 
 fn usage() -> &'static str {
-    "Usage: cad_to_ecky <input> [--backend mesh|freecad|build123d] [--model M] \
+    "Usage: cad_to_ecky <input> [--backend mesh|freecad] [--model M] \
 [--base-url URL] [--api-key K] [--config config.edn] [--out out.ecky] [--dump-prompt]"
 }
 
 fn parse_backend(s: &str) -> Result<GeometryBackend, String> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
-        .map_err(|_| format!("unknown backend '{s}' (use mesh|freecad|build123d)"))
+        .map_err(|_| format!("unknown backend '{s}' (use mesh|freecad)"))
 }
 
 /// Route source formats through text-only adapters. No adapter emits Ecky.

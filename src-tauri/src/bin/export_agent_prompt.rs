@@ -17,7 +17,6 @@ fn main() {
 
     for (name, backend) in [
         ("ecky-rust", GeometryBackend::EckyRust),
-        ("build123d", GeometryBackend::Build123d),
         ("freecad", GeometryBackend::Freecad),
     ] {
         write_prompt(
@@ -45,11 +44,7 @@ fn write_book_operation_index() {
     let source = fs::read_to_string(&book_path).expect("read canonical Ecky corpus");
     let mut surface_names = BTreeSet::new();
 
-    for backend in [
-        GeometryBackend::EckyRust,
-        GeometryBackend::Build123d,
-        GeometryBackend::Freecad,
-    ] {
+    for backend in [GeometryBackend::EckyRust, GeometryBackend::Freecad] {
         for entry in supported_surface_reference(backend).entries {
             surface_names.insert(entry.name);
         }
@@ -83,7 +78,6 @@ fn render_surface_reference() -> String {
     let mut entries = BTreeMap::new();
     for (backend, label) in [
         (GeometryBackend::Freecad, "freecad"),
-        (GeometryBackend::Build123d, "legacy-build123d"),
         (GeometryBackend::EckyRust, "mesh/native"),
     ] {
         for entry in supported_surface_reference(backend).entries {

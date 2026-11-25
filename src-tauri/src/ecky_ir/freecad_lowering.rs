@@ -3606,7 +3606,7 @@ impl FreecadLowerer {
             }
             "draft" => {
                 return Err(validation(
-                    "`draft` is not supported on the FreeCAD backend (no Part draft API); use the native or build123d backend.",
+                    "`draft` is not supported on the FreeCAD backend (no Part draft API); use the native backend.",
                 ));
             }
             "fillet" | "chamfer" => {

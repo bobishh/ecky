@@ -2523,7 +2523,7 @@ pub(super) fn eval_geometry_with_bindings(
             Ok(Geometry::Mesh(add_mesh_bridge_overlap(&mesh)))
         }
         "text" | "svg" => Err(unsupported(format!(
-            "Node `{}` is not supported by the EckyRust backend. Switch to FreeCAD or build123d.",
+            "Node `{}` is not supported by the EckyRust backend. Switch to FreeCAD.",
             node
         ))),
         "lithophane" => Err(unsupported(

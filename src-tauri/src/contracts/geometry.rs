@@ -32,9 +32,9 @@ pub enum SourceLanguage {
 pub enum GeometryBackend {
     #[serde(rename = "freecad")]
     Freecad,
-    #[default]
     #[serde(rename = "build123d")]
     Build123d,
+    #[default]
     #[serde(
         rename = "mesh",
         alias = "native",
