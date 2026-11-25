@@ -48,14 +48,39 @@ pub async fn preview_inline_component_import(
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<InlineComponentImportPreview> {
-    let context = checked_context(&input, state).await?;
-    let imported = copy_inline_library_component_at(app, input.component, &context.source, None)?;
+    let thread_id = require_id(&input.thread_id, "Component import thread id")?;
+    let base_message_id = require_id(&input.base_message_id, "Component import base message id")?;
+    let (base_design, existing_source) = {
+        let conn = state.db.lock().await;
+        let base_message = crate::db::get_thread_latest_version(&conn, thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+            .filter(|message| message.id == base_message_id)
+            .ok_or_else(|| {
+                AppError::conflict(
+                    "The target version changed before component import. Open the latest model version and try again.",
+                )
+            })?;
+        let base_design = base_message.output.ok_or_else(|| {
+            AppError::validation(format!(
+                "Component import base message '{}' has no design output.",
+                base_message_id
+            ))
+        })?;
+        let source = base_design.macro_code.clone();
+        (base_design, source)
+    };
+    if base_design.source_language != SourceLanguage::EckyIrV0 {
+        return Err(AppError::validation(
+            "Component placement requires Ecky source.",
+        ));
+    }
+    let imported = copy_inline_library_component_at(app, input.component, &existing_source, None)?;
     let source = imported.standalone_source()?;
     let artifact = crate::services::render::render_model_with_previous_manifest_silent(
         &source,
         &DesignParams::new(),
         Some(MacroDialect::EckyIrV0),
-        Some(context.base_design.geometry_backend),
+        Some(base_design.geometry_backend),
         None,
         None,
         state,
