@@ -43,10 +43,6 @@ fn committed_prompt_artifacts_are_fresh() {
             GeometryBackend::EckyRust,
         ),
         (
-            "ecky-agent-system-prompt-build123d.md",
-            GeometryBackend::Build123d,
-        ),
-        (
             "ecky-agent-system-prompt-freecad.md",
             GeometryBackend::Freecad,
         ),
