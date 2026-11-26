@@ -105,7 +105,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{Listener, Manager};
+use tauri::{Emitter, Listener, Manager};
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -732,9 +732,13 @@ pub fn run() {
             let last_snapshot = crate::services::session::read_last_snapshot(app.handle(), &conn);
 
             let mcp_port = config.mcp.port;
-            let state =
+            let mut state =
                 AppState::new_with_read_connection(config, last_snapshot, conn, Some(read_conn));
             *state.config_persistence_status.lock().unwrap() = config_persistence_status.clone();
+            let progress_app = app.handle().clone();
+            state.render_progress_sink = Some(Arc::new(move |event| {
+                let _ = progress_app.emit("native-render-progress", event);
+            }));
             state.set_app_handle(app.handle().clone());
             app.manage(state.clone());
             if let Err(error) = crate::services::library_panel::start_component_library_indexing(

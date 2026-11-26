@@ -474,6 +474,7 @@ pub struct AppState {
     pub db_read: Option<Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
     pub component_index_worker: Arc<crate::component_library_index::ComponentIndexWorker>,
     pub render_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) render_progress_sink: Option<crate::services::render_progress::RenderProgressSink>,
     geometry_render_active_count: Arc<AtomicUsize>,
     /// Active project-folder renders keyed by project slug. Snapshot source
     /// for clients attaching after the watcher's one-shot detected event.
@@ -739,6 +740,7 @@ impl AppState {
                 crate::component_library_index::ComponentIndexWorker::default(),
             ),
             render_lock: Arc::new(tokio::sync::Mutex::new(())),
+            render_progress_sink: None,
             geometry_render_active_count: Arc::new(AtomicUsize::new(0)),
             project_folder_render_activity: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             mcp_status: Arc::new(Mutex::new(McpServerStatus {
@@ -1305,13 +1307,6 @@ impl AppState {
                 Err(error) => self.push_log(format!("[IPC] {}", error.message)),
             }
         }
-    }
-
-    pub(crate) fn render_progress_app_handle(&self) -> Option<tauri::AppHandle> {
-        self.app_handle
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
     }
 
     pub fn emit_history_updated(&self) {

@@ -2,7 +2,6 @@ use std::future::Future;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::Emitter;
 
 use crate::contracts::AppResult;
 use crate::ecky_cad_host::direct_occt_runner::{NativeRenderProgress, NativeRenderReporter};
@@ -17,10 +16,29 @@ struct RenderProgressTarget {
     message_id: Option<String>,
 }
 
+#[derive(Clone, Serialize)]
+pub(crate) struct RenderProgressEvent<'a> {
+    #[serde(flatten)]
+    target: &'a RenderProgressTarget,
+    #[serde(flatten)]
+    progress: NativeRenderProgress,
+}
+
+pub(crate) type RenderProgressSink = Arc<dyn Fn(RenderProgressEvent<'_>) + Send + Sync>;
+
 #[derive(Clone)]
 struct RenderProgressScope {
-    app: tauri::AppHandle,
+    sink: RenderProgressSink,
     target: RenderProgressTarget,
+}
+
+impl RenderProgressScope {
+    fn emit(&self, progress: NativeRenderProgress) {
+        (self.sink)(RenderProgressEvent {
+            target: &self.target,
+            progress,
+        });
+    }
 }
 
 tokio::task_local! {
@@ -34,11 +52,11 @@ pub(crate) async fn observe<T>(
     message_id: Option<&str>,
     render: impl Future<Output = AppResult<T>>,
 ) -> AppResult<T> {
-    let Some(app) = state.render_progress_app_handle() else {
+    let Some(sink) = state.render_progress_sink.clone() else {
         return render.await;
     };
     let scope = RenderProgressScope {
-        app,
+        sink,
         target: RenderProgressTarget {
             render_id: uuid::Uuid::new_v4().to_string(),
             thread_id: thread_id.to_owned(),
@@ -50,9 +68,7 @@ pub(crate) async fn observe<T>(
         .scope(scope, async {
             let result = render.await;
             if result.is_err() {
-                RENDER_PROGRESS.with(|scope| {
-                    emit(scope, NativeRenderProgress::Failed);
-                });
+                RENDER_PROGRESS.with(|scope| scope.emit(NativeRenderProgress::Failed));
             }
             result
         })
@@ -63,25 +79,7 @@ pub(crate) fn reporter() -> Option<NativeRenderReporter> {
     RENDER_PROGRESS
         .try_with(|scope| {
             let scope = scope.clone();
-            Arc::new(move |progress| emit(&scope, progress)) as NativeRenderReporter
+            Arc::new(move |progress| scope.emit(progress)) as NativeRenderReporter
         })
         .ok()
-}
-
-fn emit(scope: &RenderProgressScope, progress: NativeRenderProgress) {
-    #[derive(Clone, Serialize)]
-    struct Event<'a> {
-        #[serde(flatten)]
-        target: &'a RenderProgressTarget,
-        #[serde(flatten)]
-        progress: NativeRenderProgress,
-    }
-
-    let _ = scope.app.emit(
-        "native-render-progress",
-        Event {
-            target: &scope.target,
-            progress,
-        },
-    );
 }
