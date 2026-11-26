@@ -1,5 +1,15 @@
 import { expect, test } from '@playwright/test';
 
+const renderFailure = 'profile hole does not lie inside any outer loop';
+const failedSource = '(model (part broken (box 10 4 20)))';
+const runnerOutput = `Direct OCCT required for this Ecky Native model.
+runner: /mock/direct-occt-runner
+exit: 3
+stdout:
+stderr:
+${JSON.stringify({ class: 'validation_error', message: renderFailure })}
+op=export:direct-occt`;
+
 function installVersionTimelineMocks(options?: { includeFailedHead?: boolean; includePendingHead?: boolean; includeCurrentAfterFailed?: boolean; compactSelectedVersion?: boolean }) {
   const thread = {
     id: 'thread-verify',
@@ -177,15 +187,15 @@ function installVersionTimelineMocks(options?: { includeFailedHead?: boolean; in
     thread.messages.push({
       id: 'msg-failed-head',
       role: 'assistant',
-      content: 'line 17: unexpected closing parenthesis',
+      content: runnerOutput,
       status: 'error',
       timestamp: Date.UTC(2026, 5, 13) / 1000 + 1,
       output: {
         title: 'Broken bracket draft',
         versionName: 'V2',
-        response: 'line 17: unexpected closing parenthesis',
+        response: runnerOutput,
         interactionMode: 'tune',
-        macroCode: '(model (part broken (box 10 4 20))))',
+        macroCode: failedSource,
         sourceLanguage: 'ecky',
         geometryBackend: 'build123d',
         uiSpec: { fields: [] },
@@ -269,6 +279,12 @@ endsolid mock
       const mockWindow = window as any;
       localStorage.clear();
       mockWindow.__versionProjectionCalls = [];
+      const listeners = new Map<string, number[]>();
+      mockWindow.__emitVersionEvent = (event: string, payload: unknown) => {
+        for (const callbackId of listeners.get(event) ?? []) {
+          mockWindow[`_${callbackId}`]({ event, payload });
+        }
+      };
 
       const config = {
         engines: [{ id: 'mock', name: 'Mock', provider: 'openai', apiKey: '', model: 'mock', baseUrl: '', enabled: true }],
@@ -296,6 +312,12 @@ endsolid mock
       };
       window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
         mockWindow.__versionProjectionCalls.push({ cmd, args: structuredClone(args ?? {}) });
+        if (cmd === 'plugin:event|listen') {
+          const event = String(args?.event);
+          const callback = Number(args?.handler);
+          listeners.set(event, [...(listeners.get(event) ?? []), callback]);
+          return callback;
+        }
         if (cmd === 'get_config') return structuredClone(config);
         if (cmd === 'save_config') return null;
         if (cmd === 'get_runtime_capabilities') {
@@ -404,13 +426,18 @@ endsolid mock
             nextBefore: null,
           };
         }
+        if (cmd === 'get_version_source_window') {
+          const message = thread.messages.find((candidate) => candidate.id === args?.messageId);
+          const content = (message?.output as { macroCode?: string } | undefined)?.macroCode ?? '';
+          return { content, digest: 'sha256:version-source', nextStartByte: null };
+        }
         if (cmd === 'get_project_source') {
           const latestOutput = thread.messages.at(-1)?.output as { macroCode?: string } | undefined;
           return {
             threadId: thread.id,
             folder: '/mock/projects/thread-verify',
             file: '/mock/projects/thread-verify/model.ecky',
-            source: latestOutput?.macroCode ?? '',
+            source: thread.messages.some((message) => message.id === 'msg-failed-head') ? '' : latestOutput?.macroCode ?? '',
             sourceDigest: 'sha256:verify-source',
           };
         }
@@ -495,7 +522,8 @@ test('Given compact version metadata When opening a version Then core loads firs
   expect(calls.some((call) => call.cmd === 'get_dense_topology_page')).toBe(true);
 });
 
-test('Given a failed artifact-less draft is newest When opening its thread Then it remains head and visible version history', async ({ page }) => {
+test('Given a failed version and empty bound file When opening the project Then Ecky links to the failure and Code shows saved source', async ({ page }) => {
+  await page.clock.install();
   await installVersionTimelineMocks({ includeFailedHead: true })({ page });
 
   await page.goto('/');
@@ -506,15 +534,27 @@ test('Given a failed artifact-less draft is newest When opening its thread Then 
 
   await expect(page.locator('.version-counter')).toHaveText(/V 2 OF 2/);
   await expect(page.locator('.version-title')).toHaveText('Broken bracket draft');
-  await expect(page.locator('.trail-active-version')).toContainText('line 17: unexpected closing parenthesis');
+  await expect(page.locator('.trail-active-version')).toContainText(renderFailure);
   await expect(page.locator('.trail-active-version .trail-status')).toHaveText('ERROR');
   await expect(page.locator('.version-selected-status')).toHaveText('BROKEN VERSION');
   expect(await page.locator('.trail-active-version .trail-status').evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(10);
-  await expect(page.getByRole('alert', { name: 'Selected version has no model' }))
-    .toContainText('line 17: unexpected closing parenthesis');
+  await expect(page.locator('.viewport-version-error')).toHaveCount(0);
+  const bubble = page.locator('.genie-layer .agent-card--error').filter({ hasText: renderFailure });
+  await expect(bubble).toHaveCount(1);
+  await expect(bubble).not.toContainText('direct-occt-runner');
+  await bubble.click();
+  await expect(page.getByTestId('activity-event-detail')).toContainText(renderFailure);
+  await expect(page.getByTestId('activity-event-detail')).toContainText('Broken bracket draft');
+  await expect(page.getByTestId('activity-event-detail')).toContainText('op=export:direct-occt');
+  await page.getByRole('button', { name: 'Code inspector' }).click();
+  await expect(page.locator('[data-window-id="code"] .cm-content')).toContainText(failedSource);
+  await expect.poll(() => page.evaluate(() =>
+    (window as any).__versionProjectionCalls.some((call: { cmd: string }) => call.cmd === 'get_version_source_window')
+  )).toBe(true);
+  await page.locator('[data-window-id="code"] .window-close').click();
 
   await page.getByRole('button', { name: 'SET CURRENT' }).click();
-  await expect(page.getByRole('alert', { name: 'Selected version has no model' })).toHaveCount(0);
+  await expect(bubble).toHaveCount(0);
   await expect(page.locator('.version-selected-status')).toHaveCount(0);
   await expect.poll(() => page.locator('.viewer-shell').getAttribute('data-stl-url'))
     .toContain('/mock/model-runtime/model.stl');
@@ -535,7 +575,7 @@ test('Given a pending version has no artifact When opening it Then viewport does
   await expect(page.locator('.trail-active-version .trail-status')).toHaveText('PENDING');
   await expect(page.locator('.trail-active-version')).toContainText('Building bracket.');
   await expect(page.locator('.version-selected-status')).toHaveCount(0);
-  await expect(page.getByRole('alert', { name: 'Selected version has no model' })).toHaveCount(0);
+  await expect(page.locator('.viewport-version-error, .genie-layer .agent-card--error')).toHaveCount(0);
 });
 
 test('Given current and previous broken versions When deleting current Then broken previous is selected with its error', async ({ page }) => {
@@ -552,8 +592,8 @@ test('Given current and previous broken versions When deleting current Then brok
 
   await expect(page.locator('.version-title')).toHaveText('Broken bracket draft');
   await expect(page.locator('.version-selected-status')).toHaveText('BROKEN VERSION');
-  await expect(page.getByRole('alert', { name: 'Selected version has no model' }))
-    .toContainText('line 17: unexpected closing parenthesis');
+  await expect(page.locator('.viewport-version-error')).toHaveCount(0);
+  await expect(page.locator('.genie-layer .agent-card--error')).toContainText(renderFailure);
 });
 
 test('Given version authoring controls When editing code or parameters Then Apply is the only version action', async ({ page }) => {
@@ -570,4 +610,28 @@ test('Given version authoring controls When editing code or parameters Then Appl
 
   await page.getByRole('button', { name: 'Parameters' }).click();
   await expect(page.getByRole('button', { name: 'COMMIT', exact: true })).toHaveCount(0);
+});
+
+
+test('Given the native mesh is ready When topology continues Then the model stays visible with measured progress', async ({ page }) => {
+  await installVersionTimelineMocks()({ page });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'PROJECTS' }).click();
+  await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'COMPLETED' }).click();
+  await page.locator('.project-card', { hasText: 'Verify Timeline Thread' }).getByRole('button', { name: 'VIEW' }).click();
+  await expect(page.locator('.viewer-shell')).toHaveAttribute('data-stl-url', '/mock/model-runtime/model.stl');
+
+  const target = { renderId: 'native-1', threadId: 'thread-verify', baseMessageId: 'msg-verify', messageId: 'msg-building' };
+  await page.evaluate((target) => {
+    const mock = window as any;
+    mock.__emitVersionEvent('geometry-render-activity', { activeCount: 1 });
+    mock.__emitVersionEvent('native-render-progress', { ...target, stage: 'meshReady', modelStlPath: '/mock/early/model-runtime/model.stl' });
+    mock.__emitVersionEvent('native-render-progress', { ...target, stage: 'topology', completedFaces: 256, totalFaces: 512 });
+  }, target);
+  await expect(page.locator('.viewer-shell')).toHaveAttribute('data-stl-url', '/mock/early/model-runtime/model.stl');
+  await expect(page.getByRole('progressbar', { name: 'Building topology' })).toHaveAttribute('value', '256');
+
+  await page.evaluate((target) => (window as any).__emitVersionEvent('native-render-progress', { ...target, stage: 'failed' }), target);
+  await expect(page.getByRole('progressbar', { name: 'Building topology' })).toHaveCount(0);
+  await expect(page.locator('.viewer-shell')).toHaveAttribute('data-stl-url', '/mock/model-runtime/model.stl');
 });

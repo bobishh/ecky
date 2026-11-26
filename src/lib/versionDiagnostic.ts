@@ -13,3 +13,16 @@ export function versionDiagnosticForDisplay(value: string | null | undefined): s
     .replace(PRIVATE_PAYLOAD, '$1[REDACTED]')
     .slice(0, 2000);
 }
+
+export function versionDiagnosticSummary(diagnostic: string): string {
+  const runnerError = diagnostic.match(/^stderr:\s*(\{[^\r\n]+\})/m);
+  if (runnerError) {
+    try {
+      const { message } = JSON.parse(runnerError[1]);
+      if (typeof message === 'string' && message.trim()) return message.trim();
+    } catch {
+      // Older versions may contain plain-text runner diagnostics.
+    }
+  }
+  return diagnostic.split(/\r?\n/, 1)[0];
+}

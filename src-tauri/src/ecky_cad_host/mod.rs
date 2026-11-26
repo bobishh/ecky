@@ -11,6 +11,7 @@ pub mod direct_occt_sdk;
 pub mod source_compiler;
 pub mod svg_profile;
 pub mod text_profile;
+pub(crate) mod topology_artifact;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OpaqueHandle<Tag> {

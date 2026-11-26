@@ -365,7 +365,7 @@ pub async fn handle_params_preview_render(
 
         drop(conn);
 
-        let artifact_bundle = render::render_model_with_previous_manifest(
+        let render = render::render_model_with_previous_manifest(
             &base_design.macro_code,
             &healed_params,
             Some(base_design.macro_dialect.clone()),
@@ -374,6 +374,14 @@ pub async fn handle_params_preview_render(
             base_model_manifest.as_ref(),
             state,
             app,
+        )
+;
+        let artifact_bundle = crate::services::render_progress::observe(
+            state,
+            &target_thread_id,
+            Some(&target_message_id),
+            tracked_message_id.as_deref(),
+            render,
         )
         .await?;
         let model_manifest =
@@ -732,6 +740,7 @@ pub async fn handle_macro_preview_render(
             "patching_macro",
             "",
         )?;
+        let progress_base_message_id = tracked_message_id.clone();
         let mut draft = base_design.clone();
         draft.version_name.clear();
         draft.response = "Draft update pending validation.".to_string();
@@ -983,15 +992,22 @@ pub async fn handle_macro_preview_render(
             .or_else(|| base_design.post_processing.clone());
 
         let render_started = Instant::now();
-        let artifact_bundle = render::render_model_with_previous_manifest(
-            &req.macro_code,
-            &initial_params,
-            Some(macro_dialect.clone()),
-            Some(render_geometry_backend),
-            next_post_processing.as_ref(),
-            base_model_manifest.as_ref(),
+        let render = render::render_model_with_previous_manifest(
+                &req.macro_code,
+                &initial_params,
+                Some(macro_dialect.clone()),
+                Some(render_geometry_backend),
+                next_post_processing.as_ref(),
+                base_model_manifest.as_ref(),
+                state,
+                app,
+            );
+        let artifact_bundle = crate::services::render_progress::observe(
             state,
-            app,
+            &working_thread_id,
+            progress_base_message_id.as_deref(),
+            tracked_message_id.as_deref(),
+            render,
         )
         .await
         .map_err(|mut err| {

@@ -805,10 +805,10 @@ fn direct_occt_reported_solid_count(
         solid_count: Option<usize>,
     }
 
-    let topology_path = Path::new(&bundle.model_stl_path)
-        .parent()?
-        .join("topology.json");
-    let report: TopologyReport = serde_json::from_slice(&fs::read(topology_path).ok()?).ok()?;
+    let topology_path = Path::new(&bundle.model_stl_path).parent()?;
+    let topology_path = crate::ecky_cad_host::topology_artifact::topology_path(topology_path);
+    let report: TopologyReport =
+        crate::ecky_cad_host::topology_artifact::read(&topology_path).ok()?;
     if report.parts.len() != manifest.parts.len() {
         return None;
     }

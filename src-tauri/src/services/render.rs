@@ -1319,6 +1319,7 @@ fn try_render_direct_occt_ecky_ir(
     config: &RenderConfigSnapshot,
     app: &dyn PathResolver,
     cancellation: Option<Arc<AtomicBool>>,
+    report_preview: bool,
     tier: crate::ecky_cad_host::direct_occt_runtime::DirectOcctRenderTier,
 ) -> AppResult<Option<ArtifactBundle>> {
     if *effective_dialect != MacroDialect::EckyIrV0 {
@@ -1329,23 +1330,38 @@ fn try_render_direct_occt_ecky_ir(
     let previous_manifest = previous_manifest.cloned();
     let app = DirectOcctThreadResolver::from_resolver(app);
     let cad_text_font_path = config.cad_text_font_path().map(str::to_string);
-    run_direct_occt_with_large_stack("render", move || {
-        crate::ecky_cad_host::direct_occt_runner::with_runner_cancellation(cancellation, || {
-            let program = match crate::ecky_scheme::compile_to_core_program(&macro_code) {
-                Ok(program) => program,
-                Err(_) => return Ok(None),
+    let reporter = if report_preview {
+        crate::services::render_progress::reporter()
+    } else {
+        None
+    };
+    let report_in_background = reporter.is_some()
+        && tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        });
+    let render = move || {
+        run_direct_occt_with_large_stack("render", move || {
+            use crate::ecky_cad_host::direct_occt_runner::{
+                with_runner_cancellation, with_runner_progress,
             };
-            let program = crate::topology_target_ids::rebind_program_tagged_selectors(
-                &program,
-                previous_manifest.as_ref(),
-            )?;
-            let runtime_root =
-                match crate::runtime_capabilities::resolve_direct_occt_runtime_root(&app) {
-                    Ok(runtime_root) => runtime_root,
-                    Err(_) => return Ok(None),
-                };
-            let layout = crate::ecky_cad_host::direct_occt_sdk::inspect_occt_runtime(&runtime_root);
-            let (bundle, _manifest) =
+            with_runner_progress(reporter, || {
+                with_runner_cancellation(cancellation, || {
+                    let program = match crate::ecky_scheme::compile_to_core_program(&macro_code) {
+                        Ok(program) => program,
+                        Err(_) => return Ok(None),
+                    };
+                    let program = crate::topology_target_ids::rebind_program_tagged_selectors(
+                        &program,
+                        previous_manifest.as_ref(),
+                    )?;
+                    let runtime_root =
+                        match crate::runtime_capabilities::resolve_direct_occt_runtime_root(&app) {
+                            Ok(runtime_root) => runtime_root,
+                            Err(_) => return Ok(None),
+                        };
+                    let layout =
+                        crate::ecky_cad_host::direct_occt_sdk::inspect_occt_runtime(&runtime_root);
+                    let (bundle, _manifest) =
                 crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle_with_tier(
                     &program,
                     &macro_code,
@@ -1355,9 +1371,16 @@ fn try_render_direct_occt_ecky_ir(
                     cad_text_font_path.as_deref(),
                     tier,
                 )?;
-            Ok(Some(bundle))
+                    Ok(Some(bundle))
+                })
+            })
         })
-    })
+    };
+    if report_in_background {
+        tokio::task::block_in_place(render)
+    } else {
+        render()
+    }
 }
 
 /// Attempt poly BRep bridge rendering when one OCCT program contains mesh
@@ -1918,7 +1941,7 @@ pub async fn materialize_production_bundle(
     }
 
     let previous_manifest = message.model_manifest.as_ref();
-    let artifact_bundle = render_model_with_previous_manifest(
+    let render = render_model_with_previous_manifest(
         &design.macro_code,
         &design.initial_params,
         Some(design.macro_dialect.clone()),
@@ -1927,6 +1950,13 @@ pub async fn materialize_production_bundle(
         previous_manifest,
         state,
         app,
+    );
+    let artifact_bundle = crate::services::render_progress::observe(
+        state,
+        &thread_id,
+        Some(&message.id),
+        Some(&message.id),
+        render,
     )
     .await?;
     let generated_manifest =
@@ -2416,6 +2446,7 @@ fn render_model_unlocked(
                     config,
                     app,
                     source_cancellation.clone(),
+                    post_processing.is_none(),
                     tier,
                 )
             } else {
@@ -5784,13 +5815,13 @@ exit 5
                 .collect::<Vec<_>>()
         );
 
-        let topology_path = std::path::Path::new(&bundle.model_stl_path)
+        let topology_dir = std::path::Path::new(&bundle.model_stl_path)
             .parent()
-            .expect("native output directory")
-            .join("topology.json");
+            .expect("native output directory");
+        let topology_path = crate::ecky_cad_host::topology_artifact::topology_path(topology_dir);
         let topology: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(topology_path).expect("hybrid topology report"))
-                .expect("topology JSON");
+            crate::ecky_cad_host::topology_artifact::read(&topology_path)
+                .expect("hybrid topology report");
         assert_eq!(topology["parts"][0]["brepValid"], true);
 
         std::fs::remove_dir_all(root).unwrap();

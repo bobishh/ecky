@@ -147,3 +147,22 @@ test('manually dismissed local notification does not immediately reappear when e
   assert.equal(scheduled.length, 0);
 });
 
+test('a temporarily hidden version error returns without a dismissal timer', () => {
+  const store = createLocalNotificationStore({
+    setTimeout() {
+      assert.fail('A version error stays visible until dismissed.');
+    },
+    clearTimeout() {},
+  });
+  const notification = card('failed', { severity: 'error', persistUntilDismissed: true });
+
+  store.set(notification);
+  store.hide();
+  assert.equal(get(store), null);
+  store.set(notification);
+  assert.equal(get(store)?.eventId, notification.eventId);
+  store.dismiss();
+  store.set(notification);
+  assert.equal(get(store), null);
+});
+

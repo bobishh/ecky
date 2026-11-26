@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use super::direct_occt::{OcctArg, OcctOp};
 use super::direct_occt_sdk::{DirectOcctSdkLayout, NativeExportOutcome};
+use super::topology_artifact;
 use crate::contracts::{
     AnalysisDeclarationBinding, AppError, AppResult, ArtifactBundle, DesignParams,
     DocumentMetadata, EngineKind, EnrichmentStatus, ExportArtifact, FeatureGraph, FeatureNode,
@@ -37,7 +38,6 @@ const SOURCE_FILE_NAME: &str = "source.ecky";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const MODEL_STL_FILE_NAME: &str = "model.stl";
 const STEP_FILE_NAME: &str = "model.step";
-const TOPOLOGY_FILE_NAME: &str = "topology.json";
 const DIRECT_OCCT_TEXT_FONT_ENV: &str = "ECKYCAD_FONT_PATH";
 const DIRECT_OCCT_HOT_CACHE_CAPACITY: usize = 2;
 /// Resident on-disk artifact bytes the process-hot Direct OCCT cache may hold
@@ -731,7 +731,7 @@ pub(crate) fn render_core_program_runtime_bundle_with_tier(
             "Direct OCCT runtime requires at least one Core IR part.",
         ));
     }
-    let topology_path = bundle_dir.join(TOPOLOGY_FILE_NAME);
+    let topology_path = topology_artifact::topology_path(&bundle_dir);
     let topology_report_owned = if tier == DirectOcctRenderTier::Display && !topology_path.is_file()
     {
         None
@@ -1915,6 +1915,12 @@ fn copy_direct_occt_geometry_cache_artifact(
     Ok(())
 }
 
+fn topology_file_name(path: &Path) -> AppResult<&str> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::persistence("Direct OCCT topology has no file name."))
+}
+
 fn validated_direct_occt_geometry_cache_manifest(
     cache_dir: &Path,
 ) -> Option<DirectOcctGeometryCacheManifest> {
@@ -1922,7 +1928,10 @@ fn validated_direct_occt_geometry_cache_manifest(
     let manifest = serde_json::from_str::<DirectOcctGeometryCacheManifest>(&raw).ok()?;
     if manifest.schema != DIRECT_OCCT_GEOMETRY_CACHE_SCHEMA
         || !manifest.digests.contains_key(MODEL_STL_FILE_NAME)
-        || !manifest.digests.contains_key(TOPOLOGY_FILE_NAME)
+        || !manifest.digests.contains_key("topology.json")
+            && !manifest
+                .digests
+                .contains_key(topology_artifact::TOPOLOGY_FILE_NAME)
         || (manifest.has_step && !manifest.digests.contains_key(STEP_FILE_NAME))
     {
         return None;
@@ -1934,7 +1943,7 @@ fn validated_direct_occt_geometry_cache_manifest(
             return None;
         }
     }
-    read_direct_occt_topology_report(&cache_dir.join(TOPOLOGY_FILE_NAME)).ok()?;
+    read_direct_occt_topology_report(&topology_artifact::topology_path(cache_dir)).ok()?;
     Some(manifest)
 }
 
@@ -1966,8 +1975,8 @@ fn write_cached_direct_occt_geometry(
         } => (None, stl_path, part_stl_paths, false, source_mesh_digests),
         NativeExportOutcome::Blocked { .. } => return Ok(()),
     };
-    let topology_path = bundle_dir.join(TOPOLOGY_FILE_NAME);
-    read_direct_occt_topology_report(&topology_path)?;
+    let topology_path = topology_artifact::topology_path(bundle_dir);
+    let topology_name = topology_file_name(&topology_path)?;
     let cache_dir = direct_occt_geometry_cache_dir(app, geometry_hash)?;
     if validated_direct_occt_geometry_cache_manifest(&cache_dir).is_some() {
         return Ok(());
@@ -1988,10 +1997,20 @@ fn write_cached_direct_occt_geometry(
         )?;
         copy_direct_occt_geometry_cache_artifact(
             &topology_path,
-            &staging.join(TOPOLOGY_FILE_NAME),
-            TOPOLOGY_FILE_NAME,
+            &staging.join(topology_name),
+            topology_name,
             &mut digests,
         )?;
+        let analysis_boundary = topology_artifact::analysis_boundary_path(bundle_dir);
+        if analysis_boundary != topology_path && analysis_boundary.is_file() {
+            let name = topology_file_name(&analysis_boundary)?;
+            copy_direct_occt_geometry_cache_artifact(
+                &analysis_boundary,
+                &staging.join(name),
+                name,
+                &mut digests,
+            )?;
+        }
         if let Some(step_path) = step_path {
             copy_direct_occt_geometry_cache_artifact(
                 step_path,
@@ -2067,11 +2086,20 @@ fn read_cached_direct_occt_geometry(
         bundle_dir.join(MODEL_STL_FILE_NAME),
     )
     .map_err(|err| AppError::persistence(err.to_string()))?;
+    let topology_path = topology_artifact::topology_path(&cache_dir);
     fs::copy(
-        cache_dir.join(TOPOLOGY_FILE_NAME),
-        bundle_dir.join(TOPOLOGY_FILE_NAME),
+        &topology_path,
+        bundle_dir.join(topology_file_name(&topology_path)?),
     )
     .map_err(|err| AppError::persistence(err.to_string()))?;
+    let analysis_boundary = topology_artifact::analysis_boundary_path(&cache_dir);
+    if analysis_boundary != topology_path && analysis_boundary.is_file() {
+        fs::copy(
+            &analysis_boundary,
+            bundle_dir.join(topology_file_name(&analysis_boundary)?),
+        )
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    }
     let mut part_stl_paths = Vec::new();
     for (index, part) in manifest.part_assets.iter().enumerate() {
         let destination = bundle_dir.join("parts").join(format!("{index}.stl"));
@@ -2177,15 +2205,7 @@ fn model_id_from_hash(hash: &str) -> String {
 }
 
 fn read_direct_occt_topology_report(path: &Path) -> AppResult<DirectOcctTopologyReport> {
-    let contents = fs::read_to_string(path).map_err(|err| {
-        AppError::persistence(format!(
-            "Direct OCCT topology report could not be read '{}': {}",
-            path.display(),
-            err
-        ))
-    })?;
-    serde_json::from_str(&contents)
-        .map_err(|err| AppError::validation(format!("Direct OCCT topology report invalid: {err}")))
+    topology_artifact::read(path)
 }
 
 pub fn direct_occt_solid_diagnostics(
@@ -2208,18 +2228,8 @@ pub fn direct_occt_solid_diagnostics(
     let bundle_dir = Path::new(&bundle.manifest_path).parent().ok_or_else(|| {
         AppError::validation("Direct OCCT artifact manifest has no containing directory.")
     })?;
-    let topology_path = bundle_dir.join(TOPOLOGY_FILE_NAME);
-    let contents = fs::read_to_string(&topology_path).map_err(|error| {
-        AppError::persistence(format!(
-            "Direct OCCT topology report could not be read '{}': {error}",
-            topology_path.display()
-        ))
-    })?;
-    let report: SolidReport = serde_json::from_str(&contents).map_err(|error| {
-        AppError::validation(format!(
-            "Direct OCCT solid-validity report invalid: {error}"
-        ))
-    })?;
+    let topology_path = topology_artifact::topology_path(&bundle_dir);
+    let report: SolidReport = topology_artifact::read(&topology_path)?;
     if report.parts.is_empty() {
         return Err(AppError::validation(
             "Direct OCCT topology report has no exact BRep parts.",
@@ -2300,17 +2310,7 @@ pub(crate) fn validate_direct_occt_guided_expected_solids(topology_path: &Path) 
         brep_valid: Option<bool>,
     }
 
-    let contents = fs::read_to_string(topology_path).map_err(|error| {
-        AppError::persistence(format!(
-            "Direct OCCT topology report could not be read '{}': {error}",
-            topology_path.display()
-        ))
-    })?;
-    let report: SolidReport = serde_json::from_str(&contents).map_err(|error| {
-        AppError::validation(format!(
-            "Direct OCCT solid-validity report invalid: {error}"
-        ))
-    })?;
+    let report: SolidReport = topology_artifact::read(topology_path)?;
     if report.parts.is_empty() {
         return Err(AppError::validation(
             "Guided reconstruction exact preview has no parts.",
@@ -2410,17 +2410,7 @@ pub(crate) fn direct_occt_exact_target_geometries(
     fn point(value: DirectOcctTopologyPoint) -> [f64; 3] {
         [value.x, value.y, value.z]
     }
-    let contents = fs::read_to_string(topology_path).map_err(|error| {
-        AppError::persistence(format!(
-            "Direct OCCT topology report could not be read '{}': {error}",
-            topology_path.display()
-        ))
-    })?;
-    let report: ExactReport = serde_json::from_str(&contents).map_err(|error| {
-        AppError::validation(format!(
-            "Direct OCCT exact topology report invalid: {error}"
-        ))
-    })?;
+    let report: ExactReport = topology_artifact::read(topology_path)?;
     let mut result = std::collections::BTreeMap::new();
     for target in report.parts.into_iter().flat_map(|part| {
         part.vertices
@@ -2522,17 +2512,7 @@ pub(crate) fn direct_occt_authored_binding_target_ids(
         authored_bindings: Vec<String>,
     }
 
-    let contents = fs::read_to_string(topology_path).map_err(|error| {
-        AppError::persistence(format!(
-            "Direct OCCT topology report could not be read '{}': {error}",
-            topology_path.display()
-        ))
-    })?;
-    let report: BindingReport = serde_json::from_str(&contents).map_err(|error| {
-        AppError::validation(format!(
-            "Direct OCCT authored binding topology report invalid: {error}"
-        ))
-    })?;
+    let report: BindingReport = topology_artifact::read(topology_path)?;
     let mut result = std::collections::BTreeMap::<(String, String), Vec<String>>::new();
     for part in report.parts {
         let part_id = part.part_id.trim();
@@ -2631,17 +2611,7 @@ pub(crate) fn direct_occt_authored_binding_ordered_edge_target_ids(
         target_ids: Vec<String>,
     }
 
-    let contents = fs::read_to_string(topology_path).map_err(|error| {
-        AppError::persistence(format!(
-            "Direct OCCT topology report could not be read '{}': {error}",
-            topology_path.display()
-        ))
-    })?;
-    let report: OrderedBindingReport = serde_json::from_str(&contents).map_err(|error| {
-        AppError::validation(format!(
-            "Direct OCCT authored binding edge order report invalid: {error}"
-        ))
-    })?;
+    let report: OrderedBindingReport = topology_artifact::read(topology_path)?;
     let mut result = std::collections::BTreeMap::new();
     for part in report.parts {
         let part_id = part.part_id.trim();
@@ -3428,6 +3398,14 @@ mod tests {
     use crate::models::PathResolver;
     use std::path::PathBuf;
 
+    fn write_legacy_topology_fixture(source: &Path, destination: &Path) -> AppResult<()> {
+        let topology: serde_json::Value = topology_artifact::read(source)?;
+        let bytes = serde_json::to_vec(&topology)
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        fs::write(destination.join("topology.json"), bytes)
+            .map_err(|error| AppError::persistence(error.to_string()))
+    }
+
     #[test]
     fn renders_for_same_model_id_serialize_bundle_replacement() {
         let model_id = format!("generated-direct-occt-lock-{}", uuid::Uuid::new_v4());
@@ -3591,7 +3569,7 @@ mod tests {
         else {
             panic!("expected generated-runner export");
         };
-        let direct_topology_path = direct_dir.join(TOPOLOGY_FILE_NAME);
+        let direct_topology_path = topology_artifact::topology_path(&direct_dir);
         let direct_topology = read_direct_occt_topology_report(&direct_topology_path)
             .expect("direct topology report");
         let direct_source_path = direct_dir.join(SOURCE_FILE_NAME);
@@ -3652,11 +3630,8 @@ mod tests {
             runner_source_dir.join(MODEL_STL_FILE_NAME),
         )
         .expect("runner stl");
-        fs::copy(
-            &direct_topology_path,
-            runner_source_dir.join(TOPOLOGY_FILE_NAME),
-        )
-        .expect("runner topology");
+        write_legacy_topology_fixture(&direct_topology_path, &runner_source_dir)
+            .expect("runner topology");
         let runner = root
             .join("resources")
             .join("bin")
@@ -3706,7 +3681,7 @@ echo "fake runner plan: $plan"
                 .expect("runner-first bundle");
         let runner_bundle_dir = crate::model_runtime::runtime_bundle_dir(&resolver, &model_id)
             .expect("runner bundle dir");
-        let runner_topology_path = runner_bundle_dir.join(TOPOLOGY_FILE_NAME);
+        let runner_topology_path = topology_artifact::topology_path(&runner_bundle_dir);
 
         assert!(
             invoked_marker.is_file(),
@@ -3721,8 +3696,10 @@ echo "fake runner plan: $plan"
             fs::read(&direct_step_path).expect("direct step")
         );
         assert_eq!(
-            fs::read_to_string(&runner_topology_path).expect("runner topology"),
-            fs::read_to_string(&direct_topology_path).expect("direct topology")
+            topology_artifact::read::<serde_json::Value>(&runner_topology_path)
+                .expect("runner topology"),
+            topology_artifact::read::<serde_json::Value>(&direct_topology_path)
+                .expect("direct topology")
         );
         assert_eq!(runner_bundle.model_id, direct_bundle.model_id);
         assert_eq!(runner_bundle.content_hash, direct_bundle.content_hash);
@@ -3802,7 +3779,7 @@ echo "fake runner plan: $plan"
         else {
             panic!("expected generated-runner export");
         };
-        let direct_topology_path = direct_dir.join(TOPOLOGY_FILE_NAME);
+        let direct_topology_path = topology_artifact::topology_path(&direct_dir);
         let direct_topology = read_direct_occt_topology_report(&direct_topology_path)
             .expect("direct topology report");
         let direct_source_path = direct_dir.join(SOURCE_FILE_NAME);
@@ -3863,11 +3840,8 @@ echo "fake runner plan: $plan"
             runner_source_dir.join(MODEL_STL_FILE_NAME),
         )
         .expect("runner stl");
-        fs::copy(
-            &direct_topology_path,
-            runner_source_dir.join(TOPOLOGY_FILE_NAME),
-        )
-        .expect("runner topology");
+        write_legacy_topology_fixture(&direct_topology_path, &runner_source_dir)
+            .expect("runner topology");
         let runner = root
             .join("resources")
             .join("bin")
@@ -3917,7 +3891,7 @@ echo "fake runner plan: $plan"
                 .expect("runner-first bundle");
         let runner_bundle_dir = crate::model_runtime::runtime_bundle_dir(&resolver, &model_id)
             .expect("runner bundle dir");
-        let runner_topology_path = runner_bundle_dir.join(TOPOLOGY_FILE_NAME);
+        let runner_topology_path = topology_artifact::topology_path(&runner_bundle_dir);
 
         assert!(
             invoked_marker.is_file(),
@@ -3932,8 +3906,10 @@ echo "fake runner plan: $plan"
             fs::read(&direct_step_path).expect("direct step")
         );
         assert_eq!(
-            fs::read_to_string(&runner_topology_path).expect("runner topology"),
-            fs::read_to_string(&direct_topology_path).expect("direct topology")
+            topology_artifact::read::<serde_json::Value>(&runner_topology_path)
+                .expect("runner topology"),
+            topology_artifact::read::<serde_json::Value>(&direct_topology_path)
+                .expect("direct topology")
         );
         assert_eq!(runner_bundle.model_id, direct_bundle.model_id);
         assert_eq!(runner_bundle.content_hash, direct_bundle.content_hash);
@@ -4059,7 +4035,8 @@ printf 'run\n' >> "$invoked_marker"
         .expect("cold render");
         let cold_dir = crate::model_runtime::runtime_bundle_dir(&resolver, &cold_bundle.model_id)
             .expect("cold dir");
-        let cold_topology = fs::read(cold_dir.join(TOPOLOGY_FILE_NAME)).expect("cold topology");
+        let cold_topology =
+            fs::read(topology_artifact::topology_path(&cold_dir)).expect("cold topology");
 
         let (warm_bundle, warm_manifest) = render_core_program_runtime_bundle(
             &warm_program,
@@ -4083,7 +4060,7 @@ printf 'run\n' >> "$invoked_marker"
         );
         assert_eq!(
             cold_topology,
-            fs::read(warm_dir.join(TOPOLOGY_FILE_NAME)).expect("warm topology")
+            fs::read(topology_artifact::topology_path(&warm_dir)).expect("warm topology")
         );
         assert_eq!(
             fs::read(&cold_bundle.model_stl_path).expect("cold preview"),
@@ -5239,7 +5216,7 @@ printf 'run\n' >> "$invoked_marker"
     fn direct_occt_part_geometry_digest_reader_is_exact_and_rejects_missing_identity() {
         let root = temp_root("direct-occt-part-geometry-digests");
         fs::create_dir_all(&root).expect("root");
-        let topology_path = root.join(TOPOLOGY_FILE_NAME);
+        let topology_path = root.join("topology.json");
         fs::write(
             &topology_path,
             r#"{"schemaVersion":1,"parts":[{"partId":"body","sourceGeometryDigest":"sha256:body","authoredBindingEdgeOrder":[{"name":"outline","targetIds":["body:edge:0:0-0-0_1-0-0"]}],"vertices":[{"targetId":"body:vertex:0:0-0-0","authoredBindings":["base"],"exactGeometry":{"kind":"vertex","point":{"x":0,"y":0,"z":0}}}],"edges":[{"targetId":"body:edge:0:0-0-0_1-0-0","authoredBindings":["base"],"exactGeometry":{"kind":"lineEdge","start":{"x":0,"y":0,"z":0},"end":{"x":1,"y":0,"z":0}}}],"faces":[{"targetId":"body:face:0:0-0-0:1","authoredBindings":["base","top"],"exactGeometry":{"kind":"planeFace","origin":{"x":0,"y":0,"z":0},"normal":[0,0,1]}}]}]}"#,
@@ -5304,7 +5281,7 @@ printf 'run\n' >> "$invoked_marker"
     fn guided_expected_solid_gate_rejects_open_invalid_or_unproven_parts() {
         let root = temp_root("direct-occt-guided-solid-validity");
         fs::create_dir_all(&root).expect("root");
-        let topology_path = root.join(TOPOLOGY_FILE_NAME);
+        let topology_path = root.join("topology.json");
 
         fs::write(
             &topology_path,
@@ -5352,7 +5329,7 @@ printf 'run\n' >> "$invoked_marker"
         let source_path = root.join(SOURCE_FILE_NAME);
         let preview_path = root.join(MODEL_STL_FILE_NAME);
         let step_path = root.join(STEP_FILE_NAME);
-        let topology_path = root.join(TOPOLOGY_FILE_NAME);
+        let topology_path = root.join("topology.json");
         fs::create_dir_all(&root).expect("root");
         fs::write(&source_path, "(model (part body (box 10 20 30)))").expect("source");
         fs::write(&preview_path, b"solid preview").expect("preview");
@@ -5740,7 +5717,7 @@ printf 'run\n' >> "$invoked_marker"
     #[test]
     fn direct_occt_runtime_read_direct_occt_topology_report_fails_without_file() {
         let root = temp_root("direct-occt-missing-topology");
-        let topology_path = root.join(TOPOLOGY_FILE_NAME);
+        let topology_path = root.join("topology.json");
         let err = read_direct_occt_topology_report(&topology_path)
             .expect_err("missing topology should fail");
         assert!(
@@ -5754,7 +5731,7 @@ printf 'run\n' >> "$invoked_marker"
     #[test]
     fn direct_occt_runtime_read_direct_occt_topology_report_fails_with_invalid_json() {
         let root = temp_root("direct-occt-invalid-topology");
-        let topology_path = root.join(TOPOLOGY_FILE_NAME);
+        let topology_path = root.join("topology.json");
         fs::create_dir_all(&root).expect("root");
         fs::write(&topology_path, "{ \"parts\": ").expect("invalid topology");
 
@@ -5771,7 +5748,7 @@ printf 'run\n' >> "$invoked_marker"
     #[test]
     fn direct_occt_runtime_read_direct_occt_topology_report_reads_originating_slot_indexes() {
         let root = temp_root("direct-occt-topology-originating-slot-indexes");
-        let topology_path = root.join(TOPOLOGY_FILE_NAME);
+        let topology_path = root.join("topology.json");
         fs::create_dir_all(&root).expect("root");
         fs::write(
             &topology_path,
@@ -6500,7 +6477,7 @@ printf 'run\n' >> "$invoked_marker"
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         let bundle_dir =
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
-        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(topology_artifact::topology_path(&bundle_dir).is_file());
         assert!(
             std::fs::metadata(&bundle.model_stl_path)
                 .expect("stl")
@@ -6514,7 +6491,7 @@ printf 'run\n' >> "$invoked_marker"
                 > 1024
         );
         assert!(
-            std::fs::metadata(bundle_dir.join(TOPOLOGY_FILE_NAME))
+            std::fs::metadata(topology_artifact::topology_path(&bundle_dir))
                 .expect("topology")
                 .len()
                 > 16
@@ -6536,7 +6513,7 @@ printf 'run\n' >> "$invoked_marker"
             .iter()
             .any(|target| target.kind == SelectionTargetKind::Face));
         let exact_geometries =
-            direct_occt_exact_target_geometries(&bundle_dir.join(TOPOLOGY_FILE_NAME))
+            direct_occt_exact_target_geometries(&topology_artifact::topology_path(&bundle_dir))
                 .expect("exact target geometries");
         assert!(exact_geometries.values().any(|geometry| matches!(
             geometry,
@@ -6731,7 +6708,7 @@ printf 'run\n' >> "$invoked_marker"
         ));
         let bundle_dir =
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("bundle dir");
-        validate_direct_occt_guided_expected_solids(&bundle_dir.join(TOPOLOGY_FILE_NAME))
+        validate_direct_occt_guided_expected_solids(&topology_artifact::topology_path(&bundle_dir))
             .expect("quarter result is valid solid");
 
         let design = crate::contracts::DesignOutput {
@@ -6763,7 +6740,7 @@ printf 'run\n' >> "$invoked_marker"
             crate::capture_brep_validation::validate_capture_direct_occt_snapshot(
                 &guide,
                 &snapshot,
-                &bundle_dir.join(TOPOLOGY_FILE_NAME),
+                &topology_artifact::topology_path(&bundle_dir),
             )
             .expect("selected plan exact runtime trace");
         assert_eq!(
@@ -6859,7 +6836,7 @@ printf 'run\n' >> "$invoked_marker"
 
         assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
-        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(topology_artifact::topology_path(&bundle_dir).is_file());
         if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
             &resolver, true,
         )
@@ -7072,7 +7049,7 @@ printf 'run\n' >> "$invoked_marker"
 
         assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
-        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(topology_artifact::topology_path(&bundle_dir).is_file());
         assert!(
             bundle_dir.join("plan.json").is_file(),
             "runner-first export should persist runner plan"
@@ -7132,7 +7109,7 @@ printf 'run\n' >> "$invoked_marker"
 
         assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
-        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(topology_artifact::topology_path(&bundle_dir).is_file());
         assert!(
             bundle_dir.join("plan.json").is_file(),
             "runner-first export should persist runner plan"
@@ -7193,7 +7170,7 @@ printf 'run\n' >> "$invoked_marker"
 
         assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
-        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(topology_artifact::topology_path(&bundle_dir).is_file());
         assert!(
             bundle_dir.join("plan.json").is_file(),
             "runner-first export should persist runner plan"
@@ -7253,7 +7230,7 @@ printf 'run\n' >> "$invoked_marker"
 
         assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
-        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(topology_artifact::topology_path(&bundle_dir).is_file());
         assert!(
             bundle_dir.join("plan.json").is_file(),
             "runner-first export should persist runner plan"
@@ -7311,7 +7288,7 @@ printf 'run\n' >> "$invoked_marker"
 
         assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
-        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(topology_artifact::topology_path(&bundle_dir).is_file());
         if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
             &resolver, true,
         )
@@ -7371,7 +7348,7 @@ printf 'run\n' >> "$invoked_marker"
 
         assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
-        assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
+        assert!(topology_artifact::topology_path(&bundle_dir).is_file());
         assert!(
             bundle_dir.join("plan.json").is_file(),
             "runner-first export should persist runner plan"

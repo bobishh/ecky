@@ -26,3 +26,12 @@ test('viewport preloader stays absent without render activity', () => {
     viewerBusyText: null,
   });
 });
+
+test('given the active version has a display mesh when topology runs then the viewport stays usable', () => {
+  const busy = deriveViewerBusyState({
+    geometryRenderActive: true,
+    projectFolderRenderPending: true,
+    hasEarlyDisplayMesh: true,
+  });
+  assert.equal(busy.showViewerBusyMask, false);
+});

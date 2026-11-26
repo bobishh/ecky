@@ -144,6 +144,9 @@
       </div>
 
       <pre class="activity-summary">{selectedEvent.summary}</pre>
+      {#if selectedEvent.detail && selectedEvent.detail !== selectedEvent.summary}
+        <pre class="activity-summary">{selectedEvent.detail}</pre>
+      {/if}
 
       {#if selectedValidationFeedback}
         <section class="activity-section validation-feedback" data-testid="activity-validation-feedback">

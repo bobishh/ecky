@@ -210,25 +210,9 @@ fn load_manifest(bundle_dir: &Path) -> AppResult<AnalysisBoundaryManifestView> {
 }
 
 fn load_topology_report(bundle_dir: &Path) -> AppResult<AnalysisBoundaryTopologyReport> {
-    let dedicated_boundary_path = bundle_dir.join("analysis-boundary.json");
-    let topology_path = if dedicated_boundary_path.is_file() {
-        dedicated_boundary_path
-    } else {
-        bundle_dir.join("topology.json")
-    };
-    let topology_text = fs::read_to_string(&topology_path).map_err(|err| {
-        AppError::persistence(format!(
-            "Analysis boundary topology '{}' could not be read: {}",
-            topology_path.display(),
-            err
-        ))
-    })?;
-    serde_json::from_str::<AnalysisBoundaryTopologyReport>(&topology_text).map_err(|err| {
-        AppError::validation(format!(
-            "Analysis boundary topology '{}' is invalid: {err}",
-            topology_path.display()
-        ))
-    })
+    super::topology_artifact::read(&super::topology_artifact::analysis_boundary_path(
+        bundle_dir,
+    ))
 }
 
 fn build_analysis_boundary_surface(
@@ -1419,15 +1403,11 @@ mod tests {
         let bundle_dir = crate::model_runtime::runtime_bundle_dir(&resolver, &bundle.model_id)
             .expect("bundle dir");
 
-        let viewer: AnalysisBoundaryTopologyReport = serde_json::from_slice(
-            &fs::read(bundle_dir.join("topology.json")).expect("viewer topology"),
+        let viewer: AnalysisBoundaryTopologyReport = super::super::topology_artifact::read(
+            &super::super::topology_artifact::topology_path(&bundle_dir),
         )
-        .expect("viewer topology json");
-        let analysis: AnalysisBoundaryTopologyReport = serde_json::from_slice(
-            &fs::read(bundle_dir.join("analysis-boundary.json"))
-                .expect("dedicated analysis boundary"),
-        )
-        .expect("analysis boundary json");
+        .expect("viewer topology");
+        let analysis = load_topology_report(&bundle_dir).expect("dedicated analysis boundary");
         assert_eq!(viewer.parts.len(), 1);
         assert_eq!(analysis.parts.len(), 1);
         assert_eq!(

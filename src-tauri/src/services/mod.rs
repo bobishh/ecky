@@ -38,6 +38,7 @@ pub mod profile_authoring;
 pub mod project_naming;
 pub mod provider_executable;
 pub mod render;
+pub(crate) mod render_progress;
 pub mod render_snapshot;
 pub mod semantic_control_value;
 pub mod semantic_manifest;

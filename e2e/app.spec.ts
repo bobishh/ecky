@@ -74,6 +74,23 @@ test('Given workbench dock When settings opens and closes Then workbench control
   await expect(dock.getByRole('button', { name: /(PARAMS|Parameters)/i, exact: true })).toBeVisible();
 });
 
+test('Given either app theme When opening Sketch Then panels and controls follow the workbench palette', async ({ page }) => {
+  await page.goto('/');
+  await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Sketch', exact: true }).click();
+  const sketch = page.getByTestId('profile-workspace');
+  await expect(sketch).toBeVisible();
+  const sidebar = sketch.getByRole('complementary', { name: 'Profile controls' });
+  const apply = sketch.getByRole('button', { name: 'Apply profile' });
+  await expect(apply).toBeDisabled();
+  await expect(sidebar).toHaveCSS('background-color', 'rgb(22, 33, 62)');
+  await expect(sketch.locator('.sketch-pane').first()).toHaveCSS('background-color', 'rgb(26, 26, 46)');
+
+  await page.evaluate(() => document.documentElement.dataset.theme = 'victorian');
+  await expect(sidebar).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(sketch.locator('.sketch-pane').first()).toHaveCSS('background-color', 'rgb(245, 242, 232)');
+  await expect(sketch.getByLabel('Tolerance (mm)')).toHaveCSS('border-top-color', 'rgb(232, 228, 208)');
+});
+
 test('Given workbench When Ecky is clicked once Then Projects opens for model work', async ({ page }) => {
   await page.goto('/');
   const projectsWindow = page.locator('[data-window-id="projects"]');

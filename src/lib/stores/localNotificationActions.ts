@@ -15,6 +15,7 @@ export type LocalNotificationCard = {
   severity: 'info' | 'success' | 'warning' | 'error' | 'question';
   state: 'active' | 'resolved' | 'failed';
   requiresAttention: boolean;
+  persistUntilDismissed?: boolean;
   actions: LocalNotificationAction[];
 };
 
@@ -35,6 +36,7 @@ const systemClock: LocalNotificationClock = {
 };
 
 function notificationDurationMs(card: LocalNotificationCard): number | null {
+  if (card.persistUntilDismissed) return null;
   if (card.severity === 'warning') return 12_000;
   return 8_000;
 }
@@ -50,18 +52,22 @@ export function createLocalNotificationStore(clock: LocalNotificationClock = sys
   let currentFingerprint: string | null = null;
   const dismissedFingerprints = new Set<string>();
 
+  function hide() {
+    if (timer !== null) {
+      clock.clearTimeout(timer);
+      timer = null;
+    }
+    currentEventId = null;
+    currentFingerprint = null;
+    store.set(null);
+  }
+
   function set(card: LocalNotificationCard | null) {
     if (!card) {
-      if (timer !== null) {
-        clock.clearTimeout(timer);
-        timer = null;
-      }
       if (currentFingerprint !== null) {
         dismissedFingerprints.add(currentFingerprint);
       }
-      currentEventId = null;
-      currentFingerprint = null;
-      store.set(null);
+      hide();
       return;
     }
 
@@ -93,9 +99,7 @@ export function createLocalNotificationStore(clock: LocalNotificationClock = sys
       if (currentFingerprint !== null) {
         dismissedFingerprints.add(currentFingerprint);
       }
-      currentEventId = null;
-      currentFingerprint = null;
-      store.set(null);
+      hide();
     }, ttlMs);
   }
 
@@ -106,17 +110,11 @@ export function createLocalNotificationStore(clock: LocalNotificationClock = sys
   }
 
   function clear() {
-    if (timer !== null) {
-      clock.clearTimeout(timer);
-      timer = null;
-    }
-    currentEventId = null;
-    currentFingerprint = null;
     dismissedFingerprints.clear();
-    store.set(null);
+    hide();
   }
 
-  return { subscribe: store.subscribe, set, dismiss, clear };
+  return { subscribe: store.subscribe, set, dismiss, hide, clear };
 }
 
 export const localNotificationActionsStore = createLocalNotificationStore();

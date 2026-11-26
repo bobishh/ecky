@@ -9,15 +9,16 @@ type ViewerBusyState = {
 export function deriveViewerBusyState(input: {
   geometryRenderActive: boolean;
   projectFolderRenderPending: boolean;
+  hasEarlyDisplayMesh?: boolean;
 }): ViewerBusyState {
-  if (input.geometryRenderActive) {
+  if (input.geometryRenderActive && !input.hasEarlyDisplayMesh) {
     return {
       showViewerBusyMask: true,
       viewerBusyPhase: 'rendering',
       viewerBusyText: 'Rendering geometry.',
     };
   }
-  if (input.projectFolderRenderPending) {
+  if (input.projectFolderRenderPending && !input.hasEarlyDisplayMesh) {
     return {
       showViewerBusyMask: true,
       viewerBusyPhase: 'generating',

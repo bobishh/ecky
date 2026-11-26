@@ -120,6 +120,7 @@
     femResult = null,
     femMeshPreview = null,
     femDisplay = null,
+    onFemOverlayError,
     onSearchQueryChange,
     onSelectTarget,
     onOverlayChange,
@@ -197,6 +198,7 @@
     femResult?: FemRunResponse | null;
     femMeshPreview?: FemMeshPreviewResponse | null;
     femDisplay?: FemDisplayOptions | null;
+    onFemOverlayError?: (message: string) => void;
     onSearchQueryChange?: (query: string) => void;
     onSelectTarget?: (target: ContextSelectionTarget | null) => void;
     onOverlayChange?: (primitiveId: string, value: ParamValue) => Promise<void> | void;
@@ -320,7 +322,6 @@
   let femOverlay = $state.raw<THREE.Group | null>(null);
   let femOverlayKind = $state<'mesh' | 'result' | null>(null);
   let femLoadToken = 0;
-  let femOverlayError = $state('');
   let femLegend = $state<{ label: string; minimum: number; maximum: number; unit: string } | null>(null);
   const viewerAssetSignature = $derived.by(() =>
     viewerAssets.map((asset) => `${asset.partId}:${asset.nodeId}:${asset.path}`).join('|'),
@@ -1216,7 +1217,6 @@
     femOverlay = null;
     femOverlayKind = null;
     femLegend = null;
-    femOverlayError = '';
   }
 
   async function readFemArray(path: string, scalarType: string): Promise<Float64Array | Uint32Array> {
@@ -1252,7 +1252,7 @@
     const requiredNames = ['nodesMm', 'boundaryTriangles', 'displacementMm', 'nodalDisplayVonMisesMpa'];
     for (const name of requiredNames) {
       if (!byName.has(name)) {
-        femOverlayError = `FEM result array '${name}' is missing.`;
+        onFemOverlayError?.(`FEM result array '${name}' is missing.`);
         return;
       }
     }
@@ -1351,7 +1351,7 @@
         unit: femDisplay.field === 'displacement' ? 'mm' : 'MPa',
       };
     } catch (error) {
-      femOverlayError = error instanceof Error ? error.message : String(error);
+      if (token === femLoadToken) onFemOverlayError?.(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -1361,7 +1361,7 @@
     const nodesAsset = byName.get('nodesMm');
     const trianglesAsset = byName.get('boundaryTriangles');
     if (!nodesAsset || !trianglesAsset) {
-      femOverlayError = 'FEM mesh preview requires nodesMm and boundaryTriangles arrays.';
+      onFemOverlayError?.('FEM mesh preview requires nodesMm and boundaryTriangles arrays.');
       return;
     }
     try {
@@ -1408,7 +1408,7 @@
       femOverlayKind = 'mesh';
       modelRoot.add(overlay);
     } catch (error) {
-      femOverlayError = error instanceof Error ? error.message : String(error);
+      if (token === femLoadToken) onFemOverlayError?.(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -3242,9 +3242,6 @@
       <small>PREVIEW ONLY · EXPORT GEOMETRY UNCHANGED</small>
     </div>
   {/if}
-  {#if femOverlayError && !hideModelWhileBusy}
-    <pre class="fem-legend fem-legend--error" role="alert">{femOverlayError}</pre>
-  {/if}
   {#if captureGuidePrimitives && captureGuideProjected.points.length > 0 && !hideModelWhileBusy}
     <div class="capture-guide-overlay" data-testid="capture-guide-overlay">
       <svg class="capture-guide-overlay__geometry" aria-hidden="true">
@@ -3719,7 +3716,6 @@
   .fem-legend__ramp { height: 9px; border: 1px solid var(--bg-300); background: linear-gradient(90deg, #143f8c, #14adb8 35%, #e0ba2e 65%, #c71f14); }
   .fem-legend__range { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; font-size: .56rem; }
   .fem-legend small { display: block; margin-top: 6px; color: var(--text-dim); font-size: .5rem; }
-  .fem-legend--error { border-color: var(--danger); color: var(--danger); font-size: .6rem; white-space: pre-wrap; }
 
   .capture-guide-overlay {
     position: absolute;

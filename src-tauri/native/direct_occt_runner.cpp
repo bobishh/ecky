@@ -143,6 +143,7 @@
 #include <manifold/manifold.h>
 #include "execution_identity.hpp"
 #include "part_mesh.hpp"
+#include "topology_messagepack.hpp"
 #include "vendor/yyjson/yyjson.h"
 
 namespace fs = std::filesystem;
@@ -388,6 +389,9 @@ struct ExecutionContext {
     std::uint64_t topology_cache_miss_count = 0;
     std::uint64_t topology_cache_write_count = 0;
     std::uint64_t four_way_intersection_count = 0;
+    std::int64_t display_mesh_ready_elapsed_ms = 0;
+    std::int64_t topology_elapsed_ms = 0;
+    std::int64_t analysis_boundary_elapsed_ms = 0;
     std::map<std::string, std::uint32_t> stage_execution_counts;
     std::map<std::string, std::chrono::steady_clock::duration> stage_elapsed;
     std::chrono::steady_clock::time_point report_started_at = std::chrono::steady_clock::now();
@@ -523,6 +527,9 @@ void write_stage_report(const fs::path& path, ExecutionContext& context) {
         << ",\"topologyCacheHitCount\":" << context.topology_cache_hit_count
         << ",\"topologyCacheMissCount\":" << context.topology_cache_miss_count
         << ",\"topologyCacheWriteCount\":" << context.topology_cache_write_count
+        << ",\"displayMeshReadyElapsedMs\":" << context.display_mesh_ready_elapsed_ms
+        << ",\"topologyElapsedMs\":" << context.topology_elapsed_ms
+        << ",\"analysisBoundaryElapsedMs\":" << context.analysis_boundary_elapsed_ms
         << ",\"fourWayIntersectionCount\":" << context.four_way_intersection_count
         << ",\"previewFacetCount\":" << context.preview_facet_count
         << ",\"parts\":[";
@@ -1070,14 +1077,6 @@ std::string quote_json_string(const std::string& value) {
     return out.str();
 }
 
-void write_json_number(std::ostream& out, double value) {
-    if (!std::isfinite(value)) {
-        out << 0;
-        return;
-    }
-    out << std::setprecision(17) << value;
-}
-
 std::string format_coordinate(double value) {
     if (!std::isfinite(value) || std::abs(value) < 0.0005) {
         return "0";
@@ -1204,32 +1203,32 @@ std::string stable_face_target_id(const std::string& target_id) {
     return prefix + marker + stable_target_suffix(payload);
 }
 
-void write_topology_point(std::ostream& out, const gp_Pnt& point) {
-    out << "{\"x\":";
-    write_json_number(out, point.X());
-    out << ",\"y\":";
-    write_json_number(out, point.Y());
-    out << ",\"z\":";
-    write_json_number(out, point.Z());
-    out << "}";
+void write_topology_point(ecky::TopologyMessagePack& out, const gp_Pnt& point) {
+    out.object();
+    out.key("x");
+    out.number(point.X());
+    out.key("y");
+    out.number(point.Y());
+    out.key("z");
+    out.number(point.Z());
+    out.end();
 }
 
-void write_topology_direction(std::ostream& out, const gp_Dir& direction) {
-    out << "[";
-    write_json_number(out, direction.X());
-    out << ",";
-    write_json_number(out, direction.Y());
-    out << ",";
-    write_json_number(out, direction.Z());
-    out << "]";
+void write_topology_direction(ecky::TopologyMessagePack& out, const gp_Dir& direction) {
+    out.array();
+    out.number(direction.X());
+    out.number(direction.Y());
+    out.number(direction.Z());
+    out.end();
 }
 
-bool faces_share_support_surface(const TopoDS_Face& lhs, const TopoDS_Face& rhs) {
+bool faces_share_support_surface(
+    const BRepAdaptor_Surface& lhs_surface,
+    const BRepAdaptor_Surface& rhs_surface
+) {
     constexpr double linear_tolerance = 1.0e-6;
     constexpr double angular_tolerance = 1.0e-9;
     try {
-        BRepAdaptor_Surface lhs_surface(lhs);
-        BRepAdaptor_Surface rhs_surface(rhs);
         if (lhs_surface.GetType() != rhs_surface.GetType()) return false;
         switch (lhs_surface.GetType()) {
             case GeomAbs_Plane: {
@@ -1274,8 +1273,8 @@ bool faces_share_support_surface(const TopoDS_Face& lhs, const TopoDS_Face& rhs)
             default: {
                 TopLoc_Location lhs_location;
                 TopLoc_Location rhs_location;
-                const Handle(Geom_Surface) lhs_geometry = BRep_Tool::Surface(lhs, lhs_location);
-                const Handle(Geom_Surface) rhs_geometry = BRep_Tool::Surface(rhs, rhs_location);
+                const Handle(Geom_Surface) lhs_geometry = BRep_Tool::Surface(lhs_surface.Face(), lhs_location);
+                const Handle(Geom_Surface) rhs_geometry = BRep_Tool::Surface(rhs_surface.Face(), rhs_location);
                 if (lhs_geometry.IsNull() || lhs_geometry != rhs_geometry) return false;
                 const gp_Trsf lhs_transform = lhs_location.Transformation();
                 const gp_Trsf rhs_transform = rhs_location.Transformation();
@@ -1295,8 +1294,14 @@ bool faces_share_support_surface(const TopoDS_Face& lhs, const TopoDS_Face& rhs)
     }
 }
 
+void emit_render_progress(std::string_view phase, std::size_t completed, std::size_t total) {
+    if (std::getenv("ECKY_RENDER_PROGRESS") == nullptr) return;
+    std::cout << "ecky-render-progress " << phase << ' ' << completed << ' ' << total << '\n'
+              << std::flush;
+}
+
 struct CachedTopologyFragment {
-    std::string json;
+    std::string messagepack;
     std::string source_geometry_digest;
 };
 
@@ -1320,7 +1325,7 @@ void write_cached_topology_fragment(
 );
 
 std::string write_part_topology(
-    std::ostream& out,
+    ecky::TopologyMessagePack& out,
     const std::string& part_id,
     const std::string& label,
     const TopoDS_Shape& shape,
@@ -1328,18 +1333,15 @@ std::string write_part_topology(
     double boundary_linear_deflection,
     double boundary_angular_deflection,
     const std::optional<std::string>& source_geometry_digest_override,
-    bool& first_part
+    const std::function<void(std::size_t)>& report_faces
 ) {
-    if (!first_part) {
-        out << ",";
-    }
-    first_part = false;
-
-    out << "{\"partId\":";
-    out << quote_json_string(part_id);
-    out << ",\"label\":";
-    out << quote_json_string(label);
-    out << ",\"representation\":\"analyticBrep\"";
+    out.object();
+    out.key("partId");
+    out.text(part_id);
+    out.key("label");
+    out.text(label);
+    out.key("representation");
+    out.text("analyticBrep");
     int solid_count = shape.ShapeType() == TopAbs_SOLID ? 1 : 0;
     if (solid_count == 0) {
         for (TopExp_Explorer explorer(shape, TopAbs_SOLID); explorer.More(); explorer.Next()) {
@@ -1347,24 +1349,33 @@ std::string write_part_topology(
         }
     }
     const bool brep_valid = !shape.IsNull() && BRepCheck_Analyzer(shape).IsValid();
-    out << ",\"solidCount\":" << solid_count;
-    out << ",\"brepValid\":" << (brep_valid ? "true" : "false");
-    out << ",\"solidBounds\":[";
-    bool first_solid_bound = true;
+    out.key("solidCount");
+    out.integer(solid_count);
+    out.key("brepValid");
+    out.boolean(brep_valid);
+    out.key("solidBounds");
+    out.array();
+
     auto write_solid_bound = [&](const TopoDS_Shape& solid) {
         Bnd_Box bounds;
         BRepBndLib::Add(solid, bounds);
         if (bounds.IsVoid()) return;
         double x_min, y_min, z_min, x_max, y_max, z_max;
         bounds.Get(x_min, y_min, z_min, x_max, y_max, z_max);
-        if (!first_solid_bound) out << ",";
-        first_solid_bound = false;
-        out << "{\"xMin\":" << x_min
-            << ",\"yMin\":" << y_min
-            << ",\"zMin\":" << z_min
-            << ",\"xMax\":" << x_max
-            << ",\"yMax\":" << y_max
-            << ",\"zMax\":" << z_max << "}";
+        out.object();
+        out.key("xMin");
+        out.number(x_min);
+        out.key("yMin");
+        out.number(y_min);
+        out.key("zMin");
+        out.number(z_min);
+        out.key("xMax");
+        out.number(x_max);
+        out.key("yMax");
+        out.number(y_max);
+        out.key("zMax");
+        out.number(z_max);
+        out.end();
     };
     if (shape.ShapeType() == TopAbs_SOLID) {
         write_solid_bound(shape);
@@ -1373,7 +1384,7 @@ std::string write_part_topology(
             write_solid_bound(explorer.Current());
         }
     }
-    out << "]";
+    out.end();
 
     BRepBuilderAPI_Copy private_topology(shape, Standard_False, Standard_False);
     const TopoDS_Shape mesh_shape = private_topology.Shape();
@@ -1388,8 +1399,9 @@ std::string write_part_topology(
     }
     TopTools_IndexedMapOfShape edge_map;
     TopExp::MapShapes(mesh_shape, TopAbs_EDGE, edge_map);
-    out << ",\"authoredBindingEdgeOrder\":[";
-    bool first_ordered_binding = true;
+    out.key("authoredBindingEdgeOrder");
+    out.array();
+
     for (const auto& [name, binding_shape] : authored_bindings) {
         std::vector<TopoDS_Edge> source_edges;
         if (binding_shape.ShapeType() == TopAbs_EDGE) {
@@ -1434,23 +1446,26 @@ std::string write_part_topology(
         if (!complete_mapping || ordered_target_ids.empty()) {
             continue;
         }
-        if (!first_ordered_binding) out << ",";
-        first_ordered_binding = false;
-        out << "{\"name\":" << quote_json_string(name) << ",\"targetIds\":[";
+        out.object();
+        out.key("name");
+        out.text(name);
+        out.key("targetIds");
+        out.array();
         for (std::size_t index = 0; index < ordered_target_ids.size(); ++index) {
-            if (index > 0) out << ",";
-            out << quote_json_string(ordered_target_ids[index]);
+            out.text(ordered_target_ids[index]);
         }
-        out << "]}";
+        out.end();
+        out.end();
     }
-    out << "]";
-    out << ",\"vertices\":[";
+    out.end();
+    out.key("vertices");
+    out.array();
     struct AuthoredBindingTopologyIndex {
         std::string name;
         TopTools_IndexedMapOfShape copied_vertices;
         TopTools_IndexedMapOfShape copied_edges;
         TopTools_IndexedMapOfShape copied_faces;
-        std::vector<TopoDS_Face> source_faces;
+        std::vector<BRepAdaptor_Surface> source_surfaces;
     };
     std::vector<AuthoredBindingTopologyIndex> authored_binding_indices;
     authored_binding_indices.reserve(authored_bindings.size());
@@ -1465,7 +1480,10 @@ std::string write_part_topology(
             for (int ordinal = 1; ordinal <= source_shapes.Extent(); ++ordinal) {
                 const TopoDS_Shape source_shape = source_shapes.FindKey(ordinal);
                 if (shape_type == TopAbs_FACE) {
-                    index.source_faces.push_back(TopoDS::Face(source_shape));
+                    try {
+                        index.source_surfaces.emplace_back(TopoDS::Face(source_shape), Standard_False);
+                    } catch (...) {
+                    }
                 }
                 try {
                     const TopoDS_Shape copied = private_topology.ModifiedShape(source_shape);
@@ -1482,8 +1500,10 @@ std::string write_part_topology(
         authored_binding_indices.push_back(std::move(index));
     }
     auto write_authored_bindings = [&](const TopoDS_Shape& target) {
-        out << ",\"authoredBindings\":[";
-        bool first_binding = true;
+        out.key("authoredBindings");
+        out.array();
+
+        std::optional<BRepAdaptor_Surface> target_surface;
         for (const AuthoredBindingTopologyIndex& index : authored_binding_indices) {
             bool matched = target.ShapeType() == TopAbs_VERTEX
                 ? index.copied_vertices.FindIndex(target) > 0
@@ -1491,53 +1511,59 @@ std::string write_part_topology(
                     ? index.copied_edges.FindIndex(target) > 0
                     : target.ShapeType() == TopAbs_FACE &&
                         index.copied_faces.FindIndex(target) > 0;
-            if (!matched && target.ShapeType() == TopAbs_FACE) {
-                for (const TopoDS_Face& source_face : index.source_faces) {
-                    if (faces_share_support_surface(TopoDS::Face(target), source_face)) {
-                        matched = true;
-                        break;
+            if (!matched && target.ShapeType() == TopAbs_FACE && !index.source_surfaces.empty()) {
+                try {
+                    if (!target_surface) {
+                        // Comparing support surfaces does not use the face's trimmed UV bounds.
+                        target_surface.emplace(TopoDS::Face(target), Standard_False);
                     }
+                    matched = std::any_of(
+                        index.source_surfaces.begin(), index.source_surfaces.end(),
+                        [&](const BRepAdaptor_Surface& source_surface) {
+                            return faces_share_support_surface(*target_surface, source_surface);
+                        });
+                } catch (...) {
                 }
             }
             if (!matched) continue;
-            if (!first_binding) out << ",";
-            first_binding = false;
-            out << quote_json_string(index.name);
+            out.text(index.name);
         }
-        out << "]";
+        out.end();
     };
 
-    bool first_vertex = true;
     TopTools_IndexedMapOfShape vertex_map;
     TopExp::MapShapes(mesh_shape, TopAbs_VERTEX, vertex_map);
     for (int vertex_ordinal = 1; vertex_ordinal <= vertex_map.Extent(); ++vertex_ordinal) {
         try {
             const TopoDS_Vertex vertex = TopoDS::Vertex(vertex_map.FindKey(vertex_ordinal));
             const gp_Pnt point = BRep_Tool::Pnt(vertex);
-            if (!first_vertex) {
-                out << ",";
-            }
-            first_vertex = false;
             const int vertex_index = vertex_ordinal - 1;
-            out << "{\"targetId\":";
-            out << quote_json_string(vertex_target_id(part_id, vertex_index, vertex));
-            out << ",\"vertexIndex\":" << vertex_index;
-            out << ",\"label\":";
-            out << quote_json_string(label + ".Vertex" + std::to_string(vertex_ordinal));
-            out << ",\"point\":";
+            out.object();
+            out.key("targetId");
+            out.text(vertex_target_id(part_id, vertex_index, vertex));
+            out.key("vertexIndex");
+            out.integer(vertex_index);
+            out.key("label");
+            out.text(label + ".Vertex" + std::to_string(vertex_ordinal));
+            out.key("point");
             write_topology_point(out, point);
-            out << ",\"exactGeometry\":{\"kind\":\"vertex\",\"point\":";
+            out.key("exactGeometry");
+            out.object();
+            out.key("kind");
+            out.text("vertex");
+            out.key("point");
             write_topology_point(out, point);
-            out << "}";
+            out.end();
             write_authored_bindings(vertex);
-            out << "}";
+            out.end();
         } catch (...) {
         }
     }
 
-    out << "],\"edges\":[";
+    out.end();
+    out.key("edges");
+    out.array();
 
-    bool first_edge = true;
     for (int edge_ordinal = 1; edge_ordinal <= edge_map.Extent(); ++edge_ordinal) {
         try {
             TopoDS_Edge edge = TopoDS::Edge(edge_map.FindKey(edge_ordinal));
@@ -1549,67 +1575,74 @@ std::string write_part_topology(
             }
             gp_Pnt start = curve.Value(first_param);
             gp_Pnt end = curve.Value(last_param);
-            if (!first_edge) {
-                out << ",";
-            }
-            first_edge = false;
             int edge_index = edge_ordinal - 1;
-            out << "{\"targetId\":";
-            out << quote_json_string(edge_target_id(part_id, edge_index, edge));
-            out << ",\"edgeIndex\":" << edge_index;
-            out << ",\"label\":";
-            out << quote_json_string(label + ".Edge" + std::to_string(edge_ordinal));
-            out << ",\"start\":";
+            out.object();
+            out.key("targetId");
+            out.text(edge_target_id(part_id, edge_index, edge));
+            out.key("edgeIndex");
+            out.integer(edge_index);
+            out.key("label");
+            out.text(label + ".Edge" + std::to_string(edge_ordinal));
+            out.key("start");
             write_topology_point(out, start);
-            out << ",\"end\":";
+            out.key("end");
             write_topology_point(out, end);
             TopoDS_Vertex first_vertex_shape;
             TopoDS_Vertex last_vertex_shape;
             TopExp::Vertices(edge, first_vertex_shape, last_vertex_shape);
-            out << ",\"vertexTargetIds\":[";
-            bool first_endpoint = true;
+            out.key("vertexTargetIds");
+            out.array();
+
             for (const TopoDS_Vertex& endpoint : {first_vertex_shape, last_vertex_shape}) {
                 if (endpoint.IsNull()) continue;
                 const int vertex_ordinal = vertex_map.FindIndex(endpoint);
                 if (vertex_ordinal <= 0) continue;
-                if (!first_endpoint) out << ",";
-                first_endpoint = false;
-                out << quote_json_string(vertex_target_id(
+                out.text(vertex_target_id(
                     part_id,
                     vertex_ordinal - 1,
                     TopoDS::Vertex(vertex_map.FindKey(vertex_ordinal))));
             }
-            out << "]";
+            out.end();
             if (curve.GetType() == GeomAbs_Line) {
-                out << ",\"exactGeometry\":{\"kind\":\"lineEdge\",\"start\":";
+                out.key("exactGeometry");
+                out.object();
+                out.key("kind");
+                out.text("lineEdge");
+                out.key("start");
                 write_topology_point(out, start);
-                out << ",\"end\":";
+                out.key("end");
                 write_topology_point(out, end);
-                out << "}";
+                out.end();
             } else if (curve.GetType() == GeomAbs_Circle) {
                 const gp_Circ circle = curve.Circle();
-                out << ",\"exactGeometry\":{\"kind\":\"circleEdge\",\"center\":";
+                out.key("exactGeometry");
+                out.object();
+                out.key("kind");
+                out.text("circleEdge");
+                out.key("center");
                 write_topology_point(out, circle.Location());
-                out << ",\"normal\":";
+                out.key("normal");
                 write_topology_direction(out, circle.Axis().Direction());
-                out << ",\"xDirection\":";
+                out.key("xDirection");
                 write_topology_direction(out, circle.XAxis().Direction());
-                out << ",\"radius\":";
-                write_json_number(out, circle.Radius());
-                out << ",\"firstParameter\":";
-                write_json_number(out, first_param);
-                out << ",\"lastParameter\":";
-                write_json_number(out, last_param);
-                out << "}";
+                out.key("radius");
+                out.number(circle.Radius());
+                out.key("firstParameter");
+                out.number(first_param);
+                out.key("lastParameter");
+                out.number(last_param);
+                out.end();
             }
             write_authored_bindings(edge);
-            out << "}";
+            out.end();
         } catch (...) {
         }
     }
 
-    out << "],\"faces\":[";
-    bool first_face = true;
+    out.end();
+    out.key("faces");
+    out.array();
+
     int face_index = 0;
     std::vector<std::array<gp_Pnt, 3>> boundary_triangles;
     std::vector<int> triangle_face_group_indices;
@@ -1646,21 +1679,21 @@ std::string write_part_topology(
             }
             loops.push_back(std::move(loop));
         }
-        out << ",\"boundaryEdgeTargetIds\":[";
+        out.key("boundaryEdgeTargetIds");
+        out.array();
         if (complete) {
             for (std::size_t loop_index = 0; loop_index < loops.size(); ++loop_index) {
-                if (loop_index > 0) out << ",";
-                out << "[";
+                out.array();
                 for (std::size_t edge_index = 0; edge_index < loops[loop_index].size(); ++edge_index) {
-                    if (edge_index > 0) out << ",";
-                    out << quote_json_string(loops[loop_index][edge_index]);
+                    out.text(loops[loop_index][edge_index]);
                 }
-                out << "]";
+                out.end();
             }
         }
-        out << "]";
+        out.end();
     };
     for (TopExp_Explorer explorer(mesh_shape, TopAbs_FACE); explorer.More(); explorer.Next(), ++face_index) {
+        if (face_index % 256 == 0) report_faces(face_index);
         try {
             TopoDS_Face face = TopoDS::Face(explorer.Current());
             GProp_GProps props;
@@ -1680,7 +1713,7 @@ std::string write_part_topology(
                 BRepTools::UVBounds(face, u_min, u_max, v_min, v_max);
                 if (std::isfinite(u_min) && std::isfinite(u_max) && std::isfinite(v_min) &&
                     std::isfinite(v_max)) {
-                    BRepAdaptor_Surface surface(face);
+                    BRepAdaptor_Surface surface(face, Standard_False);
                     gp_Pnt surface_point;
                     gp_Vec du;
                     gp_Vec dv;
@@ -1696,51 +1729,59 @@ std::string write_part_topology(
             } catch (...) {
             }
 
-            if (!first_face) {
-                out << ",";
-            }
-            first_face = false;
-            out << "{\"targetId\":";
-            out << quote_json_string(face_target);
-            out << ",\"faceIndex\":" << face_index;
-            out << ",\"label\":";
-            out << quote_json_string(label + ".Face" + std::to_string(face_index + 1));
-            out << ",\"center\":";
+            out.object();
+            out.key("targetId");
+            out.text(face_target);
+            out.key("faceIndex");
+            out.integer(face_index);
+            out.key("label");
+            out.text(label + ".Face" + std::to_string(face_index + 1));
+            out.key("center");
             write_topology_point(out, center);
-            out << ",\"normal\":[";
-            write_json_number(out, normal_x);
-            out << ",";
-            write_json_number(out, normal_y);
-            out << ",";
-            write_json_number(out, normal_z);
-            out << "],\"area\":";
-            write_json_number(out, area);
+            out.key("normal");
+            out.array();
+            out.number(normal_x);
+
+            out.number(normal_y);
+
+            out.number(normal_z);
+            out.end();
+            out.key("area");
+            out.number(area);
             try {
-                BRepAdaptor_Surface exact_surface(face);
+                BRepAdaptor_Surface exact_surface(face, Standard_False);
                 if (exact_surface.GetType() == GeomAbs_Plane) {
                     const gp_Pln plane = exact_surface.Plane();
-                    out << ",\"exactGeometry\":{\"kind\":\"planeFace\",\"origin\":";
+                    out.key("exactGeometry");
+                    out.object();
+                    out.key("kind");
+                    out.text("planeFace");
+                    out.key("origin");
                     write_topology_point(out, plane.Location());
-                    out << ",\"normal\":";
+                    out.key("normal");
                     write_topology_direction(out, plane.Axis().Direction());
                     write_face_boundary_edge_target_ids(face);
-                    out << "}";
+                    out.end();
                 } else if (exact_surface.GetType() == GeomAbs_Cylinder) {
                     const gp_Cylinder cylinder = exact_surface.Cylinder();
-                    out << ",\"exactGeometry\":{\"kind\":\"cylinderFace\",\"axisOrigin\":";
+                    out.key("exactGeometry");
+                    out.object();
+                    out.key("kind");
+                    out.text("cylinderFace");
+                    out.key("axisOrigin");
                     write_topology_point(out, cylinder.Location());
-                    out << ",\"axisDirection\":";
+                    out.key("axisDirection");
                     write_topology_direction(out, cylinder.Axis().Direction());
-                    out << ",\"radius\":";
-                    write_json_number(out, cylinder.Radius());
+                    out.key("radius");
+                    out.number(cylinder.Radius());
                     write_face_boundary_edge_target_ids(face);
-                    out << "}";
+                    out.end();
                 }
             } catch (...) {
             }
             write_face_boundary_edge_target_ids(face);
             write_authored_bindings(face);
-            out << "}";
+            out.end();
 
             source_geometry_hash.update(face_target);
             source_geometry_hash.update("|");
@@ -1785,45 +1826,44 @@ std::string write_part_topology(
         }
     }
 
-    out << "],\"triangles\":[";
+    out.end();
+    out.key("triangles");
+    out.array();
     auto write_triangle_vertex = [&](const gp_Pnt& point) {
-        out << "[";
-        write_json_number(out, point.X());
-        out << ",";
-        write_json_number(out, point.Y());
-        out << ",";
-        write_json_number(out, point.Z());
-        out << "]";
+        out.array();
+        out.number(point.X());
+        out.number(point.Y());
+        out.number(point.Z());
+        out.end();
     };
     for (std::size_t index = 0; index < boundary_triangles.size(); ++index) {
-        if (index != 0) {
-            out << ",";
-        }
         const auto& triangle = boundary_triangles[index];
-        out << "{\"vertices\":";
-        out << "[";
+        out.object();
+        out.key("vertices");
+        out.array();
         write_triangle_vertex(triangle[0]);
-        out << ",";
+
         write_triangle_vertex(triangle[1]);
-        out << ",";
+
         write_triangle_vertex(triangle[2]);
-        out << "]}";
+        out.end();
+        out.end();
     }
-    out << "],\"triangleFaceGroupIndices\":[";
+    out.end();
+    out.key("triangleFaceGroupIndices");
+    out.array();
     for (std::size_t index = 0; index < triangle_face_group_indices.size(); ++index) {
-        if (index != 0) {
-            out << ",";
-        }
-        out << triangle_face_group_indices[index];
+        out.integer(triangle_face_group_indices[index]);
     }
     const std::string computed_source_geometry_digest =
         "sha256:" + source_geometry_hash.finish_hex();
     const std::string& source_geometry_digest = source_geometry_digest_override.has_value()
         ? *source_geometry_digest_override
         : computed_source_geometry_digest;
-    out << "],\"sourceGeometryDigest\":";
-    out << quote_json_string(source_geometry_digest);
-    out << "}";
+    out.end();
+    out.key("sourceGeometryDigest");
+    out.text(source_geometry_digest);
+    out.end();
     return source_geometry_digest;
 }
 
@@ -1842,6 +1882,7 @@ std::map<std::string, std::string> write_topology_report(
     const std::optional<fs::path>& cache_root,
     ecky::RenderCacheTransaction* cache_transaction,
     ExecutionContext& context,
+    std::string_view progress_phase,
     const std::map<std::string, std::string>& source_geometry_digest_overrides = {}
 ) {
     if (plan.parts.size() != parts.size()) {
@@ -1850,16 +1891,40 @@ std::map<std::string, std::string> write_topology_report(
     if (cache_root.has_value() != (cache_transaction != nullptr)) {
         throw EvalError("topology cache transaction must match cache configuration");
     }
-    std::ofstream out(topology_path);
-    if (!out) {
+    std::ofstream file(topology_path, std::ios::binary);
+    if (!file) {
         throw IoError("failed to open topology file");
     }
-    out << "{\"schemaVersion\":1,\"tessellationPolicy\":{\"linearDeflectionMm\":";
-    write_json_number(out, boundary_linear_deflection);
-    out << ",\"angularDeflectionRad\":";
-    write_json_number(out, boundary_angular_deflection);
-    out << "},\"parts\":[";
-    bool first_part = true;
+    const auto write_bytes = [&](const std::string& bytes) {
+        file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        if (!file.good()) throw IoError("failed to write topology file");
+    };
+    ecky::TopologyMessagePack prefix;
+    prefix.object();
+    prefix.key("schemaVersion");
+    prefix.integer(1);
+    prefix.key("tessellationPolicy");
+    prefix.object();
+    prefix.key("linearDeflectionMm");
+    prefix.number(boundary_linear_deflection);
+    prefix.key("angularDeflectionRad");
+    prefix.number(boundary_angular_deflection);
+    prefix.end();
+    prefix.key("parts");
+    prefix.array_prefix(parts.size());
+    prefix.end();
+    write_bytes(prefix.data());
+    std::vector<std::size_t> face_counts(parts.size(), 0);
+    std::size_t total_faces = 0;
+    for (std::size_t index = 0; index < parts.size(); ++index) {
+        if (parts[index].kind != ShapeRecord::Kind::Shape) continue;
+        for (TopExp_Explorer face(parts[index].shape, TopAbs_FACE); face.More(); face.Next()) {
+            ++face_counts[index];
+        }
+        total_faces += face_counts[index];
+    }
+    std::size_t completed_faces = 0;
+    emit_render_progress(progress_phase, completed_faces, total_faces);
     std::map<std::string, std::string> source_geometry_digests;
     for (std::size_t part_index = 0; part_index < parts.size(); ++part_index) {
         const auto& part = parts[part_index];
@@ -1883,10 +1948,9 @@ std::map<std::string, std::string> write_topology_report(
                 else ++context.topology_cache_miss_count;
             }
             if (!fragment.has_value()) {
-                std::ostringstream fragment_json;
-                bool first_fragment_part = true;
+                ecky::TopologyMessagePack fragment_writer;
                 const std::string source_geometry_digest = write_part_topology(
-                    fragment_json,
+                    fragment_writer,
                     part.part_id,
                     part.label,
                     part.shape,
@@ -1894,9 +1958,11 @@ std::map<std::string, std::string> write_topology_report(
                     boundary_linear_deflection,
                     boundary_angular_deflection,
                     source_geometry_digest_override,
-                    first_fragment_part);
+                    [&](std::size_t faces) {
+                        emit_render_progress(progress_phase, completed_faces + faces, total_faces);
+                    });
                 fragment = CachedTopologyFragment{
-                    fragment_json.str(), source_geometry_digest};
+                    fragment_writer.take_data(), source_geometry_digest};
                 if (cache_transaction != nullptr) {
                     write_cached_topology_fragment(
                         cache_transaction->staging_root(), cache_key, *fragment, context);
@@ -1904,22 +1970,31 @@ std::map<std::string, std::string> write_topology_report(
                     ++context.topology_cache_write_count;
                 }
             }
-            if (!first_part) out << ',';
-            first_part = false;
-            out << fragment->json;
+            write_bytes(fragment->messagepack);
             source_geometry_digests[part.part_id] = fragment->source_geometry_digest;
         } else {
-            if (!first_part) out << ',';
-            first_part = false;
-            out << "{\"partId\":" << quote_json_string(part.part_id)
-                << ",\"label\":" << quote_json_string(part.label)
-                << ",\"representation\":\"meshDomain\",\"edges\":[],\"faces\":[]}";
+            ecky::TopologyMessagePack out;
+            out.object();
+            out.key("partId");
+            out.text(part.part_id);
+            out.key("label");
+            out.text(part.label);
+            out.key("representation");
+            out.text("meshDomain");
+            out.key("edges");
+            out.array();
+            out.end();
+            out.key("faces");
+            out.array();
+            out.end();
+            out.end();
+            write_bytes(out.data());
         }
+        completed_faces += face_counts[part_index];
+        emit_render_progress(progress_phase, completed_faces, total_faces);
     }
-    out << "]}";
-    if (!out.good()) {
-        throw IoError("failed to write topology file");
-    }
+    file.close();
+    if (!file.good()) throw IoError("failed to close topology file");
     return source_geometry_digests;
 }
 
@@ -6931,7 +7006,7 @@ std::string topology_fragment_cache_key(
     const std::optional<std::string>& source_geometry_digest_override
 ) {
     ecky::ExecutionIdentityInput input = execution_identity_base(
-        "part-topology-json-v1", context);
+        "part-topology-msgpack-v1", context);
     input.resolved_args = {
         "part-id:" + part.part_id,
         "label:" + part.label,
@@ -6962,7 +7037,7 @@ std::optional<CachedTopologyFragment> read_cached_topology_fragment(
         ++context.cache_read_count;
     }
     const fs::path cache_dir = root / "topology-parts";
-    const fs::path artifact = cache_dir / (key + ".json");
+    const fs::path artifact = cache_dir / (key + ".msgpack");
     const fs::path metadata = cache_dir / (key + ".meta");
     try {
         std::ifstream meta(metadata);
@@ -6975,7 +7050,7 @@ std::optional<CachedTopologyFragment> read_cached_topology_fragment(
         if (!(meta >> schema >> stored_key >> stored_representation >> stored_digest >>
               stored_size >> source_geometry_digest) ||
             schema != kSelectiveCacheSchema || stored_key != key ||
-            stored_representation != "topologyJson" ||
+            stored_representation != "topologyMessagePack" ||
             !fs::is_regular_file(artifact) || file_digest(artifact) != stored_digest ||
             std::to_string(fs::file_size(artifact)) != stored_size) {
             fs::remove(artifact);
@@ -6984,22 +7059,12 @@ std::optional<CachedTopologyFragment> read_cached_topology_fragment(
             ++context.cache_rejection_count;
             return std::nullopt;
         }
-        const std::string json = read_binary_file(artifact);
-        const std::string digest_field =
-            "\"sourceGeometryDigest\":" + quote_json_string(source_geometry_digest);
-        if (json.size() < 2 || json.front() != '{' || json.back() != '}' ||
-            json.find(digest_field) == std::string::npos) {
-            fs::remove(artifact);
-            fs::remove(metadata);
-            std::lock_guard<std::mutex> lock(context.mutex);
-            ++context.cache_rejection_count;
-            return std::nullopt;
-        }
+        std::string messagepack = read_binary_file(artifact);
         const auto now = fs::file_time_type::clock::now();
         std::error_code touch_error;
         fs::last_write_time(artifact, now, touch_error);
         fs::last_write_time(metadata, now, touch_error);
-        return CachedTopologyFragment{json, source_geometry_digest};
+        return CachedTopologyFragment{std::move(messagepack), source_geometry_digest};
     } catch (...) {
         std::error_code ignored;
         fs::remove(artifact, ignored);
@@ -7018,17 +7083,17 @@ void write_cached_topology_fragment(
 ) {
     const fs::path cache_dir = root / "topology-parts";
     fs::create_directories(cache_dir);
-    const fs::path artifact = cache_dir / (key + ".json");
+    const fs::path artifact = cache_dir / (key + ".msgpack");
     const fs::path metadata = cache_dir / (key + ".meta");
     {
         std::ofstream output(artifact, std::ios::binary);
-        output.write(fragment.json.data(), static_cast<std::streamsize>(fragment.json.size()));
+        output.write(fragment.messagepack.data(), static_cast<std::streamsize>(fragment.messagepack.size()));
         if (!output.good()) throw IoError("failed to stage topology cache artifact");
     }
     const std::string digest = file_digest(artifact);
     {
         std::ofstream meta(metadata);
-        meta << kSelectiveCacheSchema << ' ' << key << " topologyJson " << digest << ' '
+        meta << kSelectiveCacheSchema << ' ' << key << " topologyMessagePack " << digest << ' '
              << fs::file_size(artifact) << ' ' << fragment.source_geometry_digest << '\n';
         if (!meta.good()) throw IoError("failed to stage topology cache metadata");
     }
@@ -7112,7 +7177,7 @@ void evict_cache_to_budget(const fs::path& root) {
         for (const auto& item : fs::directory_iterator(dir)) {
             const std::string extension = item.path().extension().string();
             if (extension != ".brepbin" && extension != ".meshbin" &&
-                extension != ".partmesh" && extension != ".json") {
+                extension != ".partmesh" && extension != ".json" && extension != ".msgpack") {
                 continue;
             }
             const fs::path metadata = item.path().parent_path() /
@@ -9515,10 +9580,36 @@ int run(int argc, char** argv, ExecutionContext& context) {
 
     const fs::path step_path = out_dir / "model.step";
     const fs::path stl_path = out_dir / "model.stl";
-    const fs::path topology_path = out_dir / "topology.json";
-    const fs::path analysis_boundary_path = out_dir / "analysis-boundary.json";
+    const fs::path topology_path = out_dir / "topology.msgpack";
+    const fs::path analysis_boundary_path = out_dir / "analysis-boundary.msgpack";
     const fs::path stage_report_path = out_dir / "stage-report.json";
 
+    // Every part contributes one immutable triangle stream. Analytic BRep parts
+    // tessellate through the bounded/cacheable OCCT path; mesh-domain parts copy
+    // their canonical Manifold triangles without a remesh or cross-part union.
+    std::vector<ecky::PartMesh> part_meshes = build_part_meshes(
+        plan, parts, cache_root, cache_transaction ? &*cache_transaction : nullptr,
+        context, PartMeshQuality::Production);
+    std::vector<const ecky::PartMesh*> preview_meshes;
+    preview_meshes.reserve(part_meshes.size());
+    for (const ecky::PartMesh& mesh : part_meshes) preview_meshes.push_back(&mesh);
+    {
+        std::lock_guard<std::mutex> lock(context.mutex);
+        context.preview_facet_count = 0;
+        for (const ecky::PartMesh& mesh : part_meshes) {
+            context.preview_facet_count += mesh.triangles.size();
+        }
+    }
+    run_occt_export_stage("write-model-stl", [&]() {
+        StageExecutionTimer stage_timer(context, "export");
+        write_part_mesh_stl_file(stl_path, preview_meshes);
+    }, context);
+    const auto elapsed_ms_since = [](auto started_at) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started_at).count();
+    };
+    context.display_mesh_ready_elapsed_ms = elapsed_ms_since(context.report_started_at);
+    emit_render_progress("meshReady", 0, 0);
     const bool mesh_only = std::all_of(parts.begin(), parts.end(), [](const ShapeRecord& part) {
         return part.kind == ShapeRecord::Kind::Manifold;
     });
@@ -9542,26 +9633,6 @@ int run(int argc, char** argv, ExecutionContext& context) {
         }, context);
     }
 
-    // Every part contributes one immutable triangle stream. Analytic BRep parts
-    // tessellate through the bounded/cacheable OCCT path; mesh-domain parts copy
-    // their canonical Manifold triangles without a remesh or cross-part union.
-    std::vector<ecky::PartMesh> part_meshes = build_part_meshes(
-        plan, parts, cache_root, cache_transaction ? &*cache_transaction : nullptr,
-        context, PartMeshQuality::Production);
-    std::vector<const ecky::PartMesh*> preview_meshes;
-    preview_meshes.reserve(part_meshes.size());
-    for (const ecky::PartMesh& mesh : part_meshes) preview_meshes.push_back(&mesh);
-    {
-        std::lock_guard<std::mutex> lock(context.mutex);
-        context.preview_facet_count = 0;
-        for (const ecky::PartMesh& mesh : part_meshes) {
-            context.preview_facet_count += mesh.triangles.size();
-        }
-    }
-    run_occt_export_stage("write-model-stl", [&]() {
-        StageExecutionTimer stage_timer(context, "export");
-        write_part_mesh_stl_file(stl_path, preview_meshes);
-    }, context);
 // Write per-part binary STL files so multipart export (3MF / zip) has
 // distinct geometry per part instead of duplicating the merged mesh. Same
 // adaptive tessellation policy as the merged preview/export path.
@@ -9584,6 +9655,7 @@ int run(int argc, char** argv, ExecutionContext& context) {
         }
     }
     context.set_stage("write-topology");
+    const auto topology_started = std::chrono::steady_clock::now();
     const std::map<std::string, std::string> source_geometry_digests =
         write_topology_report(
             topology_path,
@@ -9593,8 +9665,10 @@ int run(int argc, char** argv, ExecutionContext& context) {
             stl_angular_deflection_for_linear(kStlLinearDeflection),
             cache_root,
             cache_transaction ? &*cache_transaction : nullptr,
-            context);
+            context, "topology");
+    context.topology_elapsed_ms = elapsed_ms_since(topology_started);
     context.set_stage("write-analysis-boundary");
+    const auto analysis_started = std::chrono::steady_clock::now();
     write_topology_report(
         analysis_boundary_path,
         plan,
@@ -9604,7 +9678,10 @@ int run(int argc, char** argv, ExecutionContext& context) {
         cache_root,
         cache_transaction ? &*cache_transaction : nullptr,
         context,
+        "analysisBoundary",
         source_geometry_digests);
+    context.analysis_boundary_elapsed_ms = elapsed_ms_since(analysis_started);
+    emit_render_progress("publishing", 0, 0);
     context.set_stage("write-stage-report");
     write_stage_report(stage_report_path, context);
     if (cache_transaction.has_value()) {

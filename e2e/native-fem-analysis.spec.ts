@@ -43,6 +43,7 @@ async function installFemFixture(
   convergenceFailure = false,
   failureMode?: FemFailureMode,
   cachedConvergence: CachedConvergence = 'present',
+  restoreAnalysis = false,
 ) {
   const arrays = new Map<string, Buffer>([
     ['nodes.bin', float64Le([0, 0, 0, 10, 0, 0, 0, 10, 0, 0, 0, 10])],
@@ -61,7 +62,7 @@ async function installFemFixture(
       ? { status: 200, contentType: 'application/octet-stream', body: arrays.get(name)! }
       : { status: 404, body: 'missing FEM fixture' });
   });
-  await page.addInitScript(({ source, failure, convergenceFailure, failureMode, cachedConvergence }) => {
+  await page.addInitScript(({ source, failure, convergenceFailure, failureMode, cachedConvergence, restoreAnalysis }) => {
     let cancellationRequested = false;
     let activityCursor = 0;
     let nextCallbackId = 1;
@@ -241,7 +242,9 @@ async function installFemFixture(
       if (cmd === 'get_default_macro') return source;
       if (cmd === 'get_thread_agent_state') return { connectionState: 'disconnected', sessions: [], primaryAgentLabel: null, statusText: '', phase: null, busy: false };
       if (cmd === 'get_active_agent_sessions' || cmd === 'get_agent_terminal_snapshots' || cmd === 'list_installed_component_package_headers') return [];
-      if (cmd === 'get_thread_window_layout') return null;
+      if (cmd === 'get_thread_window_layout') return restoreAnalysis ? {
+        windows: { analysis: { visible: true, x: 60, y: 40, width: 440, height: 640, z: 1 } },
+      } : null;
       if (cmd === 'save_thread_window_layout') return null;
       if (cmd === 'plugin:fs|exists') return true;
       if (cmd === 'plugin:fs|size') return 1024;
@@ -313,7 +316,7 @@ async function installFemFixture(
       }
       return null;
     };
-  }, { source, failure, convergenceFailure, failureMode, cachedConvergence });
+  }, { source, failure, convergenceFailure, failureMode, cachedConvergence, restoreAnalysis });
 }
 
 test('Given a model contains an analysis When ordinary preview opens Then no FEM worker operation starts', async ({ page }) => {
@@ -408,6 +411,21 @@ test('Given authored face tags and linear-static study When native FEM runs Then
     source,
     analysisName: 'bracket-static',
   });
+});
+
+test('Given a FEM result array cannot load When drawing the overlay Then Ecky opens the diagnostic in Activity', async ({ page }) => {
+  await installFemFixture(page, false, false, undefined, 'present', true);
+  await page.route('**/mock/fem/stress.bin', (route) => route.fulfill({ status: 404 }));
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+  await page.getByRole('button', { name: 'MESH + SOLVE' }).click();
+
+  const bubble = page.locator('.genie-layer .agent-card--error').filter({ hasText: 'returned HTTP 404' });
+  await expect(bubble).toBeVisible();
+  await expect(page.locator('.fem-legend--error')).toHaveCount(0);
+  await page.locator('[data-window-id="analysis"] .window-close').click();
+  await bubble.click();
+  await expect(page.getByTestId('activity-event-detail')).toContainText('returned HTTP 404');
 });
 
 test('Given Mesh + Solve starts When work continues Then global FEM bubble becomes a completion notification', async ({ page }) => {

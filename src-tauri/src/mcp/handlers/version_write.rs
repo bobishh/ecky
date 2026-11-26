@@ -134,22 +134,23 @@ async fn require_green_verification_for_preview(
                 return Err(error);
             }
         };
-        let topology_path =
-            match std::path::Path::new(&snapshot.artifact_bundle.manifest_path).parent() {
-                Some(directory) => directory.join("topology.json"),
-                None => {
-                    let error = AppError::validation(
-                        "Guided reconstruction preview manifest has no artifact directory.",
-                    );
-                    let conn = state.db.lock().await;
-                    crate::capture_runs::record_guided_reconstruction_validation_error(
-                        &conn,
-                        &pending.request_id,
-                        &error.message,
-                    )?;
-                    return Err(error);
-                }
-            };
+        let topology_path = match std::path::Path::new(&snapshot.artifact_bundle.manifest_path)
+            .parent()
+        {
+            Some(directory) => crate::ecky_cad_host::topology_artifact::topology_path(directory),
+            None => {
+                let error = AppError::validation(
+                    "Guided reconstruction preview manifest has no artifact directory.",
+                );
+                let conn = state.db.lock().await;
+                crate::capture_runs::record_guided_reconstruction_validation_error(
+                    &conn,
+                    &pending.request_id,
+                    &error.message,
+                )?;
+                return Err(error);
+            }
+        };
         let validation = (|| {
             let inferred_regions = validate_capture_guided_commit_result(pending, guided_result)?;
             let mut provenance =

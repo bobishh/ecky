@@ -189,6 +189,7 @@ import {
     visibleAgentTerminalStore,
   } from './lib/stores/agentTerminalStore';
   import {
+    compactThreadActivitySummary,
     isThreadAgentBusy,
     resolveActiveMcpBubble,
     resolveGenieBubblePresentation,
@@ -267,7 +268,7 @@ import {
     resolveActiveAuthoringContext,
   } from './lib/runtimeCapabilities';
   import { isRenderableVersionTimelineMessage, isVersionTimelineMessage } from './lib/threadTimeline';
-  import { versionDiagnosticForDisplay } from './lib/versionDiagnostic';
+  import { versionDiagnosticForDisplay, versionDiagnosticSummary } from './lib/versionDiagnostic';
   import {
     applyCaptureGuideDraftEdit,
     createCaptureGuideDraftHistory,
@@ -547,6 +548,17 @@ import {
   type GeometryRenderActivityEvent = {
     activeCount: number;
   };
+  type NativeRenderTarget = {
+    renderId: string;
+    threadId: string;
+    baseMessageId: string | null;
+    messageId: string | null;
+  };
+  type NativeRenderProgress = NativeRenderTarget & (
+    | { stage: 'meshReady'; modelStlPath: string }
+    | { stage: 'topology' | 'analysisBoundary'; completedFaces: number; totalFaces: number }
+    | { stage: 'publishing' | 'failed' }
+  );
   type HiddenViewerSpec = {
     requestId: string;
     targetKey: string;
@@ -676,6 +688,7 @@ import {
       }
     }
 
+    if (openRequest !== codeModalOpenRequest) return;
     const activeId = $activeThreadId;
     const sourceThreadId = activeId;
     if (!sourceThreadId) {
@@ -772,15 +785,17 @@ import {
         renderSnapshot.threadId === sourceThreadId &&
         renderSnapshot.artifactBundle.modelId === loadedModelId,
     );
-    let initialCode = referencedSource?.source ?? seed?.code ?? (
+    const initialCode = referencedSource?.source ?? seed?.code ?? (
       activeRenderMatchesViewport
         ? renderSnapshot?.design.macroCode ?? current.macroCode
         : current.macroCode
     );
     codeModalEvidence = '';
     codeModalMode = 'version';
-    codeModalSourceAuthority = activeRenderMatchesViewport ? 'draft' : 'bound';
+    const versionSourceId = seed?.expectedSourcePath ? null : seed?.messageId ?? null;
+    codeModalSourceAuthority = activeRenderMatchesViewport || versionSourceId ? 'draft' : 'bound';
     codeModalSourceThreadId = sourceThreadId;
+    codeModalSourceMessageId = versionSourceId;
     codeModalSourceLanguage = nextSourceLanguage;
     codeModalDraftSerial += 1;
     codeModalDraftScopeKey = [
@@ -795,30 +810,26 @@ import {
     // immediately from the exact source already associated with the viewport.
     mountedWindows.code = true;
     showWindow('code');
-    codeModalSourceMessageId = null;
-    if (seed?.messageId && !seed.expectedSourcePath) {
+    const isCurrentCodeOpen = () =>
+      openRequest === codeModalOpenRequest && $windowStore.code.visible && $activeThreadId === sourceThreadId;
+    if (versionSourceId) {
       try {
-        initialCode = await getVersionSource(sourceThreadId, seed.messageId) ?? seed.code ?? initialCode;
-        if (openRequest !== codeModalOpenRequest || !$windowStore.code.visible) return;
-        codeModalMode = 'version';
-        codeModalSourceAuthority = 'draft';
-        codeModalSourceThreadId = sourceThreadId;
-        codeModalSourceMessageId = seed.messageId;
-        codeModalSourceLanguage = nextSourceLanguage;
-        selectedCode.set(initialCode);
-        selectedTitle.set(codeInspectorTitle(nextTitle, nextSourceLanguage, nextGeometryBackend));
-        return;
+        const source = await getVersionSource(sourceThreadId, versionSourceId);
+        if (isCurrentCodeOpen() && source !== null && get(selectedCode) === initialCode) {
+          selectedCode.set(source);
+        }
       } catch (error) {
-        session.setError(`Source Error: ${formatBackendError(error)}`);
-        return;
+        if (isCurrentCodeOpen()) session.setError(`Source Error: ${formatBackendError(error)}`);
       }
+      return;
     }
 
     let boundSource;
     try {
       boundSource = referencedSource ?? await getProjectSource(sourceThreadId);
-      if (openRequest !== codeModalOpenRequest || !$windowStore.code.visible) return;
+      if (!isCurrentCodeOpen()) return;
     } catch (error) {
+      if (!isCurrentCodeOpen()) return;
       const message = `Source Error: ${formatBackendError(error)}`;
       if (seed?.throwSourceError) throw new Error(message);
       session.setError(message);
@@ -953,7 +964,14 @@ import {
       return;
     }
     if (id === 'code') {
-      void openVersionCodeModal();
+      const version = selectedVersionHistoryMessage;
+      void openVersionCodeModal(version?.status === 'error' && !stlUrl ? {
+        messageId: version.id,
+        code: version.output?.macroCode ?? '',
+        title: version.output?.title ?? version.versionSummary?.title ?? undefined,
+        sourceLanguage: version.output?.sourceLanguage,
+        geometryBackend: version.output?.geometryBackend,
+      } : undefined);
       return;
     }
     if (id === 'terminal') {
@@ -1794,6 +1812,63 @@ import {
   $effect(() => {
     activePreviewViewId = activePreviewView?.viewId ?? null;
   });
+  let nativeRender = $state<{
+    target: NativeRenderTarget;
+    stlUrl: string;
+    progress: NativeRenderProgress;
+  } | null>(null);
+  function nativeRenderMatchesSelection(target: NativeRenderTarget): boolean {
+    const threadId = get(activeThreadId);
+    const versionId = get(activeVersionId) ?? null;
+    return target.threadId === threadId
+      && (target.baseMessageId === versionId || target.messageId === versionId);
+  }
+
+  function projectNativeRenderProgress(progress: NativeRenderProgress) {
+    if (progress.stage === 'meshReady') {
+      if (nativeRenderMatchesSelection(progress)) {
+        nativeRender = { target: progress, stlUrl: toAssetUrl(progress.modelStlPath), progress };
+      }
+      return;
+    }
+    if (nativeRender?.target.renderId !== progress.renderId) return;
+    if (progress.stage === 'failed') {
+      nativeRender = null;
+    } else {
+      nativeRender = { ...nativeRender, progress };
+    }
+  }
+
+  const activeNativeRender = $derived(
+    nativeRender
+    && nativeRender.target.threadId === $activeThreadId
+    && (nativeRender.target.baseMessageId === ($activeVersionId ?? null)
+      || nativeRender.target.messageId === ($activeVersionId ?? null))
+    && nativeRender.stlUrl !== stlUrl
+    && !(selectedVersionHistoryMessage?.status === 'error'
+      && selectedVersionHistoryMessage.id === nativeRender.target.messageId)
+      ? nativeRender
+      : null,
+  );
+  $effect(() => {
+    if (nativeRender?.stlUrl === stlUrl) nativeRender = null;
+  });
+  const nativeBackgroundProgress = $derived.by(() => {
+    const progress = activeNativeRender?.progress;
+    if (!progress) return null;
+    if (progress.stage === 'topology' || progress.stage === 'analysisBoundary') {
+      return {
+        label: progress.stage === 'topology' ? 'Building topology' : 'Preparing analysis mesh',
+        completed: progress.completedFaces,
+        total: progress.totalFaces,
+      };
+    }
+    return {
+      label: progress.stage === 'meshReady' ? 'Preparing topology' : 'Saving model',
+      completed: 0,
+      total: 0,
+    };
+  });
   const geometryRenderActive = $derived(geometryRenderActiveCount > 0);
   const suppressViewportBusyUi = $derived(isBooting);
   const projectFolderRenderPending = $derived(
@@ -1814,6 +1889,7 @@ import {
     deriveViewerBusyState({
       geometryRenderActive,
       projectFolderRenderPending,
+      hasEarlyDisplayMesh: Boolean(activeNativeRender),
     }),
   );
   const showViewerBusyMask = $derived(viewerBusyState.showViewerBusyMask);
@@ -1882,18 +1958,16 @@ import {
     return sketchPreviewDraft.savedAt ? 'DRAFT SAVED' : 'DRAFT ACTIVE';
   });
   const effectiveViewerStlUrl = $derived.by<string | null>(() =>
-    hasSketchPreview ? sketchPreviewStlUrl : ($activeThreadId ? stlUrl : null),
+    hasSketchPreview ? sketchPreviewStlUrl : ($activeThreadId ? activeNativeRender?.stlUrl ?? stlUrl : null),
   );
-  const selectedVersionDiagnostic = $derived(selectedVersionHistoryMessage?.status === 'error'
-    ? versionDiagnosticForDisplay(
-      selectedVersionHistoryMessage.content || selectedVersionHistoryMessage.output?.response || errorText,
-    )
+  const failedVersion = $derived(selectedVersionHistoryMessage?.status === 'error' && !$activeThreadVersionLoading
+    ? selectedVersionHistoryMessage
     : null);
-  const selectedVersionHasNoModel = $derived(Boolean(
-    selectedVersionHistoryMessage?.status === 'error' && !hasSketchPreview && !$activeThreadVersionLoading && !stlUrl,
-  ));
+  const failedVersionError = $derived(failedVersion
+    ? failedVersion.content || failedVersion.output?.response || 'Version render failed.'
+    : null);
   const effectiveViewerAssets = $derived.by<ViewerAsset[]>(() =>
-    hasSketchPreview ? sketchPreviewViewerAssets : viewerAssets,
+    hasSketchPreview ? sketchPreviewViewerAssets : activeNativeRender ? [] : viewerAssets,
   );
   const hasRenderableModel = $derived.by(() => viewportState.hasRenderableModel);
   const currentViewportTargetKey = $derived.by<string | null>(
@@ -1910,7 +1984,7 @@ import {
           sketchPreview.artifactBundle.artifactVersion ?? '',
           sketchPreview.artifactBundle.contentHash ?? '',
         ].join(':')
-      : currentViewerModelKey,
+      : activeNativeRender ? `native-preview:${activeNativeRender.target.renderId}` : currentViewerModelKey,
   );
   const persistedViewportCameraState = $derived.by<ViewportCameraState | null>(
     () => viewportState.persistedViewportCameraState,
@@ -3485,7 +3559,7 @@ import {
   function handleVisibleViewerLoaded() {
     visibleViewerLoadNonce = viewerLoadRuntime.markLoaded('visible');
     if (
-      !hasSketchPreview &&
+      !hasSketchPreview && !activeNativeRender &&
       shouldPersistVersionPreview(activeVersionMessage, get(session).artifactBundle, get(session).stlUrl)
     ) {
       void persistVisibleVersionPreview(visibleViewerLoadNonce);
@@ -3497,6 +3571,11 @@ import {
   }
 
   function handleVisibleViewerLoadError(message: string) {
+    if (activeNativeRender) {
+      nativeRender = null;
+      session.setError(`Viewer Load Error: ${message}`);
+      return;
+    }
     void recoverVisibleViewerRuntime(message);
   }
 
@@ -4591,6 +4670,12 @@ import {
         })
       : noopUnlisten;
 
+    const unlistenNativeRender = canListenToTauri
+      ? listen<NativeRenderProgress>('native-render-progress', (event) => {
+          projectNativeRenderProgress(event.payload);
+        })
+      : noopUnlisten;
+
     const unlisten = canListenToTauri ? listen<AgentConfirmItem>('agent-confirm-request', (event) => {
       const item = event.payload;
       if (!pendingConfirms.find(c => c.requestId === item.requestId)) {
@@ -4893,6 +4978,7 @@ import {
       void unlistenViewportScreenshot.then(fn => fn());
       void unlistenHistory.then(fn => fn());
       void unlistenGeometryRender.then(fn => fn());
+      void unlistenNativeRender.then(fn => fn());
       void unlistenProjectFolderSync.then(fn => fn());
       void unlistenDraftPreviewChanged.then(fn => fn());
       void unlistenSessions.then(fn => fn());
@@ -5188,7 +5274,7 @@ import {
 
   const genieBubbleState = $derived.by(() =>
     resolveGenieBubblePresentation({
-      sessionError: errorText,
+      sessionError: versionDiagnosticForDisplay(errorText ?? failedVersionError),
       sessionAuthoringError,
       onboardingText: $onboarding.isActive ? $onboarding.text : null,
       viewportScreenshotMessage:
@@ -5251,6 +5337,46 @@ import {
   });
 
   const sessionActivityEvents = $derived.by<SessionEvent[]>(() => $sessionActivityEventStore);
+  const workbenchErrorEvent = $derived.by(() => {
+    const threadId = globalErrorText ? null : $activeThreadId ?? null;
+    const versionId = globalErrorText ? null : $activeVersionId ?? null;
+    const diagnostic = versionDiagnosticForDisplay(
+      globalErrorText ?? errorText ?? failedVersionError
+      ?? (activeThreadHighestPhase === 'error' ? activeThreadErrorText : null),
+    );
+    if (!diagnostic) return null;
+    const version = failedVersion && diagnostic === versionDiagnosticForDisplay(failedVersionError)
+      ? failedVersion
+      : null;
+    const title = version?.output?.title || version?.versionSummary?.title;
+    return {
+      id: version && threadId ? `version-error:${threadId}:${version.id}` : undefined,
+      threadId,
+      versionId,
+      timestamp: version ? version.timestamp * 1000 : undefined,
+      kind: version ? 'render_failed' : 'operation_failed',
+      title: title ? `Version failed to render · ${title}` : version ? 'Version failed to render' : 'Workbench error',
+      summary: versionDiagnosticSummary(diagnostic),
+      detail: diagnostic,
+      severity: 'error',
+      state: 'failed',
+    } as const;
+  });
+  let recordedWorkbenchError = $state<SessionEvent | null>(null);
+  $effect(() => {
+    const failure = workbenchErrorEvent;
+    recordedWorkbenchError = failure
+      ? untrack(() => {
+          const existing = get(sessionActivityEventStore).find((event) =>
+            failure.id ? event.id === failure.id : (
+              event.severity === 'error' && event.threadId === failure.threadId &&
+              event.versionId === failure.versionId && (event.detail === failure.detail || event.summary === failure.detail)
+            ),
+          );
+          return existing ?? recordSessionActivityEvent(failure);
+        })
+      : null;
+  });
   const sessionActivity = $derived.by(() =>
     composeSessionActivity(sessionActivityEvents, $activeThreadId ?? null, $activeVersionId ?? null),
   );
@@ -5258,7 +5384,7 @@ import {
   const sessionCodeDiffView = $derived.by(() => composeCodeDiffView(sessionActivity, $selectedCode));
 
   function openSessionActivityFromBubble() {
-    const event = sessionBubbleEvent.event;
+    const event = recordedWorkbenchError ?? sessionBubbleEvent.event;
     if (event) selectedSessionActivityEventId = event.id;
     mountedWindows.activity = true;
     showWindow('activity');
@@ -5433,17 +5559,19 @@ import {
   ]);
 
   $effect(() => {
-    const appError = globalErrorText;
-    if (appError) {
+    const failure = recordedWorkbenchError;
+    if (failure) {
       localNotificationActionsStore.set({
-        eventId: `local-ui:globalError:${appError}`,
-        threadId: null,
+        eventId: failure.id,
+        activityEventId: failure.id,
+        threadId: failure.threadId,
         actorLabel: 'ECKY',
-        summary: appError,
-        detail: null,
+        summary: compactThreadActivitySummary(versionDiagnosticSummary(failure.detail ?? failure.summary)),
+        detail: globalErrorText ? null : [genieBubbleState.layer, genieBubbleState.fix].filter(Boolean).join(' · ') || null,
         severity: 'error',
         state: 'failed',
         requiresAttention: true,
+        persistUntilDismissed: failure.id.startsWith('version-error:'),
         actions: [],
       });
       return;
@@ -5485,7 +5613,7 @@ import {
     const text = genieBubbleState.text;
     const actions = genieActions ?? [];
     if (!text || !localNotificationSources.has(source)) {
-      localNotificationActionsStore.set(null);
+      localNotificationActionsStore.hide();
       return;
     }
 
@@ -5640,6 +5768,7 @@ import {
 
   async function handleExport(mode: ExportMode) {
     showExportChooser = false;
+    if (activeNativeRender) return;
     let exportBundle = activeArtifactBundle;
     let exportParts = multipartExportParts;
     let exportIsMultipart = hasMultipartExportModel;
@@ -6217,34 +6346,35 @@ ${detail}`,
                 modelKey={effectiveViewerModelKey}
                 stlUrl={effectiveViewerStlUrl}
                 viewerAssets={effectiveViewerAssets}
-                femResult={visibleFemResult}
-                femMeshPreview={visibleFemMeshPreview}
+                femResult={activeNativeRender ? null : visibleFemResult}
+                femMeshPreview={activeNativeRender ? null : visibleFemMeshPreview}
+                onFemOverlayError={(message) => session.setError(message)}
                 {femDisplay}
-                manifestParts={hasSketchPreview ? [] : activeModelManifest?.parts ?? []}
-                edgeTargets={hasSketchPreview ? sketchPreview?.artifactBundle?.edgeTargets ?? [] : activeArtifactBundle?.edgeTargets ?? []}
-                faceTargets={hasSketchPreview ? sketchPreview?.artifactBundle?.faceTargets ?? [] : activeArtifactBundle?.faceTargets ?? []}
-                selectionTargets={hasSketchPreview ? [] : contextSelectionTargets}
-                selectedTarget={hasSketchPreview ? null : selectedTarget}
-                searchQuery={hasSketchPreview ? '' : sharedContextSearchQuery}
+                manifestParts={(hasSketchPreview || activeNativeRender) ? [] : activeModelManifest?.parts ?? []}
+                edgeTargets={hasSketchPreview ? sketchPreview?.artifactBundle?.edgeTargets ?? [] : activeNativeRender ? [] : activeArtifactBundle?.edgeTargets ?? []}
+                faceTargets={hasSketchPreview ? sketchPreview?.artifactBundle?.faceTargets ?? [] : activeNativeRender ? [] : activeArtifactBundle?.faceTargets ?? []}
+                selectionTargets={(hasSketchPreview || activeNativeRender) ? [] : contextSelectionTargets}
+                selectedTarget={(hasSketchPreview || activeNativeRender) ? null : selectedTarget}
+                searchQuery={(hasSketchPreview || activeNativeRender) ? '' : sharedContextSearchQuery}
                 outlineEnabled={viewerOutlineEnabled}
-                persistedCameraState={hasSketchPreview ? null : persistedViewportCameraState}
-                selectedPartId={hasSketchPreview ? null : selectedPartId}
-                isolatedPartId={hasSketchPreview ? null : isolatedPartId}
-                hiddenPartIds={hasSketchPreview ? [] : hiddenPartIds}
+                persistedCameraState={(hasSketchPreview || activeNativeRender) ? null : persistedViewportCameraState}
+                selectedPartId={(hasSketchPreview || activeNativeRender) ? null : selectedPartId}
+                isolatedPartId={(hasSketchPreview || activeNativeRender) ? null : isolatedPartId}
+                hiddenPartIds={(hasSketchPreview || activeNativeRender) ? [] : hiddenPartIds}
                 {ghostIsolatedSiblings}
                 onExitIsolation={() => { isolatedPartId = null; }}
                 onToggleGhostIsolatedSiblings={() => { ghostIsolatedSiblings = !ghostIsolatedSiblings; }}
-                overlayPartLabel={hasSketchPreview ? null : selectedTarget?.label ?? overlaySelectedPart?.label ?? null}
-                overlayPartEditable={hasSketchPreview ? false : selectedTarget?.editable ?? overlaySelectedPart?.editable ?? false}
-                overlayPreviewOnly={hasSketchPreview ? false : overlayPreviewOnly}
-                showContextOverlay={enableViewportContextOverlay}
-                overlayControls={hasSketchPreview ? [] : overlayControls}
-                overlayAdvisories={hasSketchPreview ? [] : overlayAdvisories}
-                activeMeasurementCallout={hasSketchPreview ? null : activeMeasurementCallout}
-                previewTransforms={hasSketchPreview ? {} : effectivePreviewTransforms}
+                overlayPartLabel={(hasSketchPreview || activeNativeRender) ? null : selectedTarget?.label ?? overlaySelectedPart?.label ?? null}
+                overlayPartEditable={(hasSketchPreview || activeNativeRender) ? false : selectedTarget?.editable ?? overlaySelectedPart?.editable ?? false}
+                overlayPreviewOnly={(hasSketchPreview || activeNativeRender) ? false : overlayPreviewOnly}
+                showContextOverlay={!activeNativeRender && enableViewportContextOverlay}
+                overlayControls={(hasSketchPreview || activeNativeRender) ? [] : overlayControls}
+                overlayAdvisories={(hasSketchPreview || activeNativeRender) ? [] : overlayAdvisories}
+                activeMeasurementCallout={(hasSketchPreview || activeNativeRender) ? null : activeMeasurementCallout}
+                previewTransforms={(hasSketchPreview || activeNativeRender) ? {} : effectivePreviewTransforms}
                 {parameterGhostStlUrl}
                 onParameterGhostLoad={handleParameterGhostLoad}
-                viewerMode={!componentPlacementPreview && !hasSketchPreview && paramsWindowState.visible ? viewerMode : 'orbit'}
+                viewerMode={!componentPlacementPreview && !hasSketchPreview && !activeNativeRender && paramsWindowState.visible ? viewerMode : 'orbit'}
                 onOverlayChange={handleSemanticControlChange}
                 onControlFocusChange={(focus) => focusedMeasurementControl = focus}
                 onSearchQueryChange={(query) => sharedContextSearchQuery = query}
@@ -6271,12 +6401,6 @@ ${detail}`,
                   }
                 }}
               />
-              {#if selectedVersionHasNoModel}
-                <section class="viewport-version-error" role="alert" aria-label="Selected version has no model">
-                  <strong>Selected version has no model</strong>
-                  <p>{selectedVersionDiagnostic ?? 'This version has no saved model because rendering did not complete.'}</p>
-                </section>
-              {/if}
               {#if sketchPreviewStatus}
                 <section class="sketch-preview-status" aria-label="Sketch preview status">
                   <div class="sketch-preview-status__head">
@@ -6358,6 +6482,7 @@ ${detail}`,
                 }
               />
               <AgentNotificationCenter
+                nativeRenderProgress={nativeBackgroundProgress}
                 activeThreadId={$activeThreadId ?? null}
                 onOpenThreadDialogue={openNotificationThreadDialogue}
                 onOpenActivityEvent={openNotificationActivityEvent}
@@ -6422,7 +6547,7 @@ ${detail}`,
               <div class="viewport-overlay">
                 <ViewportWorkspace
                   showCode={false}
-                  busy={showViewerBusyMask}
+                  busy={showViewerBusyMask || Boolean(activeNativeRender)}
                   showExport={Boolean(activeArtifactBundle)}
                   canExport={canExportModel}
                   hasSketchPreview={hasSketchPreview}
@@ -6962,22 +7087,6 @@ ${detail}`,
   .campaign-project-page { height: 100%; min-height: 0; padding: 14px; overflow: hidden; }
   .main-workbench { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
   .viewport-area { flex: 1; min-height: 100px; background: #0b0f1a; position: relative; overflow: hidden; }
-  .viewport-version-error {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    width: min(560px, calc(100% - 32px));
-    max-height: calc(100% - 32px);
-    overflow: auto;
-    transform: translate(-50%, -50%);
-    border: 1px solid var(--danger);
-    background: var(--bg-100);
-    color: var(--text);
-    padding: 14px 16px;
-    z-index: 20;
-  }
-  .viewport-version-error strong { color: var(--danger); }
-  .viewport-version-error p { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-dim); }
   .viewer-shell {
     position: absolute;
     inset: 0;

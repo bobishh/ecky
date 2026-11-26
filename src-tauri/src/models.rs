@@ -1307,6 +1307,13 @@ impl AppState {
         }
     }
 
+    pub(crate) fn render_progress_app_handle(&self) -> Option<tauri::AppHandle> {
+        self.app_handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     pub fn emit_history_updated(&self) {
         self.emit_history_changed(None, None, "unknown");
     }

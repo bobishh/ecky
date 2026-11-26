@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +13,7 @@ use ecky_render::{
     KernelPart as RunnerPart, KernelPartialBooleanGroupPlan as RunnerPartialBooleanGroupPlan,
     KernelPlan as RunnerPlan, KernelRepresentation,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::direct_occt::{
@@ -29,6 +30,76 @@ const RUNNER_SELECTIVE_CACHE_ENV: &str = "ECKY_DIRECT_OCCT_CACHE_DIR";
 const RUNNER_SELECTIVE_CACHE_DIR: &str = "direct-occt-selective-cache";
 pub(crate) const SOURCE_CHANGED_CANCELLATION_MESSAGE: &str =
     "Direct OCCT runner cancelled because project source changed.";
+
+#[derive(Clone, Serialize)]
+#[serde(
+    tag = "stage",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum NativeRenderProgress {
+    MeshReady {
+        model_stl_path: PathBuf,
+    },
+    Topology {
+        completed_faces: usize,
+        total_faces: usize,
+    },
+    AnalysisBoundary {
+        completed_faces: usize,
+        total_faces: usize,
+    },
+    Publishing,
+    Failed,
+}
+
+pub(crate) type NativeRenderReporter = Arc<dyn Fn(NativeRenderProgress) + Send + Sync>;
+
+thread_local! {
+    static RUNNER_REPORTER: RefCell<Option<NativeRenderReporter>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn with_runner_progress<T>(
+    reporter: Option<NativeRenderReporter>,
+    task: impl FnOnce() -> T,
+) -> T {
+    struct ResetReporter(Option<NativeRenderReporter>);
+    impl Drop for ResetReporter {
+        fn drop(&mut self) {
+            RUNNER_REPORTER.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+    let _reset = ResetReporter(RUNNER_REPORTER.with(|slot| slot.replace(reporter)));
+    task()
+}
+
+fn parse_runner_progress(line: &[u8], output_dir: &Path) -> Option<NativeRenderProgress> {
+    let mut fields = std::str::from_utf8(line).ok()?.split_ascii_whitespace();
+    if fields.next()? != "ecky-render-progress" {
+        return None;
+    }
+    let phase = fields.next()?;
+    let completed_faces = fields.next()?.parse().ok()?;
+    let total_faces = fields.next()?.parse().ok()?;
+    if completed_faces > total_faces || fields.next().is_some() {
+        return None;
+    }
+    match phase {
+        "meshReady" => Some(NativeRenderProgress::MeshReady {
+            model_stl_path: output_dir.join("model.stl"),
+        }),
+        "topology" => Some(NativeRenderProgress::Topology {
+            completed_faces,
+            total_faces,
+        }),
+        "analysisBoundary" => Some(NativeRenderProgress::AnalysisBoundary {
+            completed_faces,
+            total_faces,
+        }),
+        "publishing" => Some(NativeRenderProgress::Publishing),
+        _ => None,
+    }
+}
 
 thread_local! {
     static RUNNER_CANCELLATION: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
@@ -59,27 +130,76 @@ fn active_runner_cancellation() -> Option<Arc<AtomicBool>> {
 fn run_command_output_with_cancellation(
     command: &mut Command,
     cancellation: Option<&AtomicBool>,
-) -> std::io::Result<Output> {
-    let Some(cancellation) = cancellation else {
+    progress: Option<(&Path, NativeRenderReporter)>,
+) -> io::Result<Output> {
+    if cancellation.is_none() && progress.is_none() {
         return command.output();
-    };
+    }
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    loop {
-        if cancellation.load(Ordering::Acquire) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                SOURCE_CHANGED_CANCELLATION_MESSAGE,
-            ));
-        }
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output();
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    if progress.is_some() {
+        command.env("ECKY_RENDER_PROGRESS", "1");
     }
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("Runner stdout missing"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("Runner stderr missing"))?;
+    std::thread::scope(|scope| {
+        let stdout = scope.spawn(move || -> io::Result<Vec<u8>> {
+            let mut reader = BufReader::new(stdout);
+            let mut output = Vec::new();
+            let mut line = Vec::new();
+            while reader.read_until(b'\n', &mut line)? != 0 {
+                if let Some((directory, reporter)) = &progress {
+                    if let Some(update) = parse_runner_progress(&line, directory) {
+                        reporter(update);
+                        line.clear();
+                        continue;
+                    }
+                }
+                output.extend_from_slice(&line);
+                line.clear();
+            }
+            Ok(output)
+        });
+        let stderr = scope.spawn(move || -> io::Result<Vec<u8>> {
+            let mut output = Vec::new();
+            stderr.read_to_end(&mut output)?;
+            Ok(output)
+        });
+        let status = if let Some(cancellation) = cancellation {
+            loop {
+                if cancellation.load(Ordering::Acquire) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        SOURCE_CHANGED_CANCELLATION_MESSAGE,
+                    ));
+                }
+                if let Some(status) = child.try_wait()? {
+                    break status;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        } else {
+            child.wait()?
+        };
+        Ok(Output {
+            status,
+            stdout: stdout
+                .join()
+                .map_err(|_| io::Error::other("Runner stdout reader panicked"))??,
+            stderr: stderr
+                .join()
+                .map_err(|_| io::Error::other("Runner stderr reader panicked"))??,
+        })
+    })
 }
 
 /// Tests that need a machine-independent "no runner anywhere" environment
@@ -527,19 +647,24 @@ fn invoke_runner_plan(
         command.arg("--preview");
     }
     let cancellation = active_runner_cancellation();
-    let output = run_command_output_with_cancellation(&mut command, cancellation.as_deref())
-        .map_err(|err| {
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                let _ = fs::remove_dir_all(output_dir);
-                AppError::conflict(err.to_string())
-            } else {
-                AppError::validation(format!(
-                    "Direct OCCT runner could not start '{}': {}",
-                    runner_path.display(),
-                    err
-                ))
-            }
-        })?;
+    let reporter = RUNNER_REPORTER.with(|slot| slot.borrow().clone());
+    let output = run_command_output_with_cancellation(
+        &mut command,
+        cancellation.as_deref(),
+        reporter.map(|reporter| (output_dir, reporter)),
+    )
+    .map_err(|err| {
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            let _ = fs::remove_dir_all(output_dir);
+            AppError::conflict(err.to_string())
+        } else {
+            AppError::validation(format!(
+                "Direct OCCT runner could not start '{}': {}",
+                runner_path.display(),
+                err
+            ))
+        }
+    })?;
 
     if !output.status.success() && runner_reported_unsupported(&output) {
         return Err(AppError::with_details(
@@ -2148,7 +2273,7 @@ mod tests {
         let mut command = std::process::Command::new("sh");
         command.args(["-c", "sleep 10"]);
 
-        let error = run_command_output_with_cancellation(&mut command, Some(&cancelled))
+        let error = run_command_output_with_cancellation(&mut command, Some(&cancelled), None)
             .expect_err("source change must interrupt the runner");
 
         cancel_thread.join().expect("cancel thread");
@@ -2735,10 +2860,10 @@ mod tests {
             "authored bindings must not disable part cache"
         );
         assert_eq!(left.executed_command_count, 0);
-        let topology: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(root.join("warm").join("topology.json")).expect("warm topology"),
+        let topology: serde_json::Value = super::super::topology_artifact::read(
+            &super::super::topology_artifact::topology_path(&root.join("warm")),
         )
-        .expect("topology JSON");
+        .expect("warm topology");
         assert!(topology["parts"][0]["faces"]
             .as_array()
             .is_some_and(|faces| faces.iter().any(|face| face["authoredBindings"]
@@ -3317,8 +3442,8 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let topology = serde_json::from_str(
-            &fs::read_to_string(output_dir.join("topology.json")).expect("read topology"),
+        let topology = super::super::topology_artifact::read(
+            &super::super::topology_artifact::topology_path(&output_dir),
         )
         .expect("parse topology");
         Some((root, topology))
@@ -6667,7 +6792,7 @@ printf '{"parts":[{"partId":"honjo_stay_clamp_v2","label":"Honjo Stay Clamp V2",
         };
 
         assert!(output_dir.join(PLAN_FILE_NAME).is_file());
-        assert!(output_dir.join("topology.json").is_file());
+        assert!(super::super::topology_artifact::topology_path(&output_dir).is_file());
         assert!(step_path.is_file());
         assert!(stl_path.is_file());
         let _ = fs::remove_dir_all(root);
@@ -7267,7 +7392,7 @@ mkdir -p "$out"
         };
 
         assert!(output_dir.join(PLAN_FILE_NAME).is_file());
-        assert!(output_dir.join("topology.json").is_file());
+        assert!(super::super::topology_artifact::topology_path(&output_dir).is_file());
         assert!(step_path.is_file());
         assert!(stl_path.is_file());
         let _ = fs::remove_dir_all(root);
@@ -7324,7 +7449,7 @@ printf '{"parts":[{"partId":"body","label":"Body","edges":[],"faces":[]}]}' > "$
             };
 
             assert!(output_dir.join(PLAN_FILE_NAME).is_file());
-            assert!(output_dir.join("topology.json").is_file());
+            assert!(super::super::topology_artifact::topology_path(&output_dir).is_file());
             assert!(step_path.is_file());
             assert!(stl_path.is_file());
         }
@@ -7393,7 +7518,7 @@ printf '{"parts":[{"partId":"body","label":"Body","edges":[],"faces":[]}]}' > "$
             };
 
             assert!(output_dir.join(PLAN_FILE_NAME).is_file());
-            assert!(output_dir.join("topology.json").is_file());
+            assert!(super::super::topology_artifact::topology_path(&output_dir).is_file());
             assert!(step_path.is_file());
             assert!(stl_path.is_file());
         }
@@ -7522,7 +7647,7 @@ exit 7
         };
 
         assert!(output_dir.join(PLAN_FILE_NAME).is_file());
-        assert!(output_dir.join("topology.json").is_file());
+        assert!(super::super::topology_artifact::topology_path(&output_dir).is_file());
         assert!(
             fs::metadata(&step_path).expect("step metadata").len() > 1024,
             "STEP export too small"
@@ -7574,7 +7699,7 @@ exit 7
                 "missing plan for {label}"
             );
             assert!(
-                output_dir.join("topology.json").is_file(),
+                super::super::topology_artifact::topology_path(&output_dir).is_file(),
                 "missing topology for {label}"
             );
             assert!(
@@ -7714,6 +7839,52 @@ exit 7
         assert!(!faces.is_empty(), "expected clipped solid faces");
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn given_native_mesh_when_topology_runs_then_progress_precedes_binary_publication() {
+        let root = temp_root("native-topology-progress");
+        let resolver = TestResolver { root: root.clone() };
+        if discover_direct_occt_runner_with_mode(&resolver, true).is_none() {
+            return;
+        }
+
+        let output_dir = root.join("render");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observer = Arc::clone(&seen);
+        let reporter: NativeRenderReporter = Arc::new(move |progress| {
+            observer.lock().unwrap().push(progress);
+        });
+        with_runner_progress(Some(reporter), || {
+            run_plan_step_stl_with_mode(&independent_ready_dag_plan(), &output_dir, &resolver, true)
+        })
+        .expect("render succeeds")
+        .expect("runner was discovered");
+
+        let updates = seen.lock().unwrap();
+        assert!(matches!(
+            updates.first(),
+            Some(NativeRenderProgress::MeshReady { model_stl_path })
+                if model_stl_path == &output_dir.join("model.stl") && model_stl_path.is_file()
+        ));
+        assert!(updates.iter().any(|progress| matches!(
+            progress,
+            NativeRenderProgress::Topology { completed_faces, total_faces }
+                if *completed_faces > 0 && completed_faces == total_faces
+        )));
+        assert!(matches!(
+            updates.last(),
+            Some(NativeRenderProgress::Publishing)
+        ));
+        let topology = output_dir.join("topology.msgpack");
+        assert!(topology.is_file());
+        let report: serde_json::Value =
+            super::super::topology_artifact::read(&topology).expect("binary topology decodes");
+        assert!(report["parts"]
+            .as_array()
+            .is_some_and(|parts| parts.len() == 2));
+        assert!(!output_dir.join("topology.json").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

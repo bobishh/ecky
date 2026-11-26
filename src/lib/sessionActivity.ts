@@ -14,6 +14,7 @@ export type SessionEventKind =
   | 'render_started'
   | 'render_succeeded'
   | 'render_failed'
+  | 'operation_failed'
   | 'validation_reported'
   | 'preview_updated'
   | 'version_committed'

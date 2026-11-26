@@ -650,7 +650,7 @@ async fn apply_manual_code_inner(
     }
 
     let previous_manifest = previous_manifest(request.base_message_id.as_deref(), state).await?;
-    let render_result = crate::services::render::render_model_with_previous_manifest(
+    let render = crate::services::render::render_model_with_previous_manifest(
         &design.macro_code,
         &design.initial_params,
         Some(design.macro_dialect.clone()),
@@ -659,6 +659,13 @@ async fn apply_manual_code_inner(
         previous_manifest.as_ref(),
         state,
         app,
+    );
+    let render_result = crate::services::render_progress::observe(
+        state,
+        &request.thread_id,
+        request.base_message_id.as_deref(),
+        None,
+        render,
     )
     .await;
     let artifact_bundle = match render_result {

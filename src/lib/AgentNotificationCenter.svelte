@@ -25,10 +25,12 @@
 
   let {
     activeThreadId = null,
+    nativeRenderProgress = null,
     onOpenThreadDialogue = null,
     onOpenActivityEvent = null,
   }: {
     activeThreadId?: string | null;
+    nativeRenderProgress?: { label: string; completed: number; total: number } | null;
     onOpenThreadDialogue?: ((threadId: string | null) => Promise<void> | void) | null;
     onOpenActivityEvent?: ((eventId: string, threadId: string | null, local: boolean) => void) | null;
   } = $props();
@@ -254,8 +256,22 @@
     {assertiveAnnouncement}
   </div>
 
-  {#if $longTasksStore.length > 0}
+  {#if nativeRenderProgress || $longTasksStore.length > 0}
     <div class="long-task-stack" aria-label="Running long tasks">
+      {#if nativeRenderProgress}
+        <div class="long-task-bubble native-render-progress">
+          <span>{nativeRenderProgress.label}</span>
+          {#if nativeRenderProgress.total > 0}
+            <progress
+              aria-label={nativeRenderProgress.label}
+              value={nativeRenderProgress.completed}
+              max={nativeRenderProgress.total}
+            ></progress>
+          {:else}
+            <progress aria-label={nativeRenderProgress.label}></progress>
+          {/if}
+        </div>
+      {/if}
       {#each $longTasksStore as task (task.taskId)}
         <div
           class="long-task-bubble"
@@ -396,6 +412,19 @@
     gap: 6px;
     overflow: hidden;
     pointer-events: auto;
+  }
+
+  .native-render-progress {
+    display: grid;
+    gap: 4px;
+    padding: 8px;
+    color: var(--text);
+  }
+
+  .native-render-progress progress {
+    inline-size: 100%;
+    block-size: 4px;
+    accent-color: var(--secondary);
   }
 
   .long-task-bubble {

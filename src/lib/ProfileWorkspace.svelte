@@ -2415,15 +2415,8 @@
 
 <style>
   .profile-workspace {
-    --profile-bg: var(--background, #111923);
-    --profile-panel: var(--surface, #18232d);
-    --profile-border: var(--border, #38434b);
-    --profile-text: var(--foreground, #e7e4dc);
-    --profile-muted: var(--muted-foreground, #a6aaab);
-    --profile-primary: var(--primary, #b58446);
-    --profile-secondary: var(--secondary, #d1a04f);
-    color: var(--profile-text);
-    background: var(--profile-bg);
+    color: var(--text);
+    background: var(--bg-200);
     height: 100%;
     min-height: 0;
     display: flex;
@@ -2441,7 +2434,7 @@
   }
 
   .evidence-tag {
-    color: var(--profile-secondary);
+    color: var(--secondary);
     font-size: 0.68rem;
     font-weight: 700;
     letter-spacing: 0.1em;
@@ -2474,28 +2467,28 @@
   .view-layout-switcher button, .sketch-toolbar :global(.camera-controls .camera-control) {
     min-height: 1.7rem;
     padding: 0.25rem 0.5rem;
-    border: 1px solid var(--profile-border);
+    border: 1px solid var(--bg-300);
     border-radius: 0;
     background: transparent;
-    color: var(--profile-muted);
+    color: var(--text-dim);
     font-size: 0.6rem;
     font-weight: 700;
     letter-spacing: 0.06em;
   }
   .view-layout-switcher button[aria-pressed="true"], .sketch-toolbar :global(.camera-controls .camera-control) {
-    border-color: var(--profile-secondary);
-    color: var(--profile-secondary);
+    border-color: var(--secondary);
+    color: var(--secondary);
   }
 
   .sketch-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.5rem; flex: 0 0 auto; }
   .source-tools { display: flex; align-items: center; gap: 0.5rem; }
   .source-selector { display: flex; flex-direction: row; align-items: center; gap: 0.35rem; margin: 0; font-size: 0.6rem; }
   .source-selector select { width: 5rem; min-height: 1.7rem; padding: 0.15rem 0.25rem; font-size: 0.65rem; }
-  .camera-inspector__state { min-height: 5rem; color: var(--profile-secondary); font-size: 0.72rem; }
+  .camera-inspector__state { min-height: 5rem; color: var(--secondary); font-size: 0.72rem; }
   .camera-inspector > button { margin-top: 0.65rem; }
   .camera-diagnostics { padding-left: 1rem; }
   .live-camera-image { position: absolute; inset: 1.7rem 0 0; width: 100%; height: calc(100% - 1.7rem); object-fit: contain; user-select: none; pointer-events: none; }
-  .camera-guidance { position: absolute; z-index: 2; bottom: 0.65rem; left: 50%; transform: translateX(-50%); max-width: calc(100% - 2rem); padding: 0.35rem 0.55rem; background: var(--profile-panel); border: 1px solid var(--profile-secondary); color: var(--profile-secondary); font-size: 0.65rem; white-space: nowrap; pointer-events: none; }
+  .camera-guidance { position: absolute; z-index: 2; bottom: 0.65rem; left: 50%; transform: translateX(-50%); max-width: calc(100% - 2rem); padding: 0.35rem 0.55rem; background: var(--bg-100); border: 1px solid var(--secondary); color: var(--secondary); font-size: 0.65rem; white-space: nowrap; pointer-events: none; }
   .sketch-pane__drawing--camera-hidden { visibility: hidden; }
 
   .sketch-workspace__panes {
@@ -2506,7 +2499,7 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
     grid-template-rows: repeat(2, minmax(0, 1fr));
     gap: 1px;
-    background: var(--profile-border);
+    background: var(--bg-300);
     overflow: hidden;
   }
 
@@ -2519,11 +2512,11 @@
     overflow: hidden;
     touch-action: none;
     cursor: crosshair;
-    background: color-mix(in srgb, var(--profile-panel) 84%, black 16%);
+    background: var(--bg-200);
   }
 
   .sketch-pane--front { grid-row: span 2; }
-  .sketch-pane--selected { outline: 1px solid var(--profile-secondary); outline-offset: -1px; }
+  .sketch-pane--selected { outline: 1px solid var(--secondary); outline-offset: -1px; }
   .sketch-pane__label {
     position: absolute;
     z-index: 2;
@@ -2532,18 +2525,18 @@
     align-items: center;
     justify-content: space-between;
     gap: 0.25rem;
-    color: var(--profile-secondary);
+    color: var(--secondary);
     font-family: var(--font-mono, monospace);
     font-size: 0.6rem;
     letter-spacing: 0.08em;
   }
   .view-select { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; cursor: pointer; }
-  .view-select[aria-pressed="true"] { color: var(--profile-text); }
-  .sketch-pane__label-action { padding: 0.12rem 0.22rem; border: 1px solid color-mix(in srgb, var(--profile-secondary) 48%, var(--profile-border)); background: color-mix(in srgb, var(--profile-panel) 84%, black 16%); color: var(--profile-secondary); font-size: 0.52rem; letter-spacing: 0.05em; }
+  .view-select[aria-pressed="true"] { color: var(--text); }
+  .sketch-pane__label-action { padding: 0.12rem 0.22rem; border: 1px solid color-mix(in srgb, var(--secondary) 48%, var(--bg-300)); background: var(--bg-200); color: var(--secondary); font-size: 0.52rem; letter-spacing: 0.05em; }
   .sketch-pane__drawing { position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; pointer-events: none; }
-  .pane-message { position: absolute; top: 50%; left: 0.5rem; right: 0.5rem; z-index: 1; color: var(--profile-muted); font-size: 0.58rem; text-align: center; }
-  .pane-message--error { color: #e89b8e; }
-  .pane-camera-hint { position: absolute; bottom: 0.2rem; left: 0.3rem; color: var(--profile-muted); font-size: 0.48rem; }
+  .pane-message { position: absolute; top: 50%; left: 0.5rem; right: 0.5rem; z-index: 1; color: var(--text-dim); font-size: 0.58rem; text-align: center; }
+  .pane-message--error { color: var(--red); }
+  .pane-camera-hint { position: absolute; bottom: 0.2rem; left: 0.3rem; color: var(--text-dim); font-size: 0.48rem; }
 
   .feature-footer {
     display: flex;
@@ -2551,8 +2544,8 @@
     align-items: end;
     gap: 0.6rem;
     padding: 0 0.8rem 0.8rem;
-    border-top: 1px solid var(--profile-border);
-    background: var(--profile-bg);
+    border-top: 1px solid var(--bg-300);
+    background: var(--bg-200);
   }
 
   .feature-footer label {
@@ -2574,8 +2567,8 @@
   .controls-pane,
   .editor-pane {
     min-height: 0;
-    border: 1px solid var(--profile-border);
-    background: var(--profile-panel);
+    border: 1px solid var(--bg-300);
+    background: var(--bg-100);
   }
 
   .controls-pane {
@@ -2584,18 +2577,18 @@
     flex-direction: column;
   }
 
-  .control-section { padding: 0.8rem; border-bottom: 1px solid var(--profile-border); }
+  .control-section { padding: 0.8rem; border-bottom: 1px solid var(--bg-300); }
   .control-section:last-child { border-bottom: 0; }
-  label { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.65rem; color: var(--profile-muted); font-size: 0.72rem; }
+  label { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.65rem; color: var(--text-dim); font-size: 0.72rem; }
   input, select {
     box-sizing: border-box;
     width: 100%;
     min-height: 2rem;
     padding: 0.35rem 0.45rem;
-    border: 1px solid var(--profile-border);
+    border: 1px solid var(--bg-300);
     border-radius: 0;
-    background: #101820;
-    color: var(--profile-text);
+    background: var(--bg-200);
+    color: var(--text);
     font: inherit;
   }
 
@@ -2604,28 +2597,28 @@
   .action-button, .text-button, :global(.camera-controls .action-button), :global(.camera-controls .text-button) {
     min-height: 2.1rem;
     padding: 0.42rem 0.62rem;
-    border: 1px solid var(--profile-border);
+    border: 1px solid var(--bg-300);
     border-radius: 0;
-    color: var(--profile-text);
+    color: var(--text);
     font-size: 0.7rem;
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
-  .action-button, :global(.camera-controls .action-button) { background: #24313c; }
-  .action-button--secondary, :global(.camera-controls .action-button--secondary) { border-color: var(--profile-secondary); color: var(--profile-secondary); background: transparent; }
-  .action-button--primary { width: 100%; border-color: var(--profile-primary); color: #100e0a; background: var(--profile-primary); }
-  .text-button, :global(.camera-controls .text-button) { border: 0; background: transparent; color: var(--profile-muted); }
+  .action-button, :global(.camera-controls .action-button) { background: var(--bg-200); }
+  .action-button--secondary, :global(.camera-controls .action-button--secondary) { border-color: var(--secondary); color: var(--secondary); background: transparent; }
+  .action-button--primary { width: 100%; border-color: var(--primary); color: #fff; background: var(--primary); }
+  .text-button, :global(.camera-controls .text-button) { border: 0; background: transparent; color: var(--text-dim); }
   .tool-row { justify-content: flex-start; flex-wrap: wrap; }
-  .inline-hint { min-height: 1.2rem; margin: 0.4rem 0 0; color: var(--profile-muted); font-size: 0.68rem; line-height: 1.45; }
+  .inline-hint { min-height: 1.2rem; margin: 0.4rem 0 0; color: var(--text-dim); font-size: 0.68rem; line-height: 1.45; }
   .vertex-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0.55rem; }
 
-  .grid-line { fill: none; stroke: #29343d; stroke-width: 0.55; vector-effect: non-scaling-stroke; }
-  .axis-line { stroke: #59636a; stroke-width: 0.8; vector-effect: non-scaling-stroke; }
+  .grid-line { fill: none; stroke: var(--bg-300); stroke-width: 0.55; vector-effect: non-scaling-stroke; }
+  .axis-line { stroke: var(--text-dim); stroke-width: 0.8; vector-effect: non-scaling-stroke; }
   .sketch-pane polygon,
-  .analytic-profile-circle { fill: color-mix(in srgb, var(--profile-primary) 22%, transparent); stroke: var(--profile-muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
-  .sketch-pane polygon.selected-loop { stroke: var(--profile-secondary); stroke-width: 1.5; }
-  .analytic-profile-circle.selected-loop { stroke: var(--profile-secondary); stroke-width: 1.5; }
+  .analytic-profile-circle { fill: color-mix(in srgb, var(--primary) 22%, transparent); stroke: var(--text-dim); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .sketch-pane polygon.selected-loop { stroke: var(--secondary); stroke-width: 1.5; }
+  .analytic-profile-circle.selected-loop { stroke: var(--secondary); stroke-width: 1.5; }
   .sketch-pane polygon.hole,
   .analytic-profile-circle.hole { fill: color-mix(in srgb, #aa5b50 20%, transparent); stroke: #c78274; }
   .projected-edge { fill: none; stroke: #82b1a2; stroke-width: 1.05; vector-effect: non-scaling-stroke; pointer-events: none; }
@@ -2636,37 +2629,37 @@
     stroke-dasharray: 5 4;
     stroke-linecap: butt;
   }
-  .open-draft, .sketch-draft-preview, .sketch-close-target { fill: none; stroke: var(--profile-secondary); stroke-width: 1.5; vector-effect: non-scaling-stroke; pointer-events: none; }
+  .open-draft, .sketch-draft-preview, .sketch-close-target { fill: none; stroke: var(--secondary); stroke-width: 1.5; vector-effect: non-scaling-stroke; pointer-events: none; }
   .sketch-draft-preview { stroke-dasharray: 5 4; }
-  .sketch-draft-point { fill: var(--profile-secondary); stroke: var(--profile-panel); stroke-width: 1.5; vector-effect: non-scaling-stroke; pointer-events: none; }
-  .drawing-region { fill: color-mix(in srgb, var(--profile-secondary) 16%, transparent); stroke: var(--profile-secondary); stroke-width: 1.2; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; pointer-events: none; }
-  .drawing-pick-point { fill: #f1c879; stroke: #17120a; stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
-  .drawing-vertex-handle { fill: #f1c879; stroke: #241b0f; stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: all; cursor: move; }
-  .drawing-calibration-point { fill: #ef7d64; stroke: #20120f; stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
-  .drawing-primitive { fill: none; stroke: #f0c572; stroke-width: 1.3; vector-effect: non-scaling-stroke; pointer-events: stroke; cursor: pointer; }
-  .drawing-primitive--selected { stroke: #fff0c6; stroke-width: 2; }
-  .drawing-circle { fill: color-mix(in srgb, #d76857 16%, transparent); }
-  .vertex-handle { fill: var(--profile-panel); stroke: var(--profile-secondary); stroke-width: 1.5; vector-effect: non-scaling-stroke; cursor: grab; pointer-events: all; }
-  .vertex-handle.selected-point { fill: var(--profile-secondary); stroke: #f0d6a5; }
-  .evidence-row { justify-content: flex-start; flex-wrap: wrap; min-height: 2.3rem; color: var(--profile-muted); font-size: 0.68rem; }
-  .evidence-tag { padding: 0.25rem 0.35rem; border: 1px solid #776044; }
-  .evidence-tag--manual { color: #b9c0c2; border-color: var(--profile-border); }
-  .warning-list { margin: 0.15rem 0 0.5rem; padding-left: 1.2rem; color: #e2bc80; font-size: 0.68rem; }
-  .stale-hint { color: #e2bc80; }
+  .sketch-draft-point { fill: var(--secondary); stroke: var(--bg-100); stroke-width: 1.5; vector-effect: non-scaling-stroke; pointer-events: none; }
+  .drawing-region { fill: color-mix(in srgb, var(--secondary) 16%, transparent); stroke: var(--secondary); stroke-width: 1.2; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; pointer-events: none; }
+  .drawing-pick-point { fill: var(--secondary); stroke: var(--bg); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+  .drawing-vertex-handle { fill: var(--secondary); stroke: var(--bg); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: all; cursor: move; }
+  .drawing-calibration-point { fill: var(--red); stroke: var(--bg); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+  .drawing-primitive { fill: none; stroke: var(--secondary); stroke-width: 1.3; vector-effect: non-scaling-stroke; pointer-events: stroke; cursor: pointer; }
+  .drawing-primitive--selected { stroke: var(--text); stroke-width: 2; }
+  .drawing-circle { fill: color-mix(in srgb, var(--red) 16%, transparent); }
+  .vertex-handle { fill: var(--bg-100); stroke: var(--secondary); stroke-width: 1.5; vector-effect: non-scaling-stroke; cursor: grab; pointer-events: all; }
+  .vertex-handle.selected-point { fill: var(--secondary); stroke: var(--text); }
+  .evidence-row { justify-content: flex-start; flex-wrap: wrap; min-height: 2.3rem; color: var(--text-dim); font-size: 0.68rem; }
+  .evidence-tag { padding: 0.25rem 0.35rem; border: 1px solid var(--secondary); }
+  .evidence-tag--manual { color: var(--text-dim); border-color: var(--bg-300); }
+  .warning-list { margin: 0.15rem 0 0.5rem; padding-left: 1.2rem; color: var(--secondary); font-size: 0.68rem; }
+  .stale-hint { color: var(--secondary); }
   .status-slot {
     box-sizing: border-box;
     height: 3.2rem;
     flex: 0 0 3.2rem;
     margin-top: 0.5rem;
     padding: 0.55rem 0.65rem;
-    border: 1px solid var(--profile-border);
-    color: var(--profile-muted);
+    border: 1px solid var(--bg-300);
+    color: var(--text-dim);
     font-size: 0.7rem;
     line-height: 1.4;
     overflow: auto;
   }
   .status-slot p { margin: 0; }
-  .status-error { color: #e89b8e; }
+  .status-error { color: var(--red); }
 
   @media (max-width: 760px) {
     .workspace-grid { grid-template-columns: minmax(0, 1fr); overflow: auto; }
