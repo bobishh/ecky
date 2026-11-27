@@ -46,17 +46,6 @@ function capabilities(directOcctAvailable: boolean, detail: string): RuntimeCapa
   };
 }
 
-test('buildExportChooserOptions shows only STL and FCStd for single-part models', () => {
-  const options = buildExportChooserOptions(sampleBundle(1));
-
-  assert.deepEqual(
-    options.map((option) => option.id),
-    ['stl', 'fcstd', 'step'],
-  );
-  assert.equal(options[2]?.disabled, true);
-  assert.equal(options[2]?.disabledReason, 'STEP artifact is not present in this model bundle.');
-});
-
 test('buildExportChooserOptions reports direct OCCT blocker for mesh STEP export', () => {
   const bundle = sampleBundle(1);
   bundle.sourceLanguage = 'ecky';
@@ -96,7 +85,7 @@ test('buildExportChooserOptions shows multipart options first for multipart mode
 
   assert.deepEqual(
     options.map((option) => option.id),
-    ['3mf', 'multipartStlZip', 'stl', 'fcstd', 'step'],
+    ['3mf', 'multipartStlZip', 'stl', 'orca3mf', 'fcstd', 'step'],
   );
   assert.match(options[2]?.subtitle ?? '', /Flattened single-mesh export/);
 });
@@ -189,4 +178,13 @@ test('hasMultipartExportAssets requires more than one viewer asset', () => {
   assert.equal(hasMultipartExportAssets(sampleBundle(0)), false);
   assert.equal(hasMultipartExportAssets(sampleBundle(1)), false);
   assert.equal(hasMultipartExportAssets(sampleBundle(2)), true);
+});
+
+test('Given a single rendered body When opening Export Then Orca 3MF is available', () => {
+  const options = buildExportChooserOptions(sampleBundle(1));
+  assert.equal(options.find((option) => option.id === 'orca3mf')?.disabled, false);
+  assert.deepEqual(options.map((option) => option.id), ['stl', 'orca3mf', 'fcstd', 'step']);
+  const step = options.find((option) => option.id === 'step');
+  assert.equal(step?.disabled, true);
+  assert.equal(step?.disabledReason, 'STEP artifact is not present in this model bundle.');
 });

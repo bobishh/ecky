@@ -79,6 +79,7 @@ const design = {
 type BootMockOptions = {
   history?: Array<Record<string, unknown>>;
   runtimeDelayMs?: number;
+  orcaPrintSetupMissing?: boolean;
   messagesPageMode?: 'full' | 'skinny-active' | 'omits-active';
   runtimeFilesExist?: boolean;
   runtimeSizeBytes?: number;
@@ -134,7 +135,7 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
     await route.fulfill({ status: 200, contentType: 'model/stl', body: MOCK_STL });
   });
 
-  return page.addInitScript(({ runtimeCapabilities, config, artifactBundle, modelManifest, design, history, runtimeDelayMs, messagesPageMode, runtimeFilesExist, runtimeSizeBytes, allowBootRebuild, rebuildSameArtifact, renderDelayMs, rebuildError, lastSnapshotMode, pointedMessageMode, threadWindowLayout, recoveryState }) => {
+  return page.addInitScript(({ runtimeCapabilities, config, artifactBundle, modelManifest, design, history, runtimeDelayMs, messagesPageMode, runtimeFilesExist, runtimeSizeBytes, allowBootRebuild, rebuildSameArtifact, renderDelayMs, rebuildError, lastSnapshotMode, pointedMessageMode, threadWindowLayout, recoveryState, orcaPrintSetupMissing }) => {
     (window as any).__BOOT_CALLS__ = [];
     (window as any).__BOOT_CAPABILITIES_RESOLVED__ = false;
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
@@ -449,6 +450,13 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
         ...modelManifest,
         modelId: args?.modelId ?? 'cached-model-rebuilt',
       };
+      if (cmd === 'safe_save_dialog') return '/mock/print.3mf';
+      if (cmd === 'export_orca_3mf') {
+        if (orcaPrintSetupMissing) {
+          throw { code: 'notFound', message: 'Create an Orca print setup at print.orca.json.' };
+        }
+        return null;
+      }
       if (cmd === 'save_model_manifest') return null;
       if (cmd === 'render_model') throw new Error('render_model must not run during cached boot restore');
       if (cmd === 'get_thread') throw new Error('full get_thread must not run during cached boot restore');
@@ -463,6 +471,7 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
     history: options.history ?? null,
     runtimeDelayMs: options.runtimeDelayMs ?? 0,
     messagesPageMode: options.messagesPageMode ?? 'full',
+    orcaPrintSetupMissing: options.orcaPrintSetupMissing ?? false,
     runtimeFilesExist: options.runtimeFilesExist ?? true,
     runtimeSizeBytes: options.runtimeSizeBytes ?? 1024,
     allowBootRebuild: options.allowBootRebuild ?? false,
@@ -481,6 +490,28 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
     },
   });
 }
+
+test.describe('Orca 3MF export', () => {
+  test('exports the selected single-body version', async ({ page }) => {
+    await installBaseBootMock(page);
+    await page.goto('/');
+    await page.getByRole('button', { name: 'EXPORT', exact: true }).click();
+    await page.getByRole('button', { name: /^Orca 3MF/ }).click();
+
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__BOOT_CALLS__.find((entry: { cmd: string }) => entry.cmd === 'export_orca_3mf')?.args,
+    )).toEqual({ threadId: 'thread-boot', messageId: 'msg-cached', targetPath: '/mock/print.3mf' });
+  });
+
+  test('shows how to recover when the project has no print setup', async ({ page }) => {
+    await installBaseBootMock(page, { orcaPrintSetupMissing: true });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'EXPORT', exact: true }).click();
+    await page.getByRole('button', { name: /^Orca 3MF/ }).click();
+
+    await expect(page.getByText(/Create an Orca print setup at print.orca.json/).first()).toBeVisible();
+  });
+});
 
 test.describe('Boot restore', () => {
   test('Given WebContent terminated after memory pressure When recovery reload boots Then durable state restores without duplicate work', async ({ page }) => {

@@ -1,6 +1,6 @@
 import type { ArtifactBundle, RuntimeCapabilities } from './types/domain';
 
-export type ExportMode = '3mf' | 'multipartStlZip' | 'stl' | 'fcstd' | 'step';
+export type ExportMode = '3mf' | 'orca3mf' | 'multipartStlZip' | 'stl' | 'fcstd' | 'step';
 
 export type ExportChooserOption = {
   id: ExportMode;
@@ -138,6 +138,15 @@ export function buildExportChooserOptions(
     disabled: !Boolean(bundle?.modelStlPath),
     disabledReason: bundle?.modelStlPath ? undefined : 'Model STL is not available for this model.',
   });
+
+  if (bundle?.modelStlPath) {
+    options.push({
+      id: 'orca3mf',
+      title: 'Orca 3MF',
+      subtitle: 'Uses print.orca.json from the project folder for print settings and layer events.',
+      disabled: false,
+    });
+  }
 
   options.push({
     id: 'fcstd',

@@ -1329,6 +1329,14 @@ async exportMultipart3mf(parts: ExportPartInput[], targetPath: string, modelName
     else return { status: "error", error: e  as any };
 }
 },
+async exportOrca3mf(threadId: string, messageId: string, targetPath: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_orca_3mf", { threadId, messageId, targetPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async safeSaveDialog(defaultPath: string, filterName: string, extensions: string[]) : Promise<Result<string | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("safe_save_dialog", { defaultPath, filterName, extensions }) };

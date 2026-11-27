@@ -283,6 +283,7 @@ import {
     saveSketchPreviewDraft,
     exportFile,
     exportMultipart3mf,
+    exportOrca3mf,
     exportMultipartStlZip,
     materializeProductionBundle,
     formatBackendError,
@@ -5769,6 +5770,27 @@ import {
   async function handleExport(mode: ExportMode) {
     showExportChooser = false;
     if (activeNativeRender) return;
+    if (mode === 'orca3mf') {
+      const threadId = $activeThreadId;
+      const messageId = $activeVersionId;
+      if (!threadId || !messageId) {
+        session.setError('Select a rendered project version to export an Orca project.');
+        return;
+      }
+      try {
+        const targetPath = await safeSaveDialog({
+          filters: [{ name: 'Orca 3MF Project', extensions: ['3mf'] }],
+          defaultPath: exportDefaultNames.threeMf,
+        });
+        if (!targetPath) return;
+        session.setStatus('Preparing Orca 3MF...');
+        await exportOrca3mf(threadId, messageId, targetPath);
+        session.setStatus('Exported Orca 3MF.');
+      } catch (error) {
+        session.setError(`Export Error: ${formatBackendError(error)}`);
+      }
+      return;
+    }
     let exportBundle = activeArtifactBundle;
     let exportParts = multipartExportParts;
     let exportIsMultipart = hasMultipartExportModel;

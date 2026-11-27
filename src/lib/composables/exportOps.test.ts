@@ -93,7 +93,7 @@ test('deriveExportState resolves filenames and multipart export options from the
   });
   assert.deepEqual(
     state.exportOptions.map((option) => option.id),
-    ['3mf', 'multipartStlZip', 'stl', 'fcstd', 'step'],
+    ['3mf', 'multipartStlZip', 'stl', 'orca3mf', 'fcstd', 'step'],
   );
   assert.equal(state.exportOptions.find((option) => option.id === 'step')?.disabled, false);
   assert.equal(state.hasMultipartExportModel, true);

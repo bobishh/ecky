@@ -14,7 +14,7 @@ export function createModelIo(deps: {
   formatError: (error: unknown) => string;
 }) {
   async function exportModel(mode: ExportMode, bundle: ArtifactBundle | null, names: DefaultNames, parts: MultipartExportPart[], isMultipart: boolean, title: string) {
-    if (!bundle) return;
+    if (!bundle || mode === 'orca3mf') return;
     try {
       if (mode === '3mf' || mode === 'multipartStlZip') {
         if (!isMultipart) return;

@@ -1,3 +1,6 @@
+mod orca_project;
+pub use orca_project::{export_orca_project, OrcaPrintMesh};
+
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::Write;
@@ -1373,6 +1376,60 @@ pub async fn export_multipart_3mf(
     model_name: String,
 ) -> AppResult<()> {
     export_multipart_3mf_impl(&parts, &target_path, model_name)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn export_orca_3mf(
+    thread_id: String,
+    message_id: String,
+    target_path: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<()> {
+    let binding = {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::get_binding(&conn, &thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+    }
+    .ok_or_else(|| {
+        AppError::validation(
+            "Open this project's source folder and save a print.orca.json setup there.",
+        )
+    })?;
+    let setup = Path::new(&binding.folder_path).join(orca_project::PRINT_SETUP_FILE);
+    if !setup.is_file() {
+        return Err(AppError::not_found(format!(
+            "Create an Orca print setup at '{}'.",
+            setup.display()
+        )));
+    }
+    let runtime =
+        crate::services::render::materialize_production_bundle(thread_id, message_id, &state, &app)
+            .await?;
+    let bundle = runtime.artifact_bundle;
+    let mut meshes = bundle
+        .viewer_assets
+        .into_iter()
+        .filter(|asset| asset.format == crate::contracts::ViewerAssetFormat::Stl)
+        .map(|asset| OrcaPrintMesh {
+            part_id: asset.part_id,
+            label: asset.label,
+            path: asset.path.into(),
+        })
+        .collect::<Vec<_>>();
+    if meshes.is_empty() {
+        meshes.push(OrcaPrintMesh {
+            part_id: "model".into(),
+            label: runtime.model_manifest.document.document_label,
+            path: bundle.model_stl_path.into(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        export_orca_project(&setup, &meshes, Path::new(&target_path))
+    })
+    .await
+    .map_err(|error| AppError::internal(error.to_string()))?
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use ecky_cad_lib::contracts::{ArtifactBundle, DesignParams, GeometryBackend, ParamValue};
 use ecky_cad_lib::models::PathResolver;
 
-const USAGE: &str = "Usage:\n  ecky check <input>\n  ecky lower --backend freecad <input> [--out <path>]\n  ecky render --backend <freecad|native> <input> (--stl <path>|--bundle-dir <dir>) [--step <path>] [--param key=value]... [--params file.json] [--json]\n\nCommands:\n  cairn   Discover, package and install reusable components.\n  check   Validate Ecky source.\n  lower   Lower Ecky source without rendering.\n  render  Render Ecky source into requested artifacts.\n";
+const USAGE: &str = "Usage:\n  ecky check <input>\n  ecky print-3mf <setup.json> <output.3mf> <part-id=part.stl>...\n  ecky lower --backend freecad <input> [--out <path>]\n  ecky render --backend <freecad|native> <input> (--stl <path>|--bundle-dir <dir>) [--step <path>] [--param key=value]... [--params file.json] [--json]\n\nCommands:\n  cairn   Discover, package and install reusable components.\n  check   Validate Ecky source.\n  lower   Lower Ecky source without rendering.\n  render  Render Ecky source into requested artifacts.\n  print-3mf  Export an Orca project from rendered STL parts and a print setup.\n";
 
 #[derive(Debug)]
 enum CliError {
@@ -462,6 +462,37 @@ fn render(args: &[String]) -> Result<(), CliError> {
     })
 }
 
+fn print_3mf(args: &[String]) -> Result<(), CliError> {
+    use ecky_cad_lib::commands::render::{export_orca_project, OrcaPrintMesh};
+
+    let [setup, output, parts @ ..] = args else {
+        return Err(usage_error(
+            "print-3mf requires a setup, an output path, and at least one part",
+        ));
+    };
+    if parts.is_empty() {
+        return Err(usage_error(
+            "print-3mf requires at least one part ID and STL path",
+        ));
+    }
+    let meshes = parts
+        .iter()
+        .map(|part| {
+            let (id, path) = part
+                .split_once('=')
+                .filter(|(id, path)| !id.is_empty() && !path.is_empty())
+                .ok_or_else(|| usage_error(format!("Expected part-id=part.stl, got '{part}'")))?;
+            Ok(OrcaPrintMesh {
+                part_id: id.into(),
+                label: id.into(),
+                path: path.into(),
+            })
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    export_orca_project(Path::new(setup), &meshes, Path::new(output))
+        .map_err(|error| CliError::Write(error.to_string()))
+}
+
 fn run(args: &[String]) -> Result<(), CliError> {
     match args {
         [] => Err(usage_error("missing command")),
@@ -488,6 +519,7 @@ fn run(args: &[String]) -> Result<(), CliError> {
         [command, rest @ ..] if command == "check" => check(rest),
         [command, rest @ ..] if command == "lower" => lower(rest),
         [command, rest @ ..] if command == "render" => render(rest),
+        [command, rest @ ..] if command == "print-3mf" => print_3mf(rest),
         [command, ..] => Err(usage_error(format!("unknown command: {command}"))),
     }
 }
