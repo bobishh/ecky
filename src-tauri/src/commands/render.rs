@@ -96,11 +96,14 @@ fn normalize_display_color(color: Option<&str>) -> String {
     }
 }
 
-fn ensure_exportable_parts(parts: &[ExportPartInput]) -> AppResult<()> {
-    if parts.len() < 2 {
+fn ensure_exportable_parts(parts: &[ExportPartInput], require_multipart: bool) -> AppResult<()> {
+    if require_multipart && parts.len() < 2 {
         return Err(AppError::validation(
             "Multipart export requires at least two parts.",
         ));
+    }
+    if parts.is_empty() {
+        return Err(AppError::validation("3MF export requires a rendered mesh."));
     }
 
     for part in parts {
@@ -156,7 +159,7 @@ pub(crate) fn export_multipart_stl_zip_impl(
     target_path: &str,
     _model_name: String,
 ) -> AppResult<()> {
-    ensure_exportable_parts(parts)?;
+    ensure_exportable_parts(parts, true)?;
     if let Some(bundle) = try_mesh_native_bundle_from_adjacent_sidecars(parts)? {
         return export_mesh_native_bundle_as_stl_zip_impl(&bundle, target_path);
     }
@@ -639,8 +642,10 @@ fn write_multipart_3mf_package(
         .map_err(|err| AppError::persistence(format!("Failed to write 3MF model: {}", err)))?;
 
     let mut xml = String::new();
-    xml.push_str(
-        r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources><basematerials id="1">"#,
+    let material_id = objects.iter().map(|object| object.id).max().unwrap_or(0) + 1;
+    let _ = write!(
+        xml,
+        r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources><basematerials id="{material_id}">"#,
     );
     for (index, color) in colors.iter().enumerate() {
         let _ = write!(
@@ -655,7 +660,7 @@ fn write_multipart_3mf_package(
     for object in objects {
         let _ = write!(
             xml,
-            r#"<object id="{}" type="model" pid="1" pindex="{}" name="{}"><mesh><vertices>"#,
+            r#"<object id="{}" type="model" pid="{material_id}" pindex="{}" name="{}"><mesh><vertices>"#,
             object.id,
             object.color_index,
             xml_escape(&object.name)
@@ -702,7 +707,15 @@ pub(crate) fn export_multipart_3mf_impl(
     target_path: &str,
     _model_name: String,
 ) -> AppResult<()> {
-    ensure_exportable_parts(parts)?;
+    export_geometry_3mf(parts, target_path, true)
+}
+
+fn export_geometry_3mf(
+    parts: &[ExportPartInput],
+    target_path: &str,
+    require_multipart: bool,
+) -> AppResult<()> {
+    ensure_exportable_parts(parts, require_multipart)?;
     if let Some(bundle) = try_mesh_native_bundle_from_adjacent_sidecars(parts)? {
         return export_mesh_native_bundle_as_3mf_impl(&bundle, target_path);
     }
@@ -1368,65 +1381,57 @@ pub async fn export_multipart_stl_zip(
     export_multipart_stl_zip_impl(&parts, &target_path, model_name)
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn export_multipart_3mf(
-    parts: Vec<ExportPartInput>,
-    target_path: String,
-    model_name: String,
+fn export_3mf_impl(
+    parts: &[ExportPartInput],
+    target_path: &str,
+    project_folder: Option<&Path>,
 ) -> AppResult<()> {
-    export_multipart_3mf_impl(&parts, &target_path, model_name)
+    if let Some(folder) = project_folder {
+        let setup = folder.join(orca_project::PRINT_SETUP_FILE);
+        match fs::symlink_metadata(&setup) {
+            Ok(_) => {
+                let meshes = parts
+                    .iter()
+                    .map(|part| OrcaPrintMesh {
+                        part_id: part.part_id.as_deref().unwrap_or("model").to_owned(),
+                        label: export_part_label(part),
+                        path: Path::new(&part.path).to_path_buf(),
+                    })
+                    .collect::<Vec<_>>();
+                return export_orca_project(&setup, &meshes, Path::new(target_path));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AppError::persistence(format!(
+                    "Cannot inspect the print setup at '{}': {error}",
+                    setup.display()
+                )));
+            }
+        }
+    }
+    export_geometry_3mf(parts, target_path, false)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn export_orca_3mf(
-    thread_id: String,
-    message_id: String,
+pub async fn export_3mf(
+    parts: Vec<ExportPartInput>,
     target_path: String,
+    thread_id: Option<String>,
     state: State<'_, AppState>,
-    app: AppHandle,
 ) -> AppResult<()> {
-    let binding = {
+    let binding = if let Some(thread_id) = thread_id {
         let conn = state.db.lock().await;
         crate::thread_source_binding::get_binding(&conn, &thread_id)
             .map_err(|error| AppError::persistence(error.to_string()))?
-    }
-    .ok_or_else(|| {
-        AppError::validation(
-            "Open this project's source folder and save a print.orca.json setup there.",
-        )
-    })?;
-    let setup = Path::new(&binding.folder_path).join(orca_project::PRINT_SETUP_FILE);
-    if !setup.is_file() {
-        return Err(AppError::not_found(format!(
-            "Create an Orca print setup at '{}'.",
-            setup.display()
-        )));
-    }
-    let runtime =
-        crate::services::render::materialize_production_bundle(thread_id, message_id, &state, &app)
-            .await?;
-    let bundle = runtime.artifact_bundle;
-    let mut meshes = bundle
-        .viewer_assets
-        .into_iter()
-        .filter(|asset| asset.format == crate::contracts::ViewerAssetFormat::Stl)
-        .map(|asset| OrcaPrintMesh {
-            part_id: asset.part_id,
-            label: asset.label,
-            path: asset.path.into(),
-        })
-        .collect::<Vec<_>>();
-    if meshes.is_empty() {
-        meshes.push(OrcaPrintMesh {
-            part_id: "model".into(),
-            label: runtime.model_manifest.document.document_label,
-            path: bundle.model_stl_path.into(),
-        });
-    }
+    } else {
+        None
+    };
     tauri::async_runtime::spawn_blocking(move || {
-        export_orca_project(&setup, &meshes, Path::new(&target_path))
+        let project_folder = binding
+            .as_ref()
+            .map(|binding| Path::new(&binding.folder_path));
+        export_3mf_impl(&parts, &target_path, project_folder)
     })
     .await
     .map_err(|error| AppError::internal(error.to_string()))?

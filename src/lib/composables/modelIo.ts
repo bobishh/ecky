@@ -1,4 +1,4 @@
-import { getStepExportPath, type ExportMode, type MultipartExportPart } from '../exportOptions';
+import { buildMultipartExportParts, getStepExportPath, type ExportMode, type MultipartExportPart } from '../exportOptions';
 import type { ArtifactBundle } from '../types/domain';
 
 type DefaultNames = { threeMf: string; multipartStlZip: string; stl: string; step: string; fcstd: string };
@@ -7,22 +7,38 @@ type Save = (options: { filters: { name: string; extensions: string[] }[]; defau
 export function createModelIo(deps: {
   save: Save;
   exportFile: (source: string, target: string) => Promise<void>;
-  exportMultipart3mf: (parts: MultipartExportPart[], target: string, title: string) => Promise<void>;
+  export3mf: (parts: MultipartExportPart[], target: string, threadId: string | null) => Promise<void>;
   exportMultipartStlZip: (parts: MultipartExportPart[], target: string, title: string) => Promise<void>;
   setStatus: (message: string) => void;
   setError: (message: string) => void;
   formatError: (error: unknown) => string;
 }) {
-  async function exportModel(mode: ExportMode, bundle: ArtifactBundle | null, names: DefaultNames, parts: MultipartExportPart[], isMultipart: boolean, title: string) {
-    if (!bundle || mode === 'orca3mf') return;
+  async function exportModel(mode: ExportMode, bundle: ArtifactBundle | null, names: DefaultNames, parts: MultipartExportPart[], isMultipart: boolean, title: string, threadId: string | null) {
+    if (!bundle) return;
     try {
-      if (mode === '3mf' || mode === 'multipartStlZip') {
-        if (!isMultipart) return;
-        const is3mf = mode === '3mf';
-        const path = await deps.save({ filters: [{ name: is3mf ? '3MF Package' : 'Multipart STL Archive', extensions: [is3mf ? '3mf' : 'zip'] }], defaultPath: is3mf ? names.threeMf : names.multipartStlZip });
+      if (mode === '3mf') {
+        const stlParts = buildMultipartExportParts(bundle, 'stl');
+        if (stlParts.length === 0 && bundle.modelStlPath) {
+          stlParts.push({
+            label: title,
+            path: bundle.modelStlPath,
+            objectName: null,
+            partId: 'model',
+            displayColor: null,
+          });
+        }
+        const path = await deps.save({ filters: [{ name: '3MF Package', extensions: ['3mf'] }], defaultPath: names.threeMf });
         if (!path) return;
-        if (is3mf) { await deps.exportMultipart3mf(parts, path, title); deps.setStatus('Exported multipart 3MF.'); }
-        else { await deps.exportMultipartStlZip(parts, path, title); deps.setStatus('Exported multipart STL archive.'); }
+        await deps.export3mf(stlParts, path, threadId);
+        deps.setStatus('Exported 3MF.');
+        return;
+      }
+      if (mode === 'multipartStlZip') {
+        if (!isMultipart) return;
+        const path = await deps.save({ filters: [{ name: 'Multipart STL Archive', extensions: ['zip'] }], defaultPath: names.multipartStlZip });
+        if (!path) return;
+        await deps.exportMultipartStlZip(parts, path, title);
+        deps.setStatus('Exported multipart STL archive.');
         return;
       }
       const source = mode === 'stl' ? bundle.modelStlPath : mode === 'step' ? getStepExportPath(bundle) : bundle.fcstdPath;

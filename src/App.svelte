@@ -282,8 +282,7 @@ import {
     clearSketchPreviewDraft,
     saveSketchPreviewDraft,
     exportFile,
-    exportMultipart3mf,
-    exportOrca3mf,
+    export3mf,
     exportMultipartStlZip,
     materializeProductionBundle,
     formatBackendError,
@@ -2082,7 +2081,7 @@ import {
   const modelIo = createModelIo({
     save: safeSaveDialog,
     exportFile,
-    exportMultipart3mf,
+    export3mf,
     exportMultipartStlZip,
     setStatus: (message) => session.setStatus(message),
     setError: (message) => session.setError(message),
@@ -5770,41 +5769,26 @@ import {
   async function handleExport(mode: ExportMode) {
     showExportChooser = false;
     if (activeNativeRender) return;
-    if (mode === 'orca3mf') {
-      const threadId = $activeThreadId;
-      const messageId = $activeVersionId;
-      if (!threadId || !messageId) {
-        session.setError('Select a rendered project version to export an Orca project.');
-        return;
-      }
-      try {
-        const targetPath = await safeSaveDialog({
-          filters: [{ name: 'Orca 3MF Project', extensions: ['3mf'] }],
-          defaultPath: exportDefaultNames.threeMf,
-        });
-        if (!targetPath) return;
-        session.setStatus('Preparing Orca 3MF...');
-        await exportOrca3mf(threadId, messageId, targetPath);
-        session.setStatus('Exported Orca 3MF.');
-      } catch (error) {
-        session.setError(`Export Error: ${formatBackendError(error)}`);
-      }
-      return;
-    }
+    const threadId = $activeThreadId;
+    const messageId = $activeVersionId;
+    const names = exportDefaultNames;
+    const title = exportModelTitle;
     let exportBundle = activeArtifactBundle;
     let exportParts = multipartExportParts;
     let exportIsMultipart = hasMultipartExportModel;
 
-    if (exportBundle?.productionPending && $activeThreadId && $activeVersionId) {
+    if (exportBundle?.productionPending && threadId && messageId) {
       try {
         session.setStatus('Generating exact production geometry for export...');
         const materialized = await materializeProductionBundle({
-          threadId: $activeThreadId,
-          messageId: $activeVersionId,
+          threadId,
+          messageId,
         });
         exportBundle = materialized.artifactBundle;
-        session.setModelRuntime(materialized.artifactBundle, materialized.modelManifest);
-        session.setStlUrl(toAssetUrl(materialized.artifactBundle.modelStlPath));
+        if ($activeThreadId === threadId && $activeVersionId === messageId) {
+          session.setModelRuntime(materialized.artifactBundle, materialized.modelManifest);
+          session.setStlUrl(toAssetUrl(materialized.artifactBundle.modelStlPath));
+        }
         exportIsMultipart = hasMultipartExportAssets(exportBundle);
         exportParts = buildMultipartExportParts(exportBundle);
       } catch (error) {
@@ -5813,7 +5797,7 @@ import {
       }
     }
 
-    await modelIo.exportModel(mode, exportBundle, exportDefaultNames, exportParts, exportIsMultipart, exportModelTitle);
+    await modelIo.exportModel(mode, exportBundle, names, exportParts, exportIsMultipart, title, threadId);
   }
 
   function dismissGenie() {
@@ -7043,11 +7027,6 @@ ${detail}`,
   {#if showExportChooser}
     <Modal title="Export Model" onclose={() => showExportChooser = false}>
       <div class="export-chooser">
-        {#if hasMultipartExportModel}
-          <div class="export-chooser__note">
-            Plain STL flattens the assembly. Use 3MF or Multipart STL to keep separate bodies for Bambu Studio or Orca.
-          </div>
-        {/if}
         {#each exportOptions as option (option.id)}
           <button
             class="export-chooser__action"
@@ -7273,14 +7252,6 @@ ${detail}`,
     min-width: min(520px, 78vw);
     padding: 12px;
     overflow: hidden;
-  }
-  .export-chooser__note {
-    border: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg-100) 88%, transparent);
-    color: var(--text-dim);
-    font-size: 0.72rem;
-    line-height: 1.45;
-    padding: 10px 12px;
   }
   .export-chooser__action {
     display: flex;

@@ -1321,17 +1321,9 @@ async exportMultipartStlZip(parts: ExportPartInput[], targetPath: string, modelN
     else return { status: "error", error: e  as any };
 }
 },
-async exportMultipart3mf(parts: ExportPartInput[], targetPath: string, modelName: string) : Promise<Result<null, AppError>> {
+async export3mf(parts: ExportPartInput[], targetPath: string, threadId: string | null) : Promise<Result<null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("export_multipart_3mf", { parts, targetPath, modelName }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async exportOrca3mf(threadId: string, messageId: string, targetPath: string) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("export_orca_3mf", { threadId, messageId, targetPath }) };
+    return { status: "ok", data: await TAURI_INVOKE("export_3mf", { parts, targetPath, threadId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

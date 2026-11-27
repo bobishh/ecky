@@ -47,11 +47,12 @@ are left untouched and reported in app logs.
 
 For a concrete example, the repository contains a [closed hex bottle holder](sites/landing/src/models/bicycle-bottle-holder.ecky). Its source names the bottle, the hex web, the ramped dovetail, and the printed thread on the handlebar clamp. These are modeling examples; the file alone does not establish physical fit.
 
-## Export an Orca print project
+## Export 3MF
 
-Save an Orca project with your printer, process, and filament presets. In the
-Ecky project source folder, add a `print.orca.json` file that references that
-saved profile and names the rendered parts to print.
+Use **Export → 3MF** to export rendered geometry. Ecky automatically includes
+a project’s print setup when its source folder contains `print.orca.json`. The
+file references a saved Orca project with printer, process, and filament presets
+and names the rendered parts to print.
 
 ```json
 {
@@ -65,8 +66,8 @@ saved profile and names the rendered parts to print.
 }
 ```
 
-Use **Export → Orca 3MF** on the rendered version, then open the exported
-project in Orca and slice it. The exporter uses the profile's rectangular
+Open the exported project in Orca to adjust settings or slice it. The
+exporter uses the profile's rectangular
 build plate and layer heights. Layer and filament numbers start at 1.
 Each layer event runs before its numbered layer. A filament change applies
 to the whole layer on single-nozzle multi-material profiles. Check layer

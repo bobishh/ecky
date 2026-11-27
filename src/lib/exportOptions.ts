@@ -1,6 +1,6 @@
-import type { ArtifactBundle, RuntimeCapabilities } from './types/domain';
+import type { ArtifactBundle, RuntimeCapabilities, ViewerAssetFormat } from './types/domain';
 
-export type ExportMode = '3mf' | 'orca3mf' | 'multipartStlZip' | 'stl' | 'fcstd' | 'step';
+export type ExportMode = '3mf' | 'multipartStlZip' | 'stl' | 'fcstd' | 'step';
 
 export type ExportChooserOption = {
   id: ExportMode;
@@ -74,8 +74,10 @@ function stepExportDisabledReason(
 
 export function buildMultipartExportParts(
   bundle: ArtifactBundle | null | undefined,
+  format?: ViewerAssetFormat,
 ): MultipartExportPart[] {
-  return (bundle?.viewerAssets ?? []).map((asset) => ({
+  const assets = bundle?.viewerAssets ?? [];
+  return (format ? assets.filter((asset) => asset.format === format) : assets).map((asset) => ({
     label: asset.label || asset.objectName || asset.partId,
     path: asset.path,
     objectName: asset.objectName || null,
@@ -112,13 +114,16 @@ export function buildExportChooserOptions(
   const isMultipart = hasMultipartExportAssets(bundle);
   const options: ExportChooserOption[] = [];
 
-  if (isMultipart) {
+  if (bundle?.modelStlPath || bundle?.viewerAssets?.some((asset) => asset.format === 'stl')) {
     options.push({
       id: '3mf',
       title: '3MF',
-      subtitle: 'Best for Bambu Studio / Orca. Keeps separate bodies in one file.',
+      subtitle: 'Keeps bodies separate and includes any saved print settings.',
       disabled: false,
     });
+  }
+
+  if (isMultipart) {
     options.push({
       id: 'multipartStlZip',
       title: 'Multipart STL (.zip)',
@@ -138,15 +143,6 @@ export function buildExportChooserOptions(
     disabled: !Boolean(bundle?.modelStlPath),
     disabledReason: bundle?.modelStlPath ? undefined : 'Model STL is not available for this model.',
   });
-
-  if (bundle?.modelStlPath) {
-    options.push({
-      id: 'orca3mf',
-      title: 'Orca 3MF',
-      subtitle: 'Uses print.orca.json from the project folder for print settings and layer events.',
-      disabled: false,
-    });
-  }
 
   options.push({
     id: 'fcstd',

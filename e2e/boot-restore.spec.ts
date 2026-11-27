@@ -79,7 +79,7 @@ const design = {
 type BootMockOptions = {
   history?: Array<Record<string, unknown>>;
   runtimeDelayMs?: number;
-  orcaPrintSetupMissing?: boolean;
+  invalidPrintSetup?: boolean;
   messagesPageMode?: 'full' | 'skinny-active' | 'omits-active';
   runtimeFilesExist?: boolean;
   runtimeSizeBytes?: number;
@@ -135,7 +135,7 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
     await route.fulfill({ status: 200, contentType: 'model/stl', body: MOCK_STL });
   });
 
-  return page.addInitScript(({ runtimeCapabilities, config, artifactBundle, modelManifest, design, history, runtimeDelayMs, messagesPageMode, runtimeFilesExist, runtimeSizeBytes, allowBootRebuild, rebuildSameArtifact, renderDelayMs, rebuildError, lastSnapshotMode, pointedMessageMode, threadWindowLayout, recoveryState, orcaPrintSetupMissing }) => {
+  return page.addInitScript(({ runtimeCapabilities, config, artifactBundle, modelManifest, design, history, runtimeDelayMs, messagesPageMode, runtimeFilesExist, runtimeSizeBytes, allowBootRebuild, rebuildSameArtifact, renderDelayMs, rebuildError, lastSnapshotMode, pointedMessageMode, threadWindowLayout, recoveryState, invalidPrintSetup }) => {
     (window as any).__BOOT_CALLS__ = [];
     (window as any).__BOOT_CAPABILITIES_RESOLVED__ = false;
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
@@ -451,9 +451,9 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
         modelId: args?.modelId ?? 'cached-model-rebuilt',
       };
       if (cmd === 'safe_save_dialog') return '/mock/print.3mf';
-      if (cmd === 'export_orca_3mf') {
-        if (orcaPrintSetupMissing) {
-          throw { code: 'notFound', message: 'Create an Orca print setup at print.orca.json.' };
+      if (cmd === 'export_3mf') {
+        if (invalidPrintSetup) {
+          throw { code: 'validation', message: 'Invalid print settings in print.orca.json.' };
         }
         return null;
       }
@@ -471,7 +471,7 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
     history: options.history ?? null,
     runtimeDelayMs: options.runtimeDelayMs ?? 0,
     messagesPageMode: options.messagesPageMode ?? 'full',
-    orcaPrintSetupMissing: options.orcaPrintSetupMissing ?? false,
+    invalidPrintSetup: options.invalidPrintSetup ?? false,
     runtimeFilesExist: options.runtimeFilesExist ?? true,
     runtimeSizeBytes: options.runtimeSizeBytes ?? 1024,
     allowBootRebuild: options.allowBootRebuild ?? false,
@@ -491,25 +491,34 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
   });
 }
 
-test.describe('Orca 3MF export', () => {
-  test('exports the selected single-body version', async ({ page }) => {
+test.describe('3MF export', () => {
+  test('one 3MF option sends the active project and geometry to export', async ({ page }) => {
     await installBaseBootMock(page);
     await page.goto('/');
     await page.getByRole('button', { name: 'EXPORT', exact: true }).click();
-    await page.getByRole('button', { name: /^Orca 3MF/ }).click();
+    await expect(page.getByRole('button', { name: /^(?:Orca )?3MF\b/ })).toHaveCount(1);
+    await page.getByRole('button', { name: /^3MF\b/ }).click();
 
     await expect.poll(() => page.evaluate(() =>
-      (window as any).__BOOT_CALLS__.find((entry: { cmd: string }) => entry.cmd === 'export_orca_3mf')?.args,
-    )).toEqual({ threadId: 'thread-boot', messageId: 'msg-cached', targetPath: '/mock/print.3mf' });
+      (window as any).__BOOT_CALLS__.find((entry: { cmd: string }) => entry.cmd === 'export_3mf')?.args,
+    )).toEqual({
+      threadId: 'thread-boot',
+      targetPath: '/mock/print.3mf',
+      parts: [{
+        label: 'Cached Boot Model', partId: 'model', path: '/mock/cache/model.stl',
+        objectName: null, displayColor: null,
+      }],
+    });
   });
 
-  test('shows how to recover when the project has no print setup', async ({ page }) => {
-    await installBaseBootMock(page, { orcaPrintSetupMissing: true });
+  test('reports an invalid print setup', async ({ page }) => {
+    await installBaseBootMock(page, { invalidPrintSetup: true });
     await page.goto('/');
     await page.getByRole('button', { name: 'EXPORT', exact: true }).click();
-    await page.getByRole('button', { name: /^Orca 3MF/ }).click();
+    await expect(page.getByRole('button', { name: /^(?:Orca )?3MF\b/ })).toHaveCount(1);
+    await page.getByRole('button', { name: /^3MF\b/ }).click();
 
-    await expect(page.getByText(/Create an Orca print setup at print.orca.json/).first()).toBeVisible();
+    await expect(page.getByText(/Invalid print settings in print.orca.json/).first()).toBeVisible();
   });
 });
 

@@ -85,7 +85,7 @@ test('buildExportChooserOptions shows multipart options first for multipart mode
 
   assert.deepEqual(
     options.map((option) => option.id),
-    ['3mf', 'multipartStlZip', 'stl', 'orca3mf', 'fcstd', 'step'],
+    ['3mf', 'multipartStlZip', 'stl', 'fcstd', 'step'],
   );
   assert.match(options[2]?.subtitle ?? '', /Flattened single-mesh export/);
 });
@@ -180,10 +180,10 @@ test('hasMultipartExportAssets requires more than one viewer asset', () => {
   assert.equal(hasMultipartExportAssets(sampleBundle(2)), true);
 });
 
-test('Given a single rendered body When opening Export Then Orca 3MF is available', () => {
+test('Given a single rendered body When opening Export Then one 3MF option is available', () => {
   const options = buildExportChooserOptions(sampleBundle(1));
-  assert.equal(options.find((option) => option.id === 'orca3mf')?.disabled, false);
-  assert.deepEqual(options.map((option) => option.id), ['stl', 'orca3mf', 'fcstd', 'step']);
+  assert.equal(options.find((option) => option.id === '3mf')?.disabled, false);
+  assert.deepEqual(options.map((option) => option.id), ['3mf', 'stl', 'fcstd', 'step']);
   const step = options.find((option) => option.id === 'step');
   assert.equal(step?.disabled, true);
   assert.equal(step?.disabledReason, 'STEP artifact is not present in this model bundle.');

@@ -14,4 +14,4 @@ Ecky exports geometry to slicers. A model that encloses inserts or changes filam
 
 ## Impact
 
-The export chooser gains Orca 3MF. The desktop and CLI share one Rust exporter. Print setup files live beside the model source and can be reused after geometry changes.
+The desktop 3MF export includes print settings whenever a setup exists. The desktop and CLI share one Rust exporter. Print setup files live beside the model source and can be reused after geometry changes.

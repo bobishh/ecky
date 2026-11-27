@@ -1432,20 +1432,12 @@ export async function exportMultipartStlZip(
   await invokeCommand(commands.exportMultipartStlZip(parts, targetPath, modelName));
 }
 
-export async function exportOrca3mf(
-  threadId: string,
-  messageId: string,
-  targetPath: string,
-): Promise<void> {
-  await invokeCommand(commands.exportOrca3mf(threadId, messageId, targetPath));
-}
-
-export async function exportMultipart3mf(
+export async function export3mf(
   parts: ExportPartInput[],
   targetPath: string,
-  modelName: string,
+  threadId: string | null,
 ): Promise<void> {
-  await invokeCommand(commands.exportMultipart3mf(parts, targetPath, modelName));
+  await invokeCommand(commands.export3mf(parts, targetPath, threadId));
 }
 
 export type ManualParameterApplyResult = {

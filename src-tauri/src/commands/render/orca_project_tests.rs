@@ -68,7 +68,7 @@ impl TestJob {
         Self { dir, meshes }
     }
 
-    fn export(&self, parts: serde_json::Value, events: serde_json::Value) -> AppResult<()> {
+    fn write_setup(&self, parts: serde_json::Value, events: serde_json::Value) {
         let setup = json!({
             "schemaVersion": 1,
             "profile": "profile.3mf",
@@ -77,7 +77,31 @@ impl TestJob {
         });
         let setup_path = self.dir.join("print.orca.json");
         fs::write(&setup_path, setup.to_string()).unwrap();
-        export_orca_project(&setup_path, &self.meshes, &self.dir.join("job.3mf"))
+    }
+
+    fn export(&self, parts: serde_json::Value, events: serde_json::Value) -> AppResult<()> {
+        self.write_setup(parts, events);
+        self.export_model()
+    }
+
+    fn export_model(&self) -> AppResult<()> {
+        let parts = self
+            .meshes
+            .iter()
+            .map(|mesh| crate::contracts::ExportPartInput {
+                label: mesh.label.clone(),
+                path: mesh.path.to_string_lossy().into_owned(),
+                part_id: Some(mesh.part_id.clone()),
+                object_name: None,
+                display_color: None,
+                placement_frame: None,
+            })
+            .collect::<Vec<_>>();
+        super::super::export_3mf_impl(
+            &parts,
+            self.dir.join("job.3mf").to_str().unwrap(),
+            Some(&self.dir),
+        )
     }
 
     fn entry(&self, name: &str) -> String {
@@ -155,4 +179,28 @@ fn invalid_print_layer_leaves_existing_export_untouched() {
         .unwrap_err();
     assert!(error.to_string().contains("layer 90"));
     assert_eq!(fs::read_to_string(output).unwrap(), "previous export");
+}
+
+#[test]
+fn missing_print_setup_exports_single_body_geometry() {
+    let job = TestJob::new();
+    job.export_model().unwrap();
+
+    let model = job.entry("3D/3dmodel.model");
+    assert_eq!(model.matches("<item ").count(), 1);
+    assert!(model.contains("Body &lt;&amp;&gt;"));
+    let zip = zip::ZipArchive::new(fs::File::open(job.dir.join("job.3mf")).unwrap()).unwrap();
+    assert!(!zip
+        .file_names()
+        .any(|name| name == "Metadata/project_settings.config"));
+}
+
+#[test]
+fn malformed_print_setup_does_not_export_geometry() {
+    let job = TestJob::new();
+    fs::write(job.dir.join("print.orca.json"), "invalid json").unwrap();
+
+    let error = job.export_model().unwrap_err();
+    assert!(error.to_string().contains("Invalid print settings"));
+    assert!(!job.dir.join("job.3mf").exists());
 }
