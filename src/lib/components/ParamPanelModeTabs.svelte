@@ -1,16 +1,24 @@
+<script module lang="ts">
+  export type ParamPanelTab = 'params' | 'assembly' | 'mesh' | 'edit' | 'litho' | 'newParams' | 'views';
+</script>
+
 <script lang="ts">
   let {
     activeTab = 'params',
     macroCode = '',
+    assemblyEnabled = false,
+    assemblyHasOverride = false,
     viewsEnabled = false,
     onActiveTabChange,
     onShowCode,
     onOpenInEditor,
   }: {
-    activeTab?: 'params' | 'mesh' | 'edit' | 'litho' | 'newParams' | 'views';
+    activeTab?: ParamPanelTab;
     macroCode?: string;
+    assemblyEnabled?: boolean;
+    assemblyHasOverride?: boolean;
     viewsEnabled?: boolean;
-    onActiveTabChange?: (tab: 'params' | 'mesh' | 'edit' | 'litho' | 'newParams' | 'views') => void;
+    onActiveTabChange?: (tab: ParamPanelTab) => void;
     onShowCode?: () => void;
     onOpenInEditor?: () => void;
   } = $props();
@@ -25,6 +33,17 @@
   >
     PARAMETERS
   </button>
+  {#if assemblyEnabled}
+    <button
+      class="panel-mode-tab"
+      class:panel-mode-tab-active={activeTab === 'assembly'}
+      class:panel-mode-tab-override={assemblyHasOverride && activeTab !== 'assembly'}
+      aria-pressed={activeTab === 'assembly'}
+      onclick={() => onActiveTabChange?.('assembly')}
+    >
+      ASSEMBLY
+    </button>
+  {/if}
   <button
     class="panel-mode-tab"
     class:panel-mode-tab-active={activeTab === 'mesh'}
@@ -116,6 +135,11 @@
     border-color: var(--secondary);
     background: color-mix(in srgb, var(--secondary) 14%, var(--bg-200));
     color: var(--text);
+  }
+
+  .panel-mode-tab-override {
+    border-color: var(--primary);
+    color: var(--primary);
   }
 
   .panel-code-btn {

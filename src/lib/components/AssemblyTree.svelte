@@ -162,7 +162,6 @@
   .assembly-tree {
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--bg-200) 75%, transparent);
-    margin-bottom: 8px;
   }
 
   .assembly-header {
@@ -204,8 +203,8 @@
   }
 
   .assembly-list {
-    max-height: 156px;
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
   }
 
   .assembly-row {

@@ -32,7 +32,7 @@
   import { projectWorkspaceProjection } from './stores/history';
   import ParamPanelToolbar from './components/ParamPanelToolbar.svelte';
   import ParamPanelSearch from './components/ParamPanelSearch.svelte';
-  import ParamPanelModeTabs from './components/ParamPanelModeTabs.svelte';
+  import ParamPanelModeTabs, { type ParamPanelTab } from './components/ParamPanelModeTabs.svelte';
   import ParamPanelMeshTab from './components/ParamPanelMeshTab.svelte';
   import ProjectFolderStatusChip from './ProjectFolderStatusChip.svelte';
   import ParamPanelEditFields from './components/ParamPanelEditFields.svelte';
@@ -229,7 +229,7 @@
   let macroParseSeq = 0;
   let localSelectedPartId = $state<string | null>(null);
   let proposalMutationId = $state<string | null>(null);
-  let activeTab = $state<'params' | 'mesh' | 'edit' | 'litho' | 'newParams' | 'views'>('params');
+  let activeTab = $state<ParamPanelTab>('params');
   const controlViewsEnabled = $derived(
     usesPersistedControlViews(modelManifest) &&
       artifactBundle?.sourceLanguage !== 'ecky' &&
@@ -653,7 +653,7 @@
     activeTab = 'params';
   }
 
-  function selectPanelTab(tab: 'params' | 'mesh' | 'edit' | 'litho' | 'newParams' | 'views') {
+  function selectPanelTab(tab: ParamPanelTab) {
     if (tab === 'edit') {
       startEditing();
       return;
@@ -792,6 +792,17 @@
   });
 
   const partCount = $derived(modelManifest?.parts?.length ?? 0);
+  const assemblyEnabled = $derived(
+    assemblyNodes.length > 0 &&
+      (partCount > 1 || modelManifest?.sourceKind === 'importedFcstd' || Boolean(isolatedPartId)),
+  );
+  const assemblyHasOverride = $derived(Boolean(isolatedPartId) || hiddenPartIds.length > 0);
+
+  $effect(() => {
+    if (activeTab === 'assembly' && !assemblyEnabled) {
+      activeTab = 'params';
+    }
+  });
 
   $effect(() => {
     if (!modelManifest?.parts?.length || modelManifest.parts.length !== 1) return;
@@ -2119,6 +2130,8 @@
   <ParamPanelModeTabs
     activeTab={activeTab}
     macroCode={macroCode}
+    {assemblyEnabled}
+    {assemblyHasOverride}
     viewsEnabled={controlViewsEnabled}
     onActiveTabChange={selectPanelTab}
     onShowCode={onShowCode}
@@ -2130,21 +2143,6 @@
       <ParamPanelSearch
         searchQuery={searchQuery}
         onSearchQueryChange={(value) => searchQuery = value}
-      />
-    {/if}
-
-    {#if activeTab === 'params' && assemblyNodes.length > 0 && (partCount > 1 || modelManifest?.sourceKind === 'importedFcstd' || Boolean(isolatedPartId))}
-      <AssemblyTree
-        nodes={assemblyNodes}
-        selectedPartId={localSelectedPartId}
-        {isolatedPartId}
-        {hiddenPartIds}
-        {ghostIsolatedSiblings}
-        onSelectPart={(partId) => selectPart(partId)}
-        {onToggleIsolatePart}
-        {onToggleHidePart}
-        {onToggleGhostIsolatedSiblings}
-        onResetVisibility={onResetPartVisibility}
       />
     {/if}
 
@@ -2216,6 +2214,19 @@
         onOptionChange={updateSelectOption}
         onRemoveField={removeField}
         onAddField={addField}
+      />
+    {:else if activeTab === 'assembly' && assemblyEnabled}
+      <AssemblyTree
+        nodes={assemblyNodes}
+        selectedPartId={localSelectedPartId}
+        {isolatedPartId}
+        {hiddenPartIds}
+        {ghostIsolatedSiblings}
+        onSelectPart={(partId) => selectPart(partId)}
+        {onToggleIsolatePart}
+        {onToggleHidePart}
+        {onToggleGhostIsolatedSiblings}
+        onResetVisibility={onResetPartVisibility}
       />
     {:else if activeTab === 'mesh'}
       <ParamPanelMeshTab

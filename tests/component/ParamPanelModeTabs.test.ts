@@ -38,4 +38,20 @@ describe('ParamPanelModeTabs', () => {
 
     expect(queryByRole('button', { name: 'OPEN FILE' })).toBeNull();
   });
+
+  it('shows ASSEMBLY tab only when assemblyEnabled and switches to assembly on click', async () => {
+    const onActiveTabChange = vi.fn();
+    const view = render(ParamPanelModeTabs, {
+      props: { activeTab: 'params', assemblyEnabled: false, onActiveTabChange },
+    });
+
+    expect(view.queryByRole('button', { name: 'ASSEMBLY' })).toBeNull();
+
+    await view.rerender({ activeTab: 'params', assemblyEnabled: true, onActiveTabChange });
+    const assemblyBtn = view.getByRole('button', { name: 'ASSEMBLY' });
+    expect(assemblyBtn.getAttribute('aria-pressed')).toBe('false');
+
+    await fireEvent.click(assemblyBtn);
+    expect(onActiveTabChange).toHaveBeenCalledWith('assembly');
+  });
 });
