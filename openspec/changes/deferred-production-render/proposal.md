@@ -18,4 +18,4 @@ Applying parameter changes or saving edits in the workbench currently triggers a
 - `src-tauri/src/services/render.rs`: Add display-first render mode; preserve exact CAD planner for export.
 - `src-tauri/src/services/parameter_ghost.rs`: Generalize coarse tessellation pipeline into the standard display-tier render.
 - `src/lib/types/domain.ts` and `src-tauri/src/contracts/render.rs`: Represent optional/pending production artifacts in `ArtifactBundle` without breaking existing consumers.
-- Workbench: Parameter Apply becomes instant (~50–150ms instead of seconds).
+- Workbench: Parameter Apply avoids STEP writing, fine tessellation, and topology extraction; latency depends on model evaluation cost.
