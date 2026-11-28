@@ -73,7 +73,13 @@
   }
 
   function numericDisplayValue(fallback = 0): string {
-    if (editingNumeric && numericDraft !== null) return numericDraft;
+    if (
+      editingNumeric &&
+      numericDraft !== null &&
+      (pendingNumericValue === null || Number(value) === pendingNumericValue)
+    ) {
+      return numericDraft;
+    }
     return String(asNumber(value, fallback));
   }
 

@@ -77,7 +77,9 @@
   import { localNotificationActionsStore } from './lib/stores/localNotificationActions';
   import { shouldProjectAgentNotification } from './lib/notificationAggregation';
   import { handleGenerate } from './lib/controllers/requestOrchestrator';
-  import { handleParamChange, commitManualVersion, stageParamChange, applyManualCodeDraft, projectManualCodeDraftResult, manualApplyBusyStore } from './lib/controllers/manualController';
+  import { handleParamChange, commitManualVersion, applyManualCodeDraft, projectManualCodeDraftResult, manualApplyBusyStore } from './lib/controllers/manualController';
+  import { parameterDraft, effectiveDraftParams, hasActiveParameterDraft } from './lib/stores/parameterDraft';
+  import { createParameterGhostScheduler } from './lib/parameterGhostScheduler';
   import {
     loadFromHistory,
     createNewThread,
@@ -1747,13 +1749,28 @@ import {
 
   let activeControlViewId = $state<string | null>(null);
   let activePreviewViewId = $state<string | null>(null);
+  const parameterDraftVersionKey = $derived.by(() => {
+    const snapshot = $activeRenderSnapshot;
+    if (snapshot?.messageId && snapshot.threadId === $activeThreadId && snapshot.messageId === $activeVersionId) {
+      return JSON.stringify([snapshot.threadId, snapshot.messageId, snapshot.snapshotId]);
+    }
+    if ($activeThreadId && $activeVersionId) {
+      return JSON.stringify([$activeThreadId, $activeVersionId]);
+    }
+    return null;
+  });
+  $effect(() => {
+    parameterDraft.syncBase(parameterDraftVersionKey, $paramPanelState.params || {});
+  });
+  const sharedDraftParameters = $derived.by<DesignParams>(() => effectiveDraftParams($parameterDraft));
+  const hasParameterDraft = $derived.by(() => hasActiveParameterDraft($parameterDraft));
   const contextState = $derived.by(() =>
     deriveContextState({
       activeArtifactBundle,
       activeControlViewId,
       focusedMeasurementControl,
       paramUiSpec: $paramPanelState.uiSpec || null,
-      paramValues: $paramPanelState.params || {},
+      paramValues: sharedDraftParameters,
       selectedContextTargetId,
       selectedPartId: $session.selectedPartId ?? null,
       sessionModelManifest: sessionModelManifest ?? activeVersionMessage?.modelManifest ?? null,
@@ -1761,6 +1778,10 @@ import {
   );
   const effectiveUiSpec = $derived.by<UiSpec>(() => contextState.effectiveUiSpec);
   const effectiveParameters = $derived.by<DesignParams>(() => contextState.effectiveParameters);
+  const effectiveBaseParameters = $derived.by<DesignParams>(() => {
+    const base = $paramPanelState.params || {};
+    return Object.keys(base).length > 0 ? base : contextState.effectiveParameters;
+  });
   const activeModelManifest = $derived.by(() => contextState.activeModelManifest);
   const contextSelectionTargets = $derived.by<ContextSelectionTarget[]>(
     () => contextState.contextSelectionTargets,
@@ -5894,7 +5915,7 @@ import {
     handleTargetSelect(nextTarget);
   }
 
-  const PARAMETER_GHOST_DEBOUNCE_MS = 250;
+  const PARAMETER_GHOST_THROTTLE_MS = 60;
   const parameterGhostUiSupported = $derived(Boolean(
     $activeThreadId && activeAuthoringContext.sourceLanguage === 'ecky' &&
     activeAuthoringContext.geometryBackend === 'mesh' && !$workingCopy.postProcessing,
@@ -5903,7 +5924,7 @@ import {
     const snapshot = $activeRenderSnapshot;
     if (
       !snapshot?.messageId || snapshot.threadId !== $activeThreadId || snapshot.messageId !== $activeVersionId ||
-      $currentView !== 'workbench' || !paramsWindowState.visible || $activeThreadVersionLoading ||
+      $currentView !== 'workbench' || $activeThreadVersionLoading ||
       !hasRenderableModel || hasSketchPreview || $workingCopy.dirty || $workingCopy.postProcessing ||
       snapshot.design.postProcessing || snapshot.design.sourceLanguage !== 'ecky' ||
       snapshot.artifactBundle.geometryBackend !== 'mesh'
@@ -5915,30 +5936,37 @@ import {
     };
   });
   const parameterGhostTargetKey = $derived(parameterGhostTarget?.key ?? null);
-  let parameterGhostAsset = $state.raw<{ key: string; url: string } | null>(null);
+  let parameterGhostAsset = $state.raw<{
+    key: string;
+    url: string;
+    parts: Array<{ partId: string; stlUrl: string }>;
+  } | null>(null);
   const parameterGhostStlUrl = $derived(
     parameterGhostAsset?.key === parameterGhostTargetKey ? parameterGhostAsset?.url ?? null : null,
   );
+  const parameterGhostParts = $derived(
+    parameterGhostAsset?.key === parameterGhostTargetKey ? parameterGhostAsset?.parts ?? [] : [],
+  );
   let parameterGhostStatus = $state<string | null>(null);
-  let parameterGhostDraftSignature: string | null = null;
-  let parameterGhostTimer: ReturnType<typeof setTimeout> | null = null;
-  let parameterGhostRequestId: string | null = null;
+  let activeGhostTarget: NonNullable<typeof parameterGhostTarget> | null = null;
 
-  function stopParameterGhostRequest() {
-    if (parameterGhostTimer !== null) clearTimeout(parameterGhostTimer);
-    parameterGhostTimer = null;
-    const requestId = parameterGhostRequestId;
-    parameterGhostRequestId = null;
-    if (requestId) {
+  const parameterGhostScheduler = createParameterGhostScheduler({
+    throttleMs: PARAMETER_GHOST_THROTTLE_MS,
+    dispatch: async (parameters, requestId) => {
+      const target = activeGhostTarget;
+      if (!target || parameterGhostTargetKey !== target.key) return;
+      await requestParameterGhost(target, parameters, requestId);
+    },
+    cancelRequest: (requestId) => {
       void cancelParameterGhost(requestId).catch((error: unknown) => {
         console.warn('Parameter preview cancellation failed:', formatBackendError(error));
       });
-    }
-  }
+    },
+  });
 
   function clearParameterGhost() {
-    stopParameterGhostRequest();
-    parameterGhostDraftSignature = null;
+    parameterGhostScheduler.cancel();
+    activeGhostTarget = null;
     parameterGhostAsset = null;
     parameterGhostStatus = null;
   }
@@ -5953,20 +5981,20 @@ import {
       clearParameterGhost();
       return;
     }
-
-    const signature = JSON.stringify(parameters);
-    if (signature === parameterGhostDraftSignature) return;
-    stopParameterGhostRequest();
-    parameterGhostDraftSignature = signature;
+    activeGhostTarget = target;
     parameterGhostStatus = 'Updating draft preview…';
-    parameterGhostTimer = setTimeout(() => {
-      parameterGhostTimer = null;
-      if (parameterGhostTargetKey !== target.key) return;
-      const requestId = crypto.randomUUID();
-      parameterGhostRequestId = requestId;
-      void requestParameterGhost(target, parameters, requestId);
-    }, PARAMETER_GHOST_DEBOUNCE_MS);
+    parameterGhostScheduler.schedule(parameters);
   }
+
+  $effect(() => {
+    const target = parameterGhostTarget;
+    const draft = $parameterDraft.draftParams;
+    if (!target || !draft || $manualApplyBusyStore) {
+      untrack(clearParameterGhost);
+      return;
+    }
+    untrack(() => stageParameterGhost(draft));
+  });
 
   async function requestParameterGhost(
     { key, threadId, targetMessageId }: NonNullable<typeof parameterGhostTarget>,
@@ -5974,33 +6002,51 @@ import {
     requestId: string,
   ) {
     try {
-      const { modelStlPath } = await previewParameterGhost({ threadId, targetMessageId, parameters, requestId });
-      if (parameterGhostRequestId !== requestId || parameterGhostTargetKey !== key) return;
-      if (modelStlPath) {
-        const stlUrl = toAssetUrl(modelStlPath);
+      const result = await previewParameterGhost({ threadId, targetMessageId, parameters, requestId });
+      if (!parameterGhostScheduler.isCurrentRequest(requestId) || parameterGhostTargetKey !== key) return;
+      if (result.modelStlPath) {
+        const stlUrl = toAssetUrl(result.modelStlPath);
+        const parts = (result.partMeshes ?? []).map((entry) => ({
+          partId: entry.partId,
+          stlUrl: toAssetUrl(entry.stlPath),
+        }));
         if (parameterGhostStlUrl === stlUrl) parameterGhostStatus = 'Draft preview';
-        parameterGhostAsset = { key, url: stlUrl };
+        parameterGhostAsset = { key, url: stlUrl, parts };
       } else {
         parameterGhostAsset = null;
         parameterGhostStatus = 'No geometry changed.';
       }
     } catch (error) {
-      if (parameterGhostRequestId === requestId && parameterGhostTargetKey === key) {
+      if (parameterGhostScheduler.isCurrentRequest(requestId) && parameterGhostTargetKey === key) {
         parameterGhostStatus = `Draft preview failed: ${formatBackendError(error)}`;
       }
-    } finally {
-      if (parameterGhostRequestId === requestId) parameterGhostRequestId = null;
     }
   }
 
   function handleParameterGhostLoad(url: string, error?: string) {
-    if (url !== parameterGhostStlUrl || parameterGhostTimer !== null || parameterGhostRequestId) return;
+    const expectedUrl = parameterGhostStlUrl ?? parameterGhostParts[0]?.stlUrl ?? null;
+    if (url !== expectedUrl || parameterGhostScheduler.isBusy()) return;
     parameterGhostStatus = error ? `Draft preview failed: ${error}` : 'Draft preview';
   }
 
-  function handleParamPanelChange(nextParams: DesignParams) {
+  async function handleParamPanelChange(nextParams: DesignParams) {
     clearParameterGhost();
-    return handleParamChange(nextParams, null, true);
+    const applied = await handleParamChange(nextParams, null, true);
+    if (applied !== false) {
+      parameterDraft.clearDraft();
+    }
+    return applied;
+  }
+
+  function cancelUnifiedParameterDraft() {
+    parameterDraft.clearDraft();
+    clearParameterGhost();
+    session.setStatus('Parameter edits discarded.');
+  }
+
+  async function applyUnifiedParameterDraft() {
+    if (!hasParameterDraft) return;
+    await handleParamPanelChange(sharedDraftParameters);
   }
 
   async function handleSemanticControlChange(primitiveId: string, value: ParamValue) {
@@ -6019,7 +6065,8 @@ import {
         value,
       });
       if (Object.keys(result.parameterPatch).length === 0) return;
-      stageParamChange(result.parameterPatch);
+      parameterDraft.patchDraft(result.parameterPatch);
+      session.setStatus('Parameters staged. Apply to rerender.');
     } catch (error) {
       session.setError(`Semantic Control Error: ${formatBackendError(error)}`);
     }
@@ -6379,8 +6426,14 @@ ${detail}`,
                 activeMeasurementCallout={(hasSketchPreview || activeNativeRender) ? null : activeMeasurementCallout}
                 previewTransforms={(hasSketchPreview || activeNativeRender) ? {} : effectivePreviewTransforms}
                 {parameterGhostStlUrl}
+                {parameterGhostParts}
+                {parameterGhostStatus}
+                hasParameterDraft={hasParameterDraft && !paramsWindowState.visible}
+                parameterDraftBusy={$manualApplyBusyStore}
                 onParameterGhostLoad={handleParameterGhostLoad}
-                viewerMode={!componentPlacementPreview && !hasSketchPreview && !activeNativeRender && paramsWindowState.visible ? viewerMode : 'orbit'}
+                onApplyParameterDraft={applyUnifiedParameterDraft}
+                onCancelParameterDraft={cancelUnifiedParameterDraft}
+                viewerMode={!componentPlacementPreview && !hasSketchPreview && !activeNativeRender ? viewerMode : 'orbit'}
                 onOverlayChange={handleSemanticControlChange}
                 onControlFocusChange={(focus) => focusedMeasurementControl = focus}
                 onSearchQueryChange={(query) => sharedContextSearchQuery = query}
@@ -6807,7 +6860,9 @@ ${detail}`,
       <div class="window-scroll-container">
         <ParamPanel
           uiSpec={effectiveUiSpec}
-          parameters={effectiveParameters}
+          parameters={effectiveBaseParameters}
+          externalDraftParams={$parameterDraft.draftParams}
+          onExternalDraftChange={(next) => parameterDraft.setDraft(next)}
           modelManifest={activeModelManifest}
           postProcessing={$workingCopy.postProcessing ?? null}
           artifactBundle={activeArtifactBundle}
@@ -6830,7 +6885,6 @@ ${detail}`,
           onSemanticChange={handleSemanticControlChange}
           onApplyMacroCode={(code) => applyManualCodeDraft(code)}
           onchange={handleParamPanelChange}
-          onPreviewDraft={parameterGhostTargetKey ? stageParameterGhost : undefined}
           {parameterGhostStatus}
           showParameterGhostControls={parameterGhostUiSupported}
           manualApplyBusy={$manualApplyBusyStore}

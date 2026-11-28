@@ -146,6 +146,8 @@
     onControlFocusChange,
     onchange,
     onPreviewDraft,
+    externalDraftParams = undefined,
+    onExternalDraftChange,
     parameterGhostStatus = null,
     showParameterGhostControls = false,
     onspecchange,
@@ -189,6 +191,8 @@
     onControlFocusChange?: (focus: MeasurementControlFocus | null) => void;
     onchange?: (params: DesignParams) => Promise<boolean | void> | boolean | void;
     onPreviewDraft?: (params: DesignParams | null) => void;
+    externalDraftParams?: DesignParams | null;
+    onExternalDraftChange?: (params: DesignParams | null) => void;
     parameterGhostStatus?: string | null;
     showParameterGhostControls?: boolean;
     onspecchange?: (uiSpec: UiSpec, params: DesignParams) => void;
@@ -598,6 +602,17 @@
     }
     lastIncomingParamsSignature = incomingParamsSignature;
     lastIncomingParamsSnapshot = { ...parameters };
+  });
+
+  $effect(() => {
+    if (externalDraftParams === undefined || editing) return;
+    const synced = externalDraftParams ?? parameters;
+    const syncedSignature = JSON.stringify(synced ?? {});
+    const currentSignature = JSON.stringify(untrack(() => effectiveLocalParams));
+    if (syncedSignature !== currentSignature) {
+      localParams = { ...synced };
+      pendingParamDrafts = {};
+    }
   });
 
   $effect(() => {
@@ -1187,6 +1202,7 @@
     pendingParamDrafts = {};
     if (undoBeforeParameterDraft) paramUndoStack = undoBeforeParameterDraft;
     undoBeforeParameterDraft = null;
+    onExternalDraftChange?.(null);
     onPreviewDraft?.(null);
     session.setStatus('Parameter edits discarded.');
   }
@@ -1204,6 +1220,7 @@
       recordParameterDraftHistory();
     }
     pendingParamDrafts = { ...pendingParamDrafts, [key]: value };
+    onExternalDraftChange?.(cloneParams(nextParams));
   }
 
   function update(key: string, value: ParamValue) {
@@ -1243,6 +1260,7 @@
     }
     localParams = nextParams;
     clearPendingParamDraft(key);
+    onExternalDraftChange?.(cloneParams(nextParams));
     session.setStatus('Parameters staged. Apply to rerender.');
   }
 
@@ -1300,6 +1318,7 @@
         }
         localParams = paramsToApply;
         pendingParamDrafts = {};
+        onExternalDraftChange?.(null);
       } catch (e: unknown) {
         console.error('ParamPanel: onchange failed', e);
         session.setError(`Apply Failed: ${formatBackendError(e)}`);

@@ -85,7 +85,13 @@
     activeMeasurementCallout = null,
     previewTransforms = {},
     parameterGhostStlUrl = null,
+    parameterGhostParts = [],
+    parameterGhostStatus = null,
+    hasParameterDraft = false,
+    parameterDraftBusy = false,
     onParameterGhostLoad,
+    onApplyParameterDraft,
+    onCancelParameterDraft,
     isGenerating = false,
     retainModelWhileLoading = false,
     hideModelWhileBusy = false,
@@ -163,7 +169,13 @@
     activeMeasurementCallout?: ResolvedMeasurementCallout | null;
     previewTransforms?: Record<string, ImportedPreviewTransform>;
     parameterGhostStlUrl?: string | null;
+    parameterGhostParts?: Array<{ partId: string; stlUrl: string }>;
+    parameterGhostStatus?: string | null;
+    hasParameterDraft?: boolean;
+    parameterDraftBusy?: boolean;
     onParameterGhostLoad?: (url: string, error?: string) => void;
+    onApplyParameterDraft?: () => void;
+    onCancelParameterDraft?: () => void;
     isGenerating?: boolean;
     retainModelWhileLoading?: boolean;
     hideModelWhileBusy?: boolean;
@@ -264,7 +276,11 @@
   } | null = null;
   let componentPlacementReady = $state(false);
   let componentPlacementPositionChosen = false;
-  let parameterGhostMesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial> | null = null;
+  let parameterGhostGroup: THREE.Group | null = null;
+  let parameterGhostEntries: Array<{
+    partId: string | null;
+    mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+  }> = [];
   let parameterGhostReady = $state(false);
   let modelRoot: THREE.Group | null = null;
   let runtimeMeshes: RuntimeMesh[] = [];
@@ -443,7 +459,7 @@
       componentPlacementPreview.frame.updateMatrixWorld(true);
       bounds.expandByObject(componentPlacementPreview.mesh);
     }
-    if (parameterGhostMesh?.visible) bounds.expandByObject(parameterGhostMesh);
+    if (parameterGhostGroup?.visible) bounds.expandByObject(parameterGhostGroup);
     if (bounds.isEmpty()) return;
     const clipPlanes = resolveViewerClipPlanes(bounds, camera.position);
     if (!Number.isFinite(clipPlanes.near) || !Number.isFinite(clipPlanes.far)) return;
@@ -509,7 +525,7 @@
     const preview = componentPlacementPreview;
     const helper = preview?.transform.getHelper();
     const gridPosition = preview ? viewerGrid?.position.clone() : null;
-    const ghost = parameterGhostMesh;
+    const ghost = parameterGhostGroup;
     const ghostWasVisible = ghost?.visible ?? false;
     if (preview && helper) {
       preview.frame.visible = false;
@@ -952,20 +968,42 @@
     }
   }
 
-  function alignParameterGhost() {
-    if (!parameterGhostMesh) return;
-    parameterGhostMesh.visible = Boolean(modelRoot);
-    if (modelRoot) {
-      parameterGhostMesh.position.copy(modelRoot.position);
-      parameterGhostMesh.quaternion.copy(modelRoot.quaternion);
+  function applyParameterGhostVisibility() {
+    if (!parameterGhostGroup) return;
+    const hiddenSet = new Set(hiddenPartIds || []);
+    const hasIsolation = Boolean(isolatedPartId);
+    for (const entry of parameterGhostEntries) {
+      const isHidden = Boolean(entry.partId && hiddenSet.has(entry.partId));
+      const isGhostSibling =
+        hasIsolation && Boolean(entry.partId) && entry.partId !== isolatedPartId;
+      const shouldHide = isHidden || (isGhostSibling && !ghostIsolatedSiblings);
+      entry.mesh.visible = !shouldHide;
+      const nextOpacity = isGhostSibling && ghostIsolatedSiblings && !isHidden ? 0.14 : 0.42;
+      if (entry.mesh.material.opacity !== nextOpacity) {
+        entry.mesh.material.opacity = nextOpacity;
+        entry.mesh.material.needsUpdate = true;
+      }
     }
   }
 
+  function alignParameterGhost() {
+    if (!parameterGhostGroup) return;
+    parameterGhostGroup.visible = Boolean(modelRoot);
+    if (modelRoot) {
+      parameterGhostGroup.position.copy(modelRoot.position);
+      parameterGhostGroup.quaternion.copy(modelRoot.quaternion);
+    }
+    applyParameterGhostVisibility();
+  }
+
   function disposeParameterGhost() {
-    parameterGhostMesh?.removeFromParent();
-    parameterGhostMesh?.geometry.dispose();
-    parameterGhostMesh?.material.dispose();
-    parameterGhostMesh = null;
+    parameterGhostGroup?.removeFromParent();
+    for (const entry of parameterGhostEntries) {
+      entry.mesh.geometry.dispose();
+      entry.mesh.material.dispose();
+    }
+    parameterGhostEntries = [];
+    parameterGhostGroup = null;
   }
 
   function clearParameterGhostMesh() {
@@ -974,36 +1012,83 @@
     updateCameraClipPlanes();
   }
 
-  async function loadParameterGhost(stlUrl: string, cancelled: () => boolean) {
+  const parameterGhostLoadSignature = $derived.by(() => {
+    if (parameterGhostParts.length > 0) {
+      return `parts:${parameterGhostParts.map((part) => `${part.partId}=${part.stlUrl}`).join('|')}`;
+    }
+    return parameterGhostStlUrl ? `single:${parameterGhostStlUrl}` : null;
+  });
+
+  async function loadParameterGhost(
+    signature: string,
+    stlUrl: string | null,
+    parts: Array<{ partId: string; stlUrl: string }>,
+    cancelled: () => boolean,
+  ) {
+    const reportUrl = stlUrl ?? parts[0]?.stlUrl ?? '';
+    const sources =
+      parts.length > 0
+        ? parts.map((part) => ({ partId: part.partId as string | null, url: part.stlUrl }))
+        : stlUrl
+          ? [{ partId: null as string | null, url: stlUrl }]
+          : [];
+    const loadedGeometries: Array<{ partId: string | null; geometry: THREE.BufferGeometry }> = [];
     try {
-      const geometry = await loadStlGeometry(new STLLoader(), stlUrl);
-      if (cancelled() || !scene || parameterGhostStlUrl !== stlUrl) {
-        geometry.dispose();
-        return;
+      const loader = new STLLoader();
+      for (const source of sources) {
+        const geometry = await loadStlGeometry(loader, source.url);
+        if (cancelled() || !scene || parameterGhostLoadSignature !== signature) {
+          geometry.dispose();
+          for (const item of loadedGeometries) item.geometry.dispose();
+          return;
+        }
+        geometry.computeBoundingBox();
+        if (!geometry.boundingBox || geometry.boundingBox.isEmpty()) {
+          geometry.dispose();
+          continue;
+        }
+        loadedGeometries.push({ partId: source.partId, geometry });
       }
-      geometry.computeBoundingBox();
-      if (!geometry.boundingBox || geometry.boundingBox.isEmpty()) {
-        geometry.dispose();
+      if (loadedGeometries.length === 0) {
         throw new Error('The parameter preview STL has no geometry.');
       }
-      const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-        color: 0xdca85c,
-        transparent: true,
-        opacity: 0.42,
-        depthTest: false,
-        depthWrite: false,
-      }));
-      mesh.renderOrder = 3;
+      if (!scene) {
+        for (const item of loadedGeometries) item.geometry.dispose();
+        return;
+      }
+      const group = new THREE.Group();
+      const entries: Array<{
+        partId: string | null;
+        mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+      }> = [];
+      for (const item of loadedGeometries) {
+        const mesh = new THREE.Mesh(
+          item.geometry,
+          new THREE.MeshStandardMaterial({
+            color: 0xdca85c,
+            transparent: true,
+            opacity: 0.42,
+            depthTest: false,
+            depthWrite: false,
+          }),
+        );
+        mesh.renderOrder = 3;
+        mesh.userData.partId = item.partId;
+        group.add(mesh);
+        entries.push({ partId: item.partId, mesh });
+      }
       disposeParameterGhost();
-      parameterGhostMesh = mesh;
+      parameterGhostGroup = group;
+      parameterGhostEntries = entries;
       alignParameterGhost();
-      scene.add(mesh);
+      scene.add(group);
       updateCameraClipPlanes();
       parameterGhostReady = true;
-      onParameterGhostLoad?.(stlUrl);
+      onParameterGhostLoad?.(reportUrl);
     } catch (error) {
-      if (!cancelled() && parameterGhostStlUrl === stlUrl) {
-        onParameterGhostLoad?.(stlUrl, error instanceof Error ? error.message : String(error));
+      for (const item of loadedGeometries) item.geometry.dispose();
+      if (!cancelled() && parameterGhostLoadSignature === signature) {
+        onParameterGhostLoad?.(reportUrl, error instanceof Error ? error.message : String(error));
       }
     }
   }
@@ -1090,14 +1175,16 @@
   });
 
   $effect(() => {
+    const signature = parameterGhostLoadSignature;
     const stlUrl = parameterGhostStlUrl;
-    if (!stlUrl) {
+    const parts = parameterGhostParts;
+    if (!signature) {
       untrack(clearParameterGhostMesh);
       return;
     }
     if (!scene) return;
     let cancelled = false;
-    void untrack(() => loadParameterGhost(stlUrl, () => cancelled));
+    void untrack(() => loadParameterGhost(signature, stlUrl, parts, () => cancelled));
     return () => { cancelled = true; };
   });
 
@@ -1119,6 +1206,7 @@
     void hiddenPartIds;
     void ghostIsolatedSiblings;
     applySelectionStyles();
+    applyParameterGhostVisibility();
     updateOverlayAnchor();
   });
 
@@ -3511,6 +3599,35 @@
               </label>
             {/each}
           </div>
+          {#if hasParameterDraft && (onApplyParameterDraft || onCancelParameterDraft)}
+            <div class="viewer-draft-bar" role="group" aria-label="Draft parameter actions">
+              {#if parameterGhostStatus}
+                <span class="viewer-draft-bar__status">{parameterGhostStatus}</span>
+              {/if}
+              <div class="viewer-draft-bar__actions">
+                {#if onApplyParameterDraft}
+                  <button
+                    type="button"
+                    class="viewer-draft-bar__btn viewer-draft-bar__apply"
+                    disabled={parameterDraftBusy}
+                    onclick={() => onApplyParameterDraft?.()}
+                  >
+                    APPLY
+                  </button>
+                {/if}
+                {#if onCancelParameterDraft}
+                  <button
+                    type="button"
+                    class="viewer-draft-bar__btn"
+                    disabled={parameterDraftBusy}
+                    onclick={() => onCancelParameterDraft?.()}
+                  >
+                    CANCEL
+                  </button>
+                {/if}
+              </div>
+            </div>
+          {/if}
         </div>
       {:else if showPartOverlay}
         <div
@@ -3623,6 +3740,35 @@
                 : 'Inspect-only part.'}
             </div>
           {/if}
+          {#if hasParameterDraft && (onApplyParameterDraft || onCancelParameterDraft)}
+            <div class="viewer-draft-bar" role="group" aria-label="Draft parameter actions">
+              {#if parameterGhostStatus}
+                <span class="viewer-draft-bar__status">{parameterGhostStatus}</span>
+              {/if}
+              <div class="viewer-draft-bar__actions">
+                {#if onApplyParameterDraft}
+                  <button
+                    type="button"
+                    class="viewer-draft-bar__btn viewer-draft-bar__apply"
+                    disabled={parameterDraftBusy}
+                    onclick={() => onApplyParameterDraft?.()}
+                  >
+                    APPLY
+                  </button>
+                {/if}
+                {#if onCancelParameterDraft}
+                  <button
+                    type="button"
+                    class="viewer-draft-bar__btn"
+                    disabled={parameterDraftBusy}
+                    onclick={() => onCancelParameterDraft?.()}
+                  >
+                    CANCEL
+                  </button>
+                {/if}
+              </div>
+            </div>
+          {/if}
         </div>
       {/if}
     </div>
@@ -3663,6 +3809,49 @@
 />
 
 <style>
+  .viewer-draft-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--bg-300);
+  }
+
+  .viewer-draft-bar__status {
+    font-size: 0.62rem;
+    color: var(--text-dim);
+    line-height: 1.3;
+  }
+
+  .viewer-draft-bar__actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .viewer-draft-bar__btn {
+    flex: 1;
+    padding: 4px 8px;
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    color: var(--text);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+  }
+
+  .viewer-draft-bar__apply {
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 20%, var(--bg-200));
+    color: var(--primary);
+  }
+
+  .viewer-draft-bar__btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
   .viewer-isolation-bar {
     position: absolute;
     left: 14px;
