@@ -9570,6 +9570,28 @@ int run(int argc, char** argv, ExecutionContext& context) {
         meshes.reserve(part_meshes.size());
         for (const ecky::PartMesh& mesh : part_meshes) meshes.push_back(&mesh);
         write_part_mesh_stl_file(out_dir / "model.stl", meshes);
+        if (parts.size() > 1) {
+            const fs::path parts_dir = out_dir / "parts";
+            fs::create_directories(parts_dir);
+            for (std::size_t i = 0; i < parts.size(); ++i) {
+                std::string name = parts[i].part_id;
+                if (name.empty()) {
+                    name = parts[i].label;
+                }
+                if (name.empty()) {
+                    name = "part_" + std::to_string(i);
+                }
+                write_part_mesh_stl_file(parts_dir / (name + ".stl"), {&part_meshes[i]});
+            }
+        }
+        const bool preview_mesh_only = std::all_of(parts.begin(), parts.end(), [](const ShapeRecord& part) {
+            return part.kind == ShapeRecord::Kind::Manifold;
+        });
+        const bool preview_has_manifold = std::any_of(parts.begin(), parts.end(), [](const ShapeRecord& part) {
+            return part.kind == ShapeRecord::Kind::Manifold;
+        });
+        std::cout << "ecky-preview-provenance " << (preview_mesh_only ? "1" : "0")
+                  << " " << (preview_has_manifold ? "1" : "0") << "\n";
         if (cache_transaction.has_value()) {
             cache_transaction->commit();
             evict_cache_to_budget(*cache_root);

@@ -1940,14 +1940,26 @@ pub async fn materialize_production_bundle(
         }
     }
 
+    let expected_lock = message
+        .artifact_bundle
+        .as_ref()
+        .and_then(|bundle| bundle.component_dependency_lock.clone());
+    let expected_mesh_digests = message
+        .artifact_bundle
+        .as_ref()
+        .and_then(|bundle| bundle.geometry_provenance.as_ref())
+        .map(|provenance| provenance.source_mesh_digests.clone())
+        .unwrap_or_default();
+
     let previous_manifest = message.model_manifest.as_ref();
-    let render = render_model_with_previous_manifest(
+    let render = render_model_with_component_lock(
         &design.macro_code,
         &design.initial_params,
         Some(design.macro_dialect.clone()),
         Some(design.geometry_backend),
         design.post_processing.as_ref(),
         previous_manifest,
+        expected_lock.as_ref(),
         state,
         app,
     );
@@ -1959,6 +1971,18 @@ pub async fn materialize_production_bundle(
         render,
     )
     .await?;
+    if !expected_mesh_digests.is_empty() {
+        let actual_mesh_digests = artifact_bundle
+            .geometry_provenance
+            .as_ref()
+            .map(|provenance| provenance.source_mesh_digests.as_slice())
+            .unwrap_or(&[]);
+        if actual_mesh_digests != expected_mesh_digests.as_slice() {
+            return Err(AppError::conflict(
+                "External STL input changed since this revision was saved; re-render or save a new revision before exporting.",
+            ));
+        }
+    }
     let generated_manifest =
         crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id)?;
     let model_manifest = crate::mcp::handlers::carry_forward_semantic_manifest(
@@ -2012,6 +2036,38 @@ pub async fn materialize_production_bundle(
         lease_id: None,
         ephemeral: false,
     })
+}
+
+/// Ensures exact production artifacts exist for `model_id`, lazily materializing
+/// the owning revision when it was committed with display-tier geometry.
+pub async fn ensure_production_bundle_for_model(
+    model_id: &str,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<String> {
+    let trimmed = model_id.trim();
+    if trimmed.is_empty() {
+        return Ok(model_id.to_string());
+    }
+    let Ok(bundle) = crate::model_runtime::read_artifact_bundle(app, trimmed) else {
+        return Ok(trimmed.to_string());
+    };
+    if !bundle.production_pending {
+        return Ok(trimmed.to_string());
+    }
+    let owner = {
+        let conn = state.db.lock().await;
+        crate::db::find_thread_message_by_model_id(&conn, trimmed)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+    };
+    let Some((thread_id, message_id)) = owner else {
+        return Err(AppError::validation(format!(
+            "Model '{}' has pending production artifacts but no owning saved revision was found.",
+            trimmed
+        )));
+    };
+    let materialized = materialize_production_bundle(thread_id, message_id, state, app).await?;
+    Ok(materialized.artifact_bundle.model_id)
 }
 
 pub async fn render_model_with_previous_manifest_silent(

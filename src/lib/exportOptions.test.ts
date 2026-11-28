@@ -105,6 +105,24 @@ test('buildExportChooserOptions enables STEP for display-tier pending production
   assert.match(stl?.subtitle ?? '', /production STL on demand/i);
 });
 
+test('buildExportChooserOptions disables STEP for mesh-native display-tier pending bundles', () => {
+  const bundle = sampleBundle(1);
+  bundle.sourceLanguage = 'ecky';
+  bundle.geometryBackend = 'mesh';
+  bundle.productionPending = true;
+  bundle.geometryProvenance = {
+    representation: 'meshNative',
+    sourceMeshDigests: ['sha256:abc'],
+  };
+
+  const step = buildExportChooserOptions(bundle, capabilities(true, 'Direct OCCT ready')).find(
+    (option) => option.id === 'step',
+  );
+
+  assert.equal(step?.disabled, true);
+  assert.match(step?.disabledReason ?? '', /mesh-only geometry/i);
+});
+
 test('buildExportChooserOptions enables STEP when a STEP artifact exists', () => {
   const bundle = sampleBundle(1);
   bundle.exportArtifacts = [

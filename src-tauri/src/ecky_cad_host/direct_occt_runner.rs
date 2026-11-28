@@ -443,6 +443,57 @@ pub(crate) fn run_plan_step_stl_with_mode(
     run_plan_step_stl_with_mode_and_bindings(plan, &[], output_dir, app, enabled)
 }
 
+fn scan_part_stl_paths(plan: &OcctPlan, output_dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut part_stl_paths = Vec::new();
+    let parts_dir = output_dir.join("parts");
+    if parts_dir.is_dir() {
+        for part in plan.parts.iter() {
+            let key = if part.key.trim().is_empty() {
+                "body".to_string()
+            } else {
+                part.key.clone()
+            };
+            let candidate = parts_dir.join(format!("{}.stl", key));
+            if candidate.is_file() {
+                part_stl_paths.push((key, candidate));
+            }
+        }
+    }
+    part_stl_paths
+}
+
+fn parse_preview_provenance(stdout: &[u8]) -> Option<(bool, bool)> {
+    for line in std::str::from_utf8(stdout).ok()?.lines() {
+        let mut fields = line.split_ascii_whitespace();
+        if fields.next()? != "ecky-preview-provenance" {
+            continue;
+        }
+        let mesh_only = match fields.next()? {
+            "1" | "true" => true,
+            "0" | "false" => false,
+            _ => continue,
+        };
+        let has_manifold = match fields.next()? {
+            "1" | "true" => true,
+            "0" | "false" => false,
+            _ => continue,
+        };
+        return Some((mesh_only, has_manifold));
+    }
+    None
+}
+
+struct RunnerInvocationMeta {
+    source_mesh_digests: Vec<String>,
+    preview_mesh_only: Option<bool>,
+    preview_has_manifold: Option<bool>,
+}
+
+pub(crate) struct PreviewMeshOutput {
+    pub model_stl_path: PathBuf,
+    pub part_meshes: Vec<(String, PathBuf)>,
+}
+
 fn run_plan_step_stl_with_mode_and_bindings(
     plan: &OcctPlan,
     authored_shape_bindings: &[OcctAuthoredShapeBinding],
@@ -451,7 +502,7 @@ fn run_plan_step_stl_with_mode_and_bindings(
     enabled: bool,
 ) -> AppResult<Option<super::direct_occt_sdk::NativeExportOutcome>> {
     let output_dir = output_dir.as_ref();
-    let Some(source_mesh_digests) = invoke_runner_plan(
+    let Some(meta) = invoke_runner_plan(
         plan,
         authored_shape_bindings,
         output_dir,
@@ -464,23 +515,7 @@ fn run_plan_step_stl_with_mode_and_bindings(
     };
     let stl_path = output_dir.join(MODEL_STL_FILE_NAME);
     let stage_report = read_runner_stage_report(output_dir)?;
-
-    // Scan for per-part binary STL files written by the runner into parts/.
-    let mut part_stl_paths = Vec::new();
-    let parts_dir = output_dir.join("parts");
-    if parts_dir.is_dir() {
-        for part in plan.parts.iter() {
-            let key = if part.key.trim().is_empty() {
-                "body".to_string()
-            } else {
-                part.key.clone()
-            };
-            let candidate = parts_dir.join(format!("{}.stl", key));
-            if candidate.is_file() {
-                part_stl_paths.push((key, candidate));
-            }
-        }
-    }
+    let part_stl_paths = scan_part_stl_paths(plan, output_dir);
 
     let step_path = output_dir.join(MODEL_STEP_FILE_NAME);
     Ok(Some(if step_path.is_file() {
@@ -489,13 +524,13 @@ fn run_plan_step_stl_with_mode_and_bindings(
             stl_path,
             part_stl_paths,
             tessellated_step: stage_report.tessellated_step_part_count.unwrap_or(0) > 0,
-            source_mesh_digests,
+            source_mesh_digests: meta.source_mesh_digests,
         }
     } else {
         super::direct_occt_sdk::NativeExportOutcome::MeshExported {
             stl_path,
             part_stl_paths,
-            source_mesh_digests,
+            source_mesh_digests: meta.source_mesh_digests,
         }
     }))
 }
@@ -507,7 +542,7 @@ pub(crate) fn run_plan_display_stl_if_available_with_bindings(
     app: &dyn PathResolver,
 ) -> AppResult<Option<super::direct_occt_sdk::NativeExportOutcome>> {
     let output_dir = output_dir.as_ref();
-    let Some(source_mesh_digests) = invoke_runner_plan(
+    let Some(meta) = invoke_runner_plan(
         plan,
         authored_shape_bindings,
         output_dir,
@@ -519,26 +554,18 @@ pub(crate) fn run_plan_display_stl_if_available_with_bindings(
         return Ok(None);
     };
     let stl_path = output_dir.join(MODEL_STL_FILE_NAME);
-    let mut part_stl_paths = Vec::new();
-    let parts_dir = output_dir.join("parts");
-    if parts_dir.is_dir() {
-        for part in plan.parts.iter() {
-            let key = if part.key.trim().is_empty() {
-                "body".to_string()
-            } else {
-                part.key.clone()
-            };
-            let candidate = parts_dir.join(format!("{}.stl", key));
-            if candidate.is_file() {
-                part_stl_paths.push((key, candidate));
-            }
-        }
-    }
+    let part_stl_paths = scan_part_stl_paths(plan, output_dir);
+    let has_manifold = meta
+        .preview_has_manifold
+        .unwrap_or(!meta.source_mesh_digests.is_empty());
+    let mesh_only = meta.preview_mesh_only.unwrap_or(false);
     Ok(Some(
-        super::direct_occt_sdk::NativeExportOutcome::MeshExported {
+        super::direct_occt_sdk::NativeExportOutcome::DisplayExported {
             stl_path,
             part_stl_paths,
-            source_mesh_digests,
+            mesh_only,
+            has_manifold,
+            source_mesh_digests: meta.source_mesh_digests,
         },
     ))
 }
@@ -554,7 +581,7 @@ pub(crate) fn run_plan_preview_mesh(
     authored_shape_bindings: &[OcctAuthoredShapeBinding],
     output_dir: &Path,
     app: &dyn PathResolver,
-) -> AppResult<PathBuf> {
+) -> AppResult<PreviewMeshOutput> {
     invoke_runner_plan(
         plan,
         authored_shape_bindings,
@@ -571,7 +598,20 @@ pub(crate) fn run_plan_preview_mesh(
             "Could not remove the temporary preview plan: {error}"
         ))
     })?;
-    Ok(output_dir.join(MODEL_STL_FILE_NAME))
+    let model_stl_path = output_dir.join(MODEL_STL_FILE_NAME);
+    let mut part_meshes = scan_part_stl_paths(plan, output_dir);
+    if part_meshes.is_empty() && plan.parts.len() == 1 {
+        let key = if plan.parts[0].key.trim().is_empty() {
+            "body".to_string()
+        } else {
+            plan.parts[0].key.clone()
+        };
+        part_meshes.push((key, model_stl_path.clone()));
+    }
+    Ok(PreviewMeshOutput {
+        model_stl_path,
+        part_meshes,
+    })
 }
 
 fn invoke_runner_plan(
@@ -581,7 +621,7 @@ fn invoke_runner_plan(
     app: &dyn PathResolver,
     enabled: bool,
     output_kind: PlanOutput,
-) -> AppResult<Option<Vec<String>>> {
+) -> AppResult<Option<RunnerInvocationMeta>> {
     if !enabled {
         return Ok(None);
     }
@@ -598,7 +638,7 @@ fn invoke_runner_plan(
                 .to_string(),
         ));
     };
-    let source_mesh_digests = serialized_plan
+    let mut source_mesh_digests_set = serialized_plan
         .parts
         .iter()
         .flat_map(|part| &part.commands)
@@ -606,9 +646,23 @@ fn invoke_runner_plan(
         .filter_map(|command| command.args.get(2))
         .filter_map(|arg| arg.value.as_str())
         .map(str::to_string)
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+        .collect::<std::collections::BTreeSet<_>>();
+    for part in &serialized_plan.parts {
+        for command in &part.commands {
+            if command.op != "import-stl" {
+                continue;
+            }
+            let Some(path) = command.args.first().and_then(|arg| arg.value.as_str()) else {
+                continue;
+            };
+            if let Ok(bytes) = fs::read(path) {
+                let mut hasher = Sha256::new();
+                hasher.update(bytes);
+                source_mesh_digests_set.insert(format!("stl-sha256:{:x}", hasher.finalize()));
+            }
+        }
+    }
+    let source_mesh_digests = source_mesh_digests_set.into_iter().collect::<Vec<_>>();
     let serialized_plan =
         runner_plan_value_with_bindings(&serialized_plan, authored_shape_bindings)?;
     let plan_json = serde_json::to_string_pretty(&serialized_plan).map_err(|err| {
@@ -709,7 +763,15 @@ fn invoke_runner_plan(
             stl_path.display()
         )));
     }
-    Ok(Some(source_mesh_digests))
+    let (preview_mesh_only, preview_has_manifold) = match parse_preview_provenance(&output.stdout) {
+        Some((mesh_only, has_manifold)) => (Some(mesh_only), Some(has_manifold)),
+        None => (None, None),
+    };
+    Ok(Some(RunnerInvocationMeta {
+        source_mesh_digests,
+        preview_mesh_only,
+        preview_has_manifold,
+    }))
 }
 
 pub(crate) fn discover_direct_occt_runner_with_mode(

@@ -695,8 +695,10 @@ pub(crate) fn render_core_program_runtime_bundle_with_tier(
             part_stl_paths,
             if tessellated_step {
                 direct_occt_provenance(GeometryRepresentation::Hybrid, source_mesh_digests)
-            } else {
+            } else if source_mesh_digests.is_empty() {
                 direct_occt_analytic_brep_provenance()
+            } else {
+                direct_occt_provenance(GeometryRepresentation::AnalyticBrep, source_mesh_digests)
             },
         ),
         NativeExportOutcome::MeshExported {
@@ -707,10 +709,26 @@ pub(crate) fn render_core_program_runtime_bundle_with_tier(
             None,
             stl_path,
             part_stl_paths,
-            if tier == DirectOcctRenderTier::Display {
+            direct_occt_provenance(GeometryRepresentation::MeshNative, source_mesh_digests),
+        ),
+        NativeExportOutcome::DisplayExported {
+            stl_path,
+            part_stl_paths,
+            mesh_only,
+            has_manifold,
+            source_mesh_digests,
+        } => (
+            None,
+            stl_path,
+            part_stl_paths,
+            if mesh_only {
+                direct_occt_provenance(GeometryRepresentation::MeshNative, source_mesh_digests)
+            } else if has_manifold {
+                direct_occt_provenance(GeometryRepresentation::Hybrid, source_mesh_digests)
+            } else if source_mesh_digests.is_empty() {
                 direct_occt_analytic_brep_provenance()
             } else {
-                direct_occt_provenance(GeometryRepresentation::MeshNative, source_mesh_digests)
+                direct_occt_provenance(GeometryRepresentation::AnalyticBrep, source_mesh_digests)
             },
         ),
         NativeExportOutcome::Blocked { blockers } => {
@@ -1973,7 +1991,9 @@ fn write_cached_direct_occt_geometry(
             part_stl_paths,
             source_mesh_digests,
         } => (None, stl_path, part_stl_paths, false, source_mesh_digests),
-        NativeExportOutcome::Blocked { .. } => return Ok(()),
+        NativeExportOutcome::DisplayExported { .. } | NativeExportOutcome::Blocked { .. } => {
+            return Ok(())
+        }
     };
     let topology_path = topology_artifact::topology_path(bundle_dir);
     let topology_name = topology_file_name(&topology_path)?;

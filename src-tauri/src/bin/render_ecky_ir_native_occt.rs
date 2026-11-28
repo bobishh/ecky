@@ -69,7 +69,8 @@ fn run() -> Result<(), String> {
             println!("stl={}", stl_path.display());
             Ok(())
         }
-        direct_occt_sdk::NativeExportOutcome::MeshExported { stl_path, .. } => {
+        direct_occt_sdk::NativeExportOutcome::MeshExported { stl_path, .. }
+        | direct_occt_sdk::NativeExportOutcome::DisplayExported { stl_path, .. } => {
             println!("stl={}", stl_path.display());
             Ok(())
         }

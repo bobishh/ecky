@@ -27,7 +27,11 @@ export function getStepExportPath(bundle: ArtifactBundle | null | undefined): st
 }
 
 function stepExportSubtitle(bundle: ArtifactBundle | null | undefined): string {
-  if (bundle?.productionPending && !getStepExportPath(bundle)) {
+  if (
+    bundle?.productionPending &&
+    !getStepExportPath(bundle) &&
+    bundle.geometryProvenance?.representation !== 'meshNative'
+  ) {
     return 'Materializes exact BRep STEP on demand when exported.';
   }
   const stepArtifact = bundle?.exportArtifacts?.find((artifact) => artifact.format === 'step');
@@ -51,6 +55,9 @@ function stepExportDisabledReason(
   if (!bundle) return 'No rendered model is available.';
 
   if (bundle.productionPending && bundle.geometryBackend === 'mesh') {
+    if (bundle.geometryProvenance?.representation === 'meshNative') {
+      return 'STEP unavailable for Ecky Native render: mesh-only geometry has no analytic BRep.';
+    }
     const directOcct = runtimeCapabilities?.directOcct ?? null;
     if (directOcct && !directOcct.available) {
       return `STEP unavailable for Ecky Native render: ${directOcct.detail || 'Direct OCCT unavailable.'}`;

@@ -5969,9 +5969,15 @@ async fn resolve_mcp_fem_request(
             Some(target.message_id.clone()),
         )?
     };
-    let model_id = editable.model_id().ok_or_else(|| {
+    let raw_model_id = editable.model_id().ok_or_else(|| {
         AppError::validation(format!("{operation} requires a rendered model artifact."))
     })?;
+    let model_id = crate::services::render::ensure_production_bundle_for_model(
+        &raw_model_id,
+        &server.state,
+        server.app.as_ref(),
+    )
+    .await?;
     let lease_target = McpTargetRef {
         thread_id: editable.thread_id,
         message_id: editable.message_id,

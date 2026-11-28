@@ -2934,6 +2934,29 @@ pub fn get_latest_version_artifact_bundles(conn: &Connection) -> SqlResult<Vec<A
     Ok(bundles)
 }
 
+pub fn find_thread_message_by_model_id(
+    conn: &Connection,
+    model_id: &str,
+) -> SqlResult<Option<(String, String)>> {
+    let found = conn
+        .query_row(
+            "SELECT m.thread_id, m.id
+             FROM messages m
+             INNER JOIN payload_projections p
+               ON p.owner_kind = 'message' AND p.owner_id = m.id
+             WHERE p.model_id = ?1
+               AND m.deleted_at IS NULL
+               AND m.role = 'assistant'
+               AND m.status != 'discarded'
+             ORDER BY m.timestamp DESC, m.rowid DESC
+             LIMIT 1",
+            [model_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    Ok(found)
+}
+
 pub fn get_thread_message_version(
     conn: &Connection,
     thread_id: &str,

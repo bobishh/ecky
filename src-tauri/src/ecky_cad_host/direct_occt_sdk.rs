@@ -166,6 +166,13 @@ pub enum NativeExportOutcome {
         part_stl_paths: Vec<(String, PathBuf)>,
         source_mesh_digests: Vec<String>,
     },
+    DisplayExported {
+        stl_path: PathBuf,
+        part_stl_paths: Vec<(String, PathBuf)>,
+        mesh_only: bool,
+        has_manifold: bool,
+        source_mesh_digests: Vec<String>,
+    },
     Blocked {
         blockers: Vec<String>,
     },

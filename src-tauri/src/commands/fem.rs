@@ -435,8 +435,14 @@ pub async fn run_fem_study_intent(
         .map_err(|_| AppError::internal("FEM compute configuration lock was poisoned."))?
         .fem_compute
         .clone();
-    let request = fem_study_request_from_intent(input, &compute, next_fem_run_job_id());
+    let mut request = fem_study_request_from_intent(input, &compute, next_fem_run_job_id());
     validate_job_id(&request.job_id)?;
+    request.model_id = crate::services::render::ensure_production_bundle_for_model(
+        &request.model_id,
+        &state,
+        &app,
+    )
+    .await?;
 
     let analysis_name = request.analysis_name.clone();
     let expected_duration_ms = request.control.maximum_runtime_ms;
@@ -567,11 +573,17 @@ pub(crate) fn validate_fem_study_with_resolver(
 #[tauri::command]
 #[specta::specta]
 pub async fn run_fem_study(
-    request: FemStudyRequest,
+    mut request: FemStudyRequest,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<FemRunResponse> {
     validate_job_id(&request.job_id)?;
+    request.model_id = crate::services::render::ensure_production_bundle_for_model(
+        &request.model_id,
+        &state,
+        &app,
+    )
+    .await?;
     let analysis_name = request.analysis_name.clone();
     let expected_duration_ms = request.control.maximum_runtime_ms;
     let cancellation = Arc::new(AtomicBool::new(false));
@@ -655,11 +667,17 @@ pub async fn run_fem_study(
 #[tauri::command]
 #[specta::specta]
 pub async fn preview_fem_mesh(
-    request: FemStudyRequest,
+    mut request: FemStudyRequest,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<FemMeshPreviewResponse> {
     validate_job_id(&request.job_id)?;
+    request.model_id = crate::services::render::ensure_production_bundle_for_model(
+        &request.model_id,
+        &state,
+        &app,
+    )
+    .await?;
     let cancellation = Arc::new(AtomicBool::new(false));
     {
         let mut jobs = state.fem_cancellations.lock().await;
@@ -701,8 +719,14 @@ pub async fn preview_fem_mesh_intent(
         .map_err(|_| AppError::internal("FEM compute configuration lock was poisoned."))?
         .fem_compute
         .clone();
-    let request = fem_study_request_from_intent(input, &compute, next_fem_job_id("preview"));
+    let mut request = fem_study_request_from_intent(input, &compute, next_fem_job_id("preview"));
     validate_job_id(&request.job_id)?;
+    request.model_id = crate::services::render::ensure_production_bundle_for_model(
+        &request.model_id,
+        &state,
+        &app,
+    )
+    .await?;
     let cancellation = Arc::new(AtomicBool::new(false));
     {
         let mut jobs = state.fem_cancellations.lock().await;
@@ -761,6 +785,12 @@ pub async fn run_fem_topology_optimization(
 ) -> AppResult<FemTopologyRunResponse> {
     let compute = state.config.lock().unwrap().fem_compute.clone();
     apply_fem_compute_policy(&compute, &mut request.study);
+    request.study.model_id = crate::services::render::ensure_production_bundle_for_model(
+        &request.study.model_id,
+        &state,
+        &app,
+    )
+    .await?;
     let runtime_policy = FemTopologyRuntimePolicy::from_compute(&compute);
     let cancellation = Arc::new(AtomicBool::new(false));
     {
@@ -1662,11 +1692,17 @@ fn sha256_text(value: &str) -> String {
 #[tauri::command]
 #[specta::specta]
 pub async fn run_fem_convergence(
-    request: FemConvergenceRequest,
+    mut request: FemConvergenceRequest,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<FemConvergenceResponse> {
     validate_convergence_request(&request)?;
+    request.study.model_id = crate::services::render::ensure_production_bundle_for_model(
+        &request.study.model_id,
+        &state,
+        &app,
+    )
+    .await?;
     let job_id = request.study.job_id.clone();
     let analysis_name = request.study.analysis_name.clone();
     let level_count = request.mesh_sizes_mm.len() as u64;
